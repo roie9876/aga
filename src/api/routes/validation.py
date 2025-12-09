@@ -1,8 +1,11 @@
 """Validation API endpoints."""
+import uuid
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from typing import Optional
 
 from src.models import ValidationResponse, ValidationResult
+from src.services import get_plan_extractor, get_validation_engine
+from src.azure import get_blob_client, get_cosmos_client
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -39,16 +42,89 @@ async def validate_plan(
                project_id=project_id, 
                filename=file.filename)
     
-    # TODO: Implement validation logic
-    # 1. Upload to Blob Storage
-    # 2. Extract data with GPT-5.1 (reasoning model)
-    # 3. Run validation engine
-    # 4. Store results in Cosmos DB
+    try:
+        # Generate unique validation ID
+        validation_id = str(uuid.uuid4())
+        blob_name = f"{project_id}/{validation_id}/{file.filename}"
+        display_name = plan_name or file.filename
+        
+        # Read file content
+        file_content = await file.read()
+        
+        # 1. Upload to Blob Storage
+        logger.info("Uploading plan to Blob Storage", blob_name=blob_name)
+        blob_client = get_blob_client()
+        from io import BytesIO
+        plan_blob_url = await blob_client.upload_blob(
+            blob_name=blob_name,
+            data=BytesIO(file_content)
+        )
+        
+        # 2. Extract data with GPT-5.1
+        logger.info("Extracting data with GPT-5.1", validation_id=validation_id)
+        extractor = get_plan_extractor()
+        extracted_data = await extractor.extract_from_plan(
+            file_bytes=file_content,
+            file_name=file.filename
+        )
+    logger.info("Fetching validation result", validation_id=validation_id)
     
-    raise HTTPException(
-        status_code=501,
-        detail="Validation endpoint not yet implemented"
-    )
+    try:
+        cosmos_client = get_cosmos_client()
+        
+        # Query by id across all partitions
+        query = "SELECT * FROM c WHERE c.id = @validation_id"
+        parameters = [{"name": "@validation_id", "value": validation_id}]
+        
+        results = await cosmos_client.query_items(query, parameters)
+        
+        if not results:
+            raise HTTPException(
+                status_code=404,
+                detail=f"תוצאת בדיקה לא נמצאה: {validation_id}"
+            )
+        
+        result_dict = results[0]
+        validation_result = ValidationResult(**result_dict)
+        
+        logger.info("Validation result retrieved", validation_id=validation_id)
+        return validation_result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to retrieve validation result", error=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail=f"אירעה שגיאה בשליפת התוצאות: {str(e)}"
+        )       plan_name=display_name,
+            plan_blob_url=plan_blob_url,
+            extracted_data=extracted_data
+        )
+        
+        # 4. Store results in Cosmos DB
+        logger.info("Storing results in Cosmos DB", validation_id=validation_id)
+        cosmos_client = get_cosmos_client()
+        result_dict = validation_result.model_dump()
+        result_dict["project_id"] = project_id  # Ensure partition key is set
+        await cosmos_client.create_item(result_dict)
+        
+        logger.info("Validation completed successfully", 
+                   validation_id=validation_id,
+                   status=validation_result.status.value)
+        
+        return ValidationResponse(
+            success=True,
+            validation_id=validation_id,
+            message=f"תוכנית נבדקה בהצלחה. סטטוס: {validation_result.status.value}"
+        )
+        
+    except Exception as e:
+        logger.error("Validation failed", error=str(e), project_id=project_id)
+        raise HTTPException(
+            status_code=500,
+            detail=f"אירעה שגיאה בבדיקת התוכנית: {str(e)}"
+        )
 
 
 @router.get("/results/{validation_id}", response_model=ValidationResult)
@@ -61,18 +137,78 @@ async def get_validation_result(validation_id: str):
     Returns:
         Complete ValidationResult with all violations and data
         
-    Raises:
-        HTTPException: If validation not found
-    """
-    logger.info("Fetching validation result", validation_id=validation_id)
+    logger.info("Listing validations for project", project_id=project_id)
     
-    # TODO: Retrieve from Cosmos DB
+    try:
+        cosmos_client = get_cosmos_client()
+        
+        # Query by project_id partition key
+        query = "SELECT c.id, c.plan_name, c.status, c.created_at, c.failed_checks FROM c WHERE c.project_id = @project_id ORDER BY c.created_at DESC"
+        parameters = [{"name": "@project_id", "value": project_id}]
+        
+        results = await cosmos_client.query_items(query, parameters)
+        
+        logger.info("Retrieved validations for project", 
+                   project_id=project_id,
+                   count=len(results))
+        
+        return {
+            "project_id": project_id,
+            "validation_count": len(results),
+            "validations": results
+        }
+        
+    except Exception as e:
+        logger.error("Failed to list validations", error=str(e))
+    logger.info("Deleting validation result", validation_id=validation_id)
     
-    raise HTTPException(
-        status_code=501,
-        detail="Get results endpoint not yet implemented"
-    )
-
+    try:
+        cosmos_client = get_cosmos_client()
+        blob_client = get_blob_client()
+        
+        # First, get the validation result to find blob URL and partition key
+        query = "SELECT * FROM c WHERE c.id = @validation_id"
+        parameters = [{"name": "@validation_id", "value": validation_id}]
+        results = await cosmos_client.query_items(query, parameters)
+        
+        if not results:
+            raise HTTPException(
+                status_code=404,
+                detail=f"תוצאת בדיקה לא נמצאה: {validation_id}"
+            )
+        
+        result = results[0]
+        project_id = result["project_id"]
+        plan_blob_url = result.get("plan_blob_url")
+        
+        # Delete from Cosmos DB
+        deleted = await cosmos_client.delete_item(validation_id, project_id)
+        
+        # Delete blob if exists
+        if plan_blob_url:
+            try:
+                blob_name = plan_blob_url.split("/")[-3:]  # Extract from URL
+                blob_name = "/".join(blob_name)
+                await blob_client.delete_blob(blob_name)
+                logger.info("Deleted plan blob", blob_name=blob_name)
+            except Exception as blob_error:
+                logger.warning("Failed to delete blob", error=str(blob_error))
+        
+        logger.info("Validation result deleted", validation_id=validation_id)
+        
+        return {
+            "success": True,
+            "message": f"תוצאת בדיקה נמחקה בהצלחה: {validation_id}"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to delete validation result", error=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail=f"אירעה שגיאה במחיקת התוצאה: {str(e)}"
+        )
 
 @router.get("/projects/{project_id}/validations")
 async def list_project_validations(project_id: str):
