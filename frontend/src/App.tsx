@@ -65,7 +65,17 @@ function App() {
         throw new Error(errorData.detail || 'Validation failed');
       }
 
-      const data: ValidationResponse = await response.json();
+      const uploadResponse = await response.json();
+      const validationId = uploadResponse.validation_id;
+
+      // Fetch the full validation results
+      const resultsResponse = await fetch(`${API_BASE_URL}/api/v1/results/${validationId}`);
+      
+      if (!resultsResponse.ok) {
+        throw new Error('Failed to fetch validation results');
+      }
+
+      const data: ValidationResponse = await resultsResponse.json();
       setResult(data);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An error occurred');
@@ -224,38 +234,45 @@ function App() {
             {result && (
               <div className="space-y-6">
                 {/* Overall Status */}
-                <div className={`p-4 rounded-lg border-2 ${getOverallStatusColor(result.overall_status)}`}>
+                <div className={`p-4 rounded-lg border-2 ${getOverallStatusColor(result.status)}`}>
                   <h3 className="font-bold text-lg mb-1">
-                    Overall Status: {result.overall_status.toUpperCase()}
+                    Overall Status: {result.status.toUpperCase()}
                   </h3>
-                  <p className="text-sm">Validation ID: {result.validation_id}</p>
+                  <p className="text-sm">
+                    {result.passed_checks}/{result.total_checks} checks passed
+                  </p>
+                  <p className="text-xs text-gray-600 mt-1">ID: {result.validation_id}</p>
                 </div>
 
                 {/* Extracted Data */}
                 <div className="border border-gray-200 rounded-lg p-4">
                   <h3 className="font-semibold text-lg mb-3">Extracted Measurements</h3>
                   <div className="space-y-2 text-sm">
-                    {result.extracted_data.wall_thickness && (
+                    {result.extracted_data.external_wall_count && (
+                      <div className="flex justify-between">
+                        <span className="text-gray-600">External Walls:</span>
+                        <span className="font-medium">{result.extracted_data.external_wall_count}</span>
+                      </div>
+                    )}
+                    {result.extracted_data.wall_thickness_cm && result.extracted_data.wall_thickness_cm.length > 0 && (
                       <div className="flex justify-between">
                         <span className="text-gray-600">Wall Thickness:</span>
-                        <span className="font-medium">{result.extracted_data.wall_thickness} cm</span>
+                        <span className="font-medium">{result.extracted_data.wall_thickness_cm.join(', ')} cm</span>
                       </div>
                     )}
-                    {result.extracted_data.wall_count && (
+                    {result.extracted_data.room_height_m && (
                       <div className="flex justify-between">
-                        <span className="text-gray-600">Wall Count:</span>
-                        <span className="font-medium">{result.extracted_data.wall_count}</span>
+                        <span className="text-gray-600">Room Height:</span>
+                        <span className="font-medium">{result.extracted_data.room_height_m}m</span>
                       </div>
                     )}
-                    {result.extracted_data.room_dimensions && (
+                    {result.extracted_data.room_volume_m3 && (
                       <div className="flex justify-between">
-                        <span className="text-gray-600">Room Dimensions:</span>
-                        <span className="font-medium">
-                          {result.extracted_data.room_dimensions.length}m × {result.extracted_data.room_dimensions.width}m
-                        </span>
+                        <span className="text-gray-600">Room Volume:</span>
+                        <span className="font-medium">{result.extracted_data.room_volume_m3}m³</span>
                       </div>
                     )}
-                    {result.extracted_data.confidence_score && (
+                    {result.extracted_data.confidence_score !== undefined && (
                       <div className="flex justify-between">
                         <span className="text-gray-600">Confidence:</span>
                         <span className="font-medium">{(result.extracted_data.confidence_score * 100).toFixed(1)}%</span>
@@ -267,46 +284,54 @@ function App() {
                 {/* Validation Results */}
                 <div className="border border-gray-200 rounded-lg p-4">
                   <h3 className="font-semibold text-lg mb-3">Validation Checks</h3>
-                  <div className="space-y-3 max-h-96 overflow-y-auto">
-                    {result.validation_results.map((validation, idx) => (
-                      <div
-                        key={idx}
-                        className={`p-3 rounded-lg border ${
-                          validation.passed
-                            ? 'bg-green-50 border-green-200'
-                            : 'bg-red-50 border-red-200'
-                        }`}
-                      >
-                        <div className="flex items-start gap-3">
-                          {getStatusIcon(validation.passed)}
-                          <div className="flex-1">
-                            <p className="font-medium text-sm mb-1" dir="rtl">
-                              {validation.description}
-                            </p>
-                            {validation.message && (
-                              <p className="text-xs text-gray-600 mt-1" dir="rtl">
-                                {validation.message}
+                  {result.violations.length === 0 ? (
+                    <div className="text-center py-8 text-green-600">
+                      <CheckCircle className="w-12 h-12 mx-auto mb-2" />
+                      <p className="font-medium">כל הבדיקות עברו בהצלחה!</p>
+                      <p className="text-sm text-gray-600 mt-1">All validation checks passed</p>
+                    </div>
+                  ) : (
+                    <div className="space-y-3 max-h-96 overflow-y-auto">
+                      {result.violations.map((violation, idx) => (
+                        <div
+                          key={idx}
+                          className="p-3 rounded-lg border bg-red-50 border-red-200"
+                        >
+                          <div className="flex items-start gap-3">
+                            <XCircle className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" />
+                            <div className="flex-1">
+                              <p className="font-medium text-sm mb-1" dir="rtl">
+                                {violation.description}
                               </p>
-                            )}
-                            <div className="flex gap-4 mt-2 text-xs text-gray-500">
-                              {validation.actual_value !== undefined && (
-                                <span>Actual: {validation.actual_value}</span>
+                              {violation.message && (
+                                <p className="text-xs text-gray-600 mt-1" dir="rtl">
+                                  {violation.message}
+                                </p>
                               )}
-                              {validation.expected_value !== undefined && (
-                                <span>Expected: {validation.expected_value}</span>
-                              )}
+                              <div className="flex gap-4 mt-2 text-xs text-gray-500">
+                                <span className="px-2 py-0.5 bg-red-100 rounded text-red-700">
+                                  {violation.severity}
+                                </span>
+                                {violation.actual_value !== undefined && (
+                                  <span>Actual: {JSON.stringify(violation.actual_value)}</span>
+                                )}
+                                {violation.expected_value !== undefined && (
+                                  <span>Expected: {JSON.stringify(violation.expected_value)}</span>
+                                )}
+                              </div>
                             </div>
                           </div>
                         </div>
-                      </div>
-                    ))}
-                  </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
 
                 {/* Plan URL */}
-                {result.plan_url && (
+                {result.plan_blob_url && (
                   <div className="text-xs text-gray-500">
-                    <p>Plan stored at: <a href={result.plan_url} target="_blank" rel="noopener noreferrer" className="text-purple-600 hover:underline">{result.plan_url}</a></p>
+                    <p>Plan: <span className="font-medium">{result.plan_name}</span></p>
+                    <p className="mt-1">Stored at: <a href={result.plan_blob_url} target="_blank" rel="noopener noreferrer" className="text-purple-600 hover:underline break-all">{result.plan_blob_url}</a></p>
                   </div>
                 )}
               </div>
