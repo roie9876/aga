@@ -9,7 +9,7 @@ This application automatically validates architectural plans for protected space
 ## Architecture
 
 - **Backend**: FastAPI (Python 3.11+)
-- **AI**: Azure OpenAI GPT-4 Vision (gpt-4-vision-preview)
+- **AI**: Azure OpenAI GPT-5.1 (reasoning model with vision)
 - **Storage**: Azure Blob Storage (plan files)
 - **Database**: Azure Cosmos DB (validation results, rules)
 - **Authentication**: Azure Entra ID (Managed Identity, no secrets)
@@ -29,7 +29,7 @@ This application automatically validates architectural plans for protected space
 
 - Docker & Docker Compose
 - Azure subscription with:
-  - Azure OpenAI Service (GPT-4 Vision enabled)
+  - Azure OpenAI Service (GPT-5.1 deployment)
   - Azure Cosmos DB account
   - Azure Blob Storage account
   - Managed Identity or Service Principal with appropriate RBAC roles

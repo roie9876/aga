@@ -19,7 +19,7 @@ async def validate_plan(
     
     This endpoint:
     1. Uploads the plan to Azure Blob Storage
-    2. Extracts measurements using GPT-4 Vision
+    2. Extracts measurements using GPT-5.1 with reasoning
     3. Validates against ממ"ד requirements
     4. Stores results in Cosmos DB
     5. Returns validation ID for retrieving full results
@@ -41,7 +41,7 @@ async def validate_plan(
     
     # TODO: Implement validation logic
     # 1. Upload to Blob Storage
-    # 2. Extract data with GPT-4 Vision
+    # 2. Extract data with GPT-5.1 (reasoning model)
     # 3. Run validation engine
     # 4. Store results in Cosmos DB
     

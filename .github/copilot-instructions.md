@@ -2,7 +2,7 @@
 
 ## Project Context
 
-This is a FastAPI application for validating Israeli Home Front Command shelter (ממ"ד) architectural plans using Azure OpenAI GPT-4 Vision. The app extracts measurements from uploaded plans and validates them against official regulations defined in `requirements-mamad.md`.
+This is a FastAPI application for validating Israeli Home Front Command shelter (ממ"ד) architectural plans using Azure OpenAI GPT-5.1 (reasoning model with vision). The app uses GPT-5.1's advanced reasoning capabilities to extract measurements from uploaded plans and validates them against official regulations defined in `requirements-mamad.md`.
 
 ## Architecture Principles
 
@@ -80,10 +80,12 @@ client = CosmosClient(
 - Store rules with: category, severity, field, operator, expected_value
 
 ### Plan Extraction
-- Use GPT-4 Vision to analyze uploaded architectural plans
+- Use GPT-5.1 to analyze uploaded architectural plans with reasoning
 - Extract: wall_thickness, wall_count, room_dimensions, door_spacing, window_spacing, annotations
+- Leverage reasoning capabilities for accurate measurement interpretation
 - Return structured JSON with confidence scores
 - Handle multiple file formats: PDF, DWG, PNG, JPG
+- Note: GPT-5.1 does NOT support temperature, top_p, presence_penalty, frequency_penalty, logprobs, top_logprobs, logit_bias, or max_tokens parameters
 
 ### Error Handling
 - Use FastAPI's HTTPException for API errors
@@ -123,8 +125,9 @@ client = CosmosClient(
 - Cache parsed requirements in memory (singleton pattern)
 - Use async blob upload/download for large files
 - Batch Cosmos DB operations when possible
-- Set reasonable timeouts for OpenAI API calls (60s+)
+- Set reasonable timeouts for OpenAI API calls (90s+ for GPT-5.1 reasoning)
 - Stream large file uploads using FastAPI's `UploadFile`
+- GPT-5.1 reasoning may take longer but provides more accurate results
 
 ## Security
 - Validate all user inputs using Pydantic

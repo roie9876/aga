@@ -2,7 +2,7 @@
 
 ## System Overview
 
-The Mamad Validation App is a FastAPI-based microservice that validates Israeli Home Front Command shelter (ממ"ד) architectural plans using Azure OpenAI GPT-4 Vision.
+The Mamad Validation App is a FastAPI-based microservice that validates Israeli Home Front Command shelter (ממ"ד) architectural plans using Azure OpenAI GPT-5.1 (reasoning model with vision capabilities).
 
 ## High-Level Architecture
 
@@ -24,7 +24,7 @@ The Mamad Validation App is a FastAPI-based microservice that validates Israeli 
 │  ┌──────────────────────────────────────────────────────┐  │
 │  │  Business Logic Layer                                 │  │
 │  │  - Requirements Parser                                │  │
-│  │  - Plan Extraction Service (GPT-4 Vision)            │  │
+│  │  - Plan Extraction Service (GPT-5.1)                 │  │
 │  │  - Validation Engine                                  │  │
 │  └──────────────────────────────────────────────────────┘  │
 │  ┌──────────────────────────────────────────────────────┐  │
@@ -40,9 +40,9 @@ The Mamad Validation App is a FastAPI-based microservice that validates Israeli 
 │                      Azure Services                          │
 │  ┌──────────────┐  ┌──────────────┐  ┌─────────────────┐  │
 │  │Azure OpenAI  │  │ Blob Storage │  │   Cosmos DB     │  │
-│  │ GPT-4 Vision │  │  (Plans)     │  │  (Results)      │  │
+│  │   GPT-5.1    │  │  (Plans)     │  │  (Results)      │  │
 │  └──────────────┘  └──────────────┘  └─────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 ## Component Details
@@ -69,7 +69,7 @@ The Mamad Validation App is a FastAPI-based microservice that validates Israeli 
 
 **Key Files:**
 - `requirements_parser.py` - Parses `requirements-mamad.md` into structured rules
-- `plan_extractor.py` - (TODO) Orchestrates GPT-4 Vision extraction
+- `plan_extractor.py` - (TODO) Orchestrates GPT-5.1 extraction with reasoning
 - `validation_engine.py` - (TODO) Applies rules to extracted data
 
 ### 3. Azure Integration Layer (`src/azure/`)
@@ -80,7 +80,7 @@ The Mamad Validation App is a FastAPI-based microservice that validates Israeli 
 - Abstract Azure SDK complexity
 
 **Key Files:**
-- `openai_client.py` - Azure OpenAI GPT-4 Vision wrapper
+- `openai_client.py` - Azure OpenAI GPT-5.1 wrapper
 - `blob_client.py` - Azure Blob Storage wrapper
 - `cosmos_client.py` - Azure Cosmos DB wrapper
 
@@ -123,9 +123,9 @@ credential = DefaultAzureCredential()
    - Get blob URL
    │
    ▼
-3. Extract data with GPT-4 Vision
+3. Extract data with GPT-5.1
    - Send plan image to Azure OpenAI
-   - Prompt engineering for measurement extraction
+   - Use reasoning capabilities for accurate measurement extraction
    - Parse response to ExtractedPlanData
    │
    ▼
@@ -291,6 +291,7 @@ Container Apps Benefits:
 - Implement request queuing for long-running validations
 - Add background workers for async processing
 - Implement rate limiting per project
+- Optimize GPT-5.1 reasoning token usage
 
 ## Error Handling
 
@@ -346,5 +347,6 @@ except AzureError as e:
 3. **PDF Report Generation** - Professional validation reports
 4. **Multi-language Support** - English/Hebrew UI
 5. **Batch Processing** - Validate multiple plans at once
-6. **ML Improvements** - Fine-tune GPT-4 Vision for better extraction
+6. **ML Improvements** - Optimize GPT-5.1 prompts for reasoning and accuracy
 7. **Regulation Versioning** - Track changes to requirements over time
+8. **Reasoning Chain Analysis** - Expose GPT-5.1 reasoning steps for transparency
