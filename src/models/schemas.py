@@ -4,6 +4,11 @@ from typing import Optional, List, Dict, Any
 from enum import Enum
 from pydantic import BaseModel, Field, ConfigDict
 
+# Configure JSON serialization for datetime
+def datetime_serializer(dt: datetime) -> str:
+    """Serialize datetime to ISO format string."""
+    return dt.isoformat()
+
 
 class ValidationSeverity(str, Enum):
     """Severity levels for validation violations."""
@@ -103,7 +108,10 @@ class ValidationResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     """Health check response."""
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(
+        populate_by_name=True,
+        json_encoders={datetime: lambda v: v.isoformat()}
+    )
     
     status: str = Field(..., description="Overall health status")
     services: Dict[str, bool] = Field(..., description="Status of individual services")

@@ -82,7 +82,7 @@ async def validate_plan(
         # 4. Store results in Cosmos DB
         logger.info("Storing results in Cosmos DB", validation_id=validation_id)
         cosmos_client = get_cosmos_client()
-        result_dict = validation_result.model_dump()
+        result_dict = validation_result.model_dump(mode='json')
         result_dict["project_id"] = project_id  # Ensure partition key is set
         await cosmos_client.create_item(result_dict)
         
