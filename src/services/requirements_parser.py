@@ -124,7 +124,7 @@ class RequirementsParser:
             rule_id="1.1_wall_count",
             section="1.1",
             category="external_walls",
-            description="לממ"ד חייב להיות בין 1 ל־4 קירות חיצוניים",
+            description="לממד חייב להיות בין 1 ל-4 קירות חיצוניים",
             severity=ValidationSeverity.CRITICAL,
             field="external_wall_count",
             operator="between",

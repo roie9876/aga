@@ -166,7 +166,8 @@ class BlobStorageClient:
         """
         try:
             # Try to list containers (minimal operation)
-            list(self.client.list_containers(max_results=1))
+            container_list = self.client.list_containers()
+            next(iter(container_list), None)  # Get first container or None
             logger.info("Azure Blob Storage health check passed")
             return True
         except Exception as e:

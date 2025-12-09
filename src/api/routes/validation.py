@@ -23,7 +23,7 @@ async def validate_plan(
     This endpoint:
     1. Uploads the plan to Azure Blob Storage
     2. Extracts measurements using GPT-5.1 with reasoning
-    3. Validates against ממ"ד requirements
+    3. Validates against ממד requirements
     4. Stores results in Cosmos DB
     5. Returns validation ID for retrieving full results
     
@@ -67,37 +67,14 @@ async def validate_plan(
             file_bytes=file_content,
             file_name=file.filename
         )
-    logger.info("Fetching validation result", validation_id=validation_id)
-    
-    try:
-        cosmos_client = get_cosmos_client()
         
-        # Query by id across all partitions
-        query = "SELECT * FROM c WHERE c.id = @validation_id"
-        parameters = [{"name": "@validation_id", "value": validation_id}]
-        
-        results = await cosmos_client.query_items(query, parameters)
-        
-        if not results:
-            raise HTTPException(
-                status_code=404,
-                detail=f"תוצאת בדיקה לא נמצאה: {validation_id}"
-            )
-        
-        result_dict = results[0]
-        validation_result = ValidationResult(**result_dict)
-        
-        logger.info("Validation result retrieved", validation_id=validation_id)
-        return validation_result
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error("Failed to retrieve validation result", error=str(e))
-        raise HTTPException(
-            status_code=500,
-            detail=f"אירעה שגיאה בשליפת התוצאות: {str(e)}"
-        )       plan_name=display_name,
+        # 3. Validate against requirements
+        logger.info("Validating against requirements", validation_id=validation_id)
+        validator = get_validation_engine()
+        validation_result = validator.validate(
+            validation_id=validation_id,
+            project_id=project_id,
+            plan_name=display_name,
             plan_blob_url=plan_blob_url,
             extracted_data=extracted_data
         )
@@ -137,6 +114,52 @@ async def get_validation_result(validation_id: str):
     Returns:
         Complete ValidationResult with all violations and data
         
+    Raises:
+        HTTPException: If validation not found
+    """
+    logger.info("Fetching validation result", validation_id=validation_id)
+    
+    try:
+        cosmos_client = get_cosmos_client()
+        
+        # Query by id across all partitions
+        query = "SELECT * FROM c WHERE c.id = @validation_id"
+        parameters = [{"name": "@validation_id", "value": validation_id}]
+        
+        results = await cosmos_client.query_items(query, parameters)
+        
+        if not results:
+            raise HTTPException(
+                status_code=404,
+                detail=f"תוצאת בדיקה לא נמצאה: {validation_id}"
+            )
+        
+        result_dict = results[0]
+        validation_result = ValidationResult(**result_dict)
+        
+        logger.info("Validation result retrieved", validation_id=validation_id)
+        return validation_result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to retrieve validation result", error=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail=f"אירעה שגיאה בשליפת התוצאות: {str(e)}"
+        )
+
+
+@router.get("/projects/{project_id}/validations")
+async def list_project_validations(project_id: str):
+    """List all validations for a project.
+    
+    Args:
+        project_id: Project identifier
+        
+    Returns:
+        List of validation summaries for the project
+    """
     logger.info("Listing validations for project", project_id=project_id)
     
     try:
@@ -160,6 +183,25 @@ async def get_validation_result(validation_id: str):
         
     except Exception as e:
         logger.error("Failed to list validations", error=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail=f"אירעה שגיאה בשליפת רשימת הבדיקות: {str(e)}"
+        )
+
+
+@router.delete("/results/{validation_id}")
+async def delete_validation_result(validation_id: str):
+    """Delete a validation result and associated plan file.
+    
+    Args:
+        validation_id: Validation result to delete
+        
+    Returns:
+        Success message
+        
+    Raises:
+        HTTPException: If validation not found
+    """
     logger.info("Deleting validation result", validation_id=validation_id)
     
     try:
@@ -209,45 +251,3 @@ async def get_validation_result(validation_id: str):
             status_code=500,
             detail=f"אירעה שגיאה במחיקת התוצאה: {str(e)}"
         )
-
-@router.get("/projects/{project_id}/validations")
-async def list_project_validations(project_id: str):
-    """List all validations for a project.
-    
-    Args:
-        project_id: Project identifier
-        
-    Returns:
-        List of validation summaries for the project
-    """
-    logger.info("Listing validations for project", project_id=project_id)
-    
-    # TODO: Query Cosmos DB by project_id partition key
-    
-    raise HTTPException(
-        status_code=501,
-        detail="List validations endpoint not yet implemented"
-    )
-
-
-@router.delete("/results/{validation_id}")
-async def delete_validation_result(validation_id: str):
-    """Delete a validation result and associated plan file.
-    
-    Args:
-        validation_id: Validation result to delete
-        
-    Returns:
-        Success message
-        
-    Raises:
-        HTTPException: If validation not found
-    """
-    logger.info("Deleting validation result", validation_id=validation_id)
-    
-    # TODO: Delete from Cosmos DB and Blob Storage
-    
-    raise HTTPException(
-        status_code=501,
-        detail="Delete validation endpoint not yet implemented"
-    )

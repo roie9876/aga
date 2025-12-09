@@ -23,7 +23,7 @@ async def lifespan(app: FastAPI):
 # Create FastAPI application
 app = FastAPI(
     title="Mamad Validation API",
-    description="API for validating Israeli Home Front Command shelter (ממ"ד) architectural plans",
+    description="API for validating Israeli Home Front Command shelter (ממד) architectural plans",
     version=settings.api_version,
     lifespan=lifespan,
 )
