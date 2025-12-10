@@ -1,7 +1,8 @@
 """Azure Blob Storage client wrapper with Entra ID authentication."""
 from typing import Optional, BinaryIO
+from datetime import datetime, timedelta
 from azure.identity import DefaultAzureCredential
-from azure.storage.blob import BlobServiceClient, BlobClient
+from azure.storage.blob import BlobServiceClient, BlobClient, generate_blob_sas, BlobSasPermissions
 from azure.core.exceptions import ResourceNotFoundError, AzureError
 
 from src.config import settings
@@ -71,8 +72,9 @@ class BlobStorageClient:
             
             blob_client.upload_blob(data, overwrite=overwrite)
             
-            blob_url = blob_client.url
-            logger.info("Blob uploaded successfully", blob_url=blob_url)
+            # Generate SAS URL for read access (24 hours)
+            blob_url = self.generate_sas_url(blob_name, container_name=container, expiry_hours=24)
+            logger.info("Blob uploaded successfully", blob_url=blob_url[:100] + "...")
             
             return blob_url
             
@@ -157,6 +159,56 @@ class BlobStorageClient:
         except AzureError as e:
             logger.error("Failed to delete blob", error=str(e), blob_name=blob_name)
             raise
+    
+    def generate_sas_url(
+        self,
+        blob_name: str,
+        container_name: Optional[str] = None,
+        expiry_hours: int = 24
+    ) -> str:
+        """Generate a SAS URL for temporary read access to a blob.
+        
+        Args:
+            blob_name: Name of the blob
+            container_name: Container name (default: from settings)
+            expiry_hours: Hours until SAS expires (default: 24)
+            
+        Returns:
+            URL with SAS token for read access
+        """
+        container = container_name or settings.azure_storage_container_name
+        
+        try:
+            # Get user delegation key (works with Entra ID)
+            key_start_time = datetime.utcnow()
+            key_expiry_time = key_start_time + timedelta(hours=expiry_hours)
+            
+            user_delegation_key = self.client.get_user_delegation_key(
+                key_start_time=key_start_time,
+                key_expiry_time=key_expiry_time
+            )
+            
+            # Generate SAS token
+            sas_token = generate_blob_sas(
+                account_name=settings.azure_storage_account_name,
+                container_name=container,
+                blob_name=blob_name,
+                user_delegation_key=user_delegation_key,
+                permission=BlobSasPermissions(read=True),
+                expiry=key_expiry_time,
+                start=key_start_time
+            )
+            
+            # Build full URL with SAS
+            blob_url = f"{settings.storage_account_url}/{container}/{blob_name}?{sas_token}"
+            
+            logger.info("Generated SAS URL", blob_name=blob_name, expiry_hours=expiry_hours)
+            return blob_url
+            
+        except Exception as e:
+            logger.error("Failed to generate SAS URL", error=str(e), blob_name=blob_name)
+            # Fallback to regular URL (may not work without public access)
+            return f"{settings.storage_account_url}/{container}/{blob_name}"
     
     async def health_check(self) -> bool:
         """Check if Blob Storage service is accessible.

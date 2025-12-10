@@ -147,3 +147,5 @@ client = CosmosClient(
 - Check Azure SDK documentation for authentication patterns
 - Follow FastAPI best practices from official docs
 - Ask for clarification before implementing ambiguous requirements
+
+you can answer me in english, only if the user ask to answer in hebrew you can answer in hebrew.

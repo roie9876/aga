@@ -4,7 +4,8 @@ from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from typing import Optional
 
 from src.models import ValidationResponse, ValidationResult
-from src.services import get_plan_extractor, get_validation_engine
+from src.services import get_plan_extractor
+from src.services.llm_validator import get_llm_validator
 from src.azure import get_blob_client, get_cosmos_client
 from src.utils.logging import get_logger
 
@@ -68,15 +69,16 @@ async def validate_plan(
             file_name=file.filename
         )
         
-        # 3. Validate against requirements
-        logger.info("Validating against requirements", validation_id=validation_id)
-        validator = get_validation_engine()
+        # 3. Validate against requirements using LLM
+        logger.info("Validating against requirements using GPT-5.1", validation_id=validation_id)
+        validator = get_llm_validator()
         validation_result = validator.validate(
             validation_id=validation_id,
             project_id=project_id,
             plan_name=display_name,
             plan_blob_url=plan_blob_url,
-            extracted_data=extracted_data
+            extracted_data=extracted_data,
+            plan_image_bytes=file_content  # Pass the image so GPT can provide bounding boxes
         )
         
         # 4. Store results in Cosmos DB
@@ -186,6 +188,75 @@ async def list_project_validations(project_id: str):
         raise HTTPException(
             status_code=500,
             detail=f"אירעה שגיאה בשליפת רשימת הבדיקות: {str(e)}"
+        )
+
+
+@router.get("/requirements")
+async def get_requirements():
+    """Get the current requirements content from requirements-mamad.md.
+    
+    Returns:
+        Current requirements markdown content
+    """
+    logger.info("Fetching current requirements")
+    
+    try:
+        from pathlib import Path
+        requirements_path = Path("requirements-mamad.md")
+        
+        if not requirements_path.exists():
+            raise HTTPException(
+                status_code=404,
+                detail="קובץ הדרישות לא נמצא"
+            )
+        
+        content = requirements_path.read_text(encoding="utf-8")
+        
+        return {
+            "success": True,
+            "content": content,
+            "file_path": str(requirements_path),
+            "length": len(content)
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to get requirements", error=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail=f"אירעה שגיאה בקריאת הדרישות: {str(e)}"
+        )
+
+
+@router.post("/reload-requirements")
+async def reload_requirements():
+    """Reload requirements from requirements-mamad.md file.
+    
+    This endpoint allows refreshing the requirements without restarting the server.
+    
+    Returns:
+        Success message with updated requirements info
+    """
+    logger.info("Reloading requirements from file")
+    
+    try:
+        # Get fresh validator instance which will reload the file
+        from src.services.llm_validator import LLMValidator
+        global _llm_validator_instance
+        _llm_validator_instance = LLMValidator()
+        
+        return {
+            "success": True,
+            "message": "הדרישות נטענו מחדש בהצלחה מקובץ requirements-mamad.md",
+            "requirements_length": len(_llm_validator_instance.requirements_content)
+        }
+        
+    except Exception as e:
+        logger.error("Failed to reload requirements", error=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail=f"אירעה שגיאה בטעינת הדרישות: {str(e)}"
         )
 
 

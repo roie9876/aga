@@ -25,6 +25,16 @@ class ValidationStatus(str, Enum):
     NEEDS_REVIEW = "needs_review"
 
 
+class BoundingBox(BaseModel):
+    """Bounding box coordinates (percentage-based, 0-100)."""
+    model_config = ConfigDict(populate_by_name=True)
+    
+    x: float = Field(..., ge=0, le=100, description="Left edge as percentage from left (0-100)")
+    y: float = Field(..., ge=0, le=100, description="Top edge as percentage from top (0-100)")
+    width: float = Field(..., ge=0, le=100, description="Width as percentage (0-100)")
+    height: float = Field(..., ge=0, le=100, description="Height as percentage (0-100)")
+
+
 class ValidationViolation(BaseModel):
     """A single validation rule violation."""
     model_config = ConfigDict(populate_by_name=True)
@@ -36,6 +46,35 @@ class ValidationViolation(BaseModel):
     expected_value: Optional[str] = Field(None, description="Expected value per regulation")
     actual_value: Optional[str] = Field(None, description="Actual value found in plan")
     section_reference: str = Field(..., description="Section in requirements-mamad.md (e.g., '1.2')")
+    location_description: Optional[str] = Field(None, description="Textual description of location in plan")
+    bounding_box: Optional[BoundingBox] = Field(None, description="Visual location as bounding box")
+
+
+class CheckStatus(str, Enum):
+    """Status of an individual check."""
+    PASS = "pass"
+    FAIL = "fail"
+    SKIP = "skip"
+
+
+class IndividualCheck(BaseModel):
+    """A single validation check with its own image and result."""
+    model_config = ConfigDict(populate_by_name=True)
+    
+    check_id: str = Field(..., description="Unique check identifier (e.g., '0_sanity', '1_wall_thickness')")
+    check_name: str = Field(..., description="Hebrew name of the check")
+    description: str = Field(..., description="What this check validates (Hebrew)")
+    status: CheckStatus = Field(..., description="Pass/Fail/Skip status")
+    
+    # Image for this specific check with bounding box overlay
+    plan_image_url: str = Field(..., description="URL to the original plan image")
+    bounding_box: Optional[BoundingBox] = Field(None, description="Area highlighted for this check")
+    
+    # Violation details (if failed)
+    violation: Optional[ValidationViolation] = Field(None, description="Violation details if check failed")
+    
+    # Additional context
+    reasoning: Optional[str] = Field(None, description="Why this check passed/failed")
 
 
 class ExtractedPlanData(BaseModel):
@@ -88,7 +127,12 @@ class ValidationResult(BaseModel):
     
     status: ValidationStatus = Field(..., description="Overall validation status")
     extracted_data: ExtractedPlanData = Field(..., description="Data extracted from the plan")
-    violations: List[ValidationViolation] = Field(default_factory=list, description="List of violations")
+    
+    # New: Individual checks instead of violations list
+    checks: List[IndividualCheck] = Field(default_factory=list, description="List of individual validation checks")
+    
+    # Deprecated but kept for backward compatibility
+    violations: List[ValidationViolation] = Field(default_factory=list, description="(Deprecated) Use checks instead")
     
     total_checks: int = Field(..., description="Total number of validation checks performed")
     passed_checks: int = Field(..., description="Number of checks that passed")

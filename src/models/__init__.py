@@ -8,6 +8,9 @@ from src.models.schemas import (
     ValidationResult,
     ValidationResponse,
     HealthResponse,
+    BoundingBox,
+    IndividualCheck,
+    CheckStatus,
 )
 
 __all__ = [
@@ -19,4 +22,7 @@ __all__ = [
     "ValidationResult",
     "ValidationResponse",
     "HealthResponse",
+    "BoundingBox",
+    "IndividualCheck",
+    "CheckStatus",
 ]

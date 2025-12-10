@@ -132,52 +132,52 @@ class RequirementsParser:
         ))
         
         # Rule 1.2: Wall thickness based on external wall count
-        # 1 external wall - 52cm (62cm with window)
+        # 1 external wall - 25cm (30cm with window)
         rules.append(ValidationRule(
             rule_id="1.2_wall_thickness_1_wall",
             section="1.2",
             category="wall_thickness",
-            description="1 קיר חיצוני: עובי 52 ס\"מ (קיר עם חלון: 62 ס\"מ)",
+            description="1 קיר חיצוני: עובי 25 ס\"מ (קיר עם חלון: 30 ס\"מ)",
             severity=ValidationSeverity.CRITICAL,
             field="wall_thickness_cm",
             operator=">=",
-            expected_value=52  # 62 if window present
+            expected_value=25  # 30 if window present
         ))
         
-        # 2 external walls - 52cm (62cm with window)
+        # 2 external walls - 25cm (30cm with window)
         rules.append(ValidationRule(
             rule_id="1.2_wall_thickness_2_walls",
             section="1.2",
             category="wall_thickness",
-            description="2 קירות חיצוניים: עובי 52 ס\"מ (קיר עם חלון: 62 ס\"מ)",
+            description="2 קירות חיצוניים: עובי 25 ס\"מ (קיר עם חלון: 30 ס\"מ)",
             severity=ValidationSeverity.CRITICAL,
             field="wall_thickness_cm",
             operator=">=",
-            expected_value=52
+            expected_value=25
         ))
         
-        # 3 external walls - 62cm
+        # 3 external walls - 30cm
         rules.append(ValidationRule(
             rule_id="1.2_wall_thickness_3_walls",
             section="1.2",
             category="wall_thickness",
-            description="3 קירות חיצוניים: עובי 62 ס\"מ",
+            description="3 קירות חיצוניים: עובי 30 ס\"מ",
             severity=ValidationSeverity.CRITICAL,
             field="wall_thickness_cm",
             operator=">=",
-            expected_value=62
+            expected_value=30
         ))
         
-        # 4 external walls - 62cm
+        # 4 external walls - 40cm
         rules.append(ValidationRule(
             rule_id="1.2_wall_thickness_4_walls",
             section="1.2",
             category="wall_thickness",
-            description="4 קירות חיצוניים: עובי 62 ס\"מ",
+            description="4 קירות חיצוניים: עובי 40 ס\"מ",
             severity=ValidationSeverity.CRITICAL,
             field="wall_thickness_cm",
             operator=">=",
-            expected_value=62
+            expected_value=40
         ))
         
         # Rule 1.3: Wall distance from building edge

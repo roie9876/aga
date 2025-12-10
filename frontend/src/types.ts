@@ -1,3 +1,10 @@
+export interface BoundingBox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 export interface ValidationViolation {
   rule_id: string;
   category: string;
@@ -6,6 +13,20 @@ export interface ValidationViolation {
   expected_value?: any;
   actual_value?: any;
   message?: string;
+  bounding_box?: BoundingBox | null;
+  location_description?: string;
+  section_reference?: string;
+}
+
+export interface IndividualCheck {
+  check_id: string;
+  check_name: string;
+  description: string;
+  status: 'pass' | 'fail' | 'skip';
+  plan_image_url: string;
+  bounding_box?: BoundingBox | null;
+  violation?: ValidationViolation | null;
+  reasoning?: string;
 }
 
 export interface ExtractedData {
@@ -36,7 +57,8 @@ export interface ValidationResponse {
   plan_blob_url: string;
   status: 'pass' | 'fail' | 'needs_review';
   extracted_data: ExtractedData;
-  violations: ValidationViolation[];
+  checks: IndividualCheck[];
+  violations: ValidationViolation[]; // Deprecated, use checks instead
   total_checks: number;
   passed_checks: number;
   failed_checks: number;
