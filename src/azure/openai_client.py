@@ -1,7 +1,7 @@
 """Azure OpenAI client wrapper with Entra ID authentication."""
 import os
 from typing import Optional
-from azure.identity import DefaultAzureCredential
+from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 from openai import AzureOpenAI
 
 from src.config import settings
@@ -17,6 +17,10 @@ class OpenAIClient:
         """Initialize Azure OpenAI client with DefaultAzureCredential."""
         self._client: Optional[AzureOpenAI] = None
         self._credential = DefaultAzureCredential()
+        self._token_provider = get_bearer_token_provider(
+            self._credential,
+            "https://cognitiveservices.azure.com/.default"
+        )
         
     def _get_token(self) -> str:
         """Get Azure AD token for Cognitive Services.
@@ -29,21 +33,22 @@ class OpenAIClient:
     
     @property
     def client(self) -> AzureOpenAI:
-        """Get or create Azure OpenAI client instance.
+        """Get or create Azure OpenAI client instance with auto-refreshing token.
         
         Returns:
             Configured AzureOpenAI client
         """
         if self._client is None:
-            logger.info("Initializing Azure OpenAI client", endpoint=settings.azure_openai_endpoint)
+            logger.info("Initializing Azure OpenAI client with auto-refreshing token", endpoint=settings.azure_openai_endpoint)
             
+            # Use azure_ad_token_provider for automatic token refresh
             self._client = AzureOpenAI(
                 azure_endpoint=settings.azure_openai_endpoint,
-                azure_ad_token=self._get_token(),
+                azure_ad_token_provider=self._token_provider,
                 api_version=settings.azure_openai_api_version
             )
             
-            logger.info("Azure OpenAI client initialized successfully")
+            logger.info("Azure OpenAI client initialized successfully with token provider")
         
         return self._client
     

@@ -14,7 +14,7 @@ Validates:
 """
 
 import structlog
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from dataclasses import dataclass
 from enum import Enum
 
@@ -446,7 +446,7 @@ class MamadValidator:
     # Helper Methods
     # =========================================================================
     
-    def _extract_dimension_value(self, value_str: str, unit: str) -> float | None:
+    def _extract_dimension_value(self, value_str: str, unit: str) -> Optional[float]:
         """
         Extract numeric value from dimension string.
         
