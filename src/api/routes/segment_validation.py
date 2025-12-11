@@ -221,19 +221,70 @@ async def list_validations():
     try:
         cosmos_client = get_cosmos_client()
         
+        # Get all validations
         query = """
-            SELECT c.id, c.decomposition_id, c.total_segments, c.passed, 
-                   c.failed, c.warnings, c.created_at
+            SELECT c.id, c.decomposition_id, c.validation_id, c.project_id,
+                   c.total_segments, c.passed, c.failed, c.warnings, 
+                   c.created_at, c.coverage
             FROM c 
             WHERE c.type = 'segment_validation'
-            ORDER BY c.created_at DESC
+            ORDER BY c._ts DESC
         """
         
         results = await cosmos_client.query_items(query, [])
         
+        # Enrich with plan names from decomposition in batch
+        decomposition_ids = list(set([r.get("decomposition_id") for r in results if r.get("decomposition_id")]))
+        
+        # Fetch all decompositions in one query
+        decomposition_map = {}
+        if decomposition_ids:
+            decomp_query = f"""
+                SELECT c.id, c.metadata.project_name, c.metadata.plan_number, c.created_at
+                FROM c 
+                WHERE c.type = 'decomposition'
+                AND c.id IN ({','.join([f"'{did}'" for did in decomposition_ids])})
+            """
+            decomp_results = await cosmos_client.query_items(decomp_query, [])
+            decomposition_map = {d["id"]: d for d in decomp_results}
+        
+        # Enrich results
+        enriched_results = []
+        for result in results:
+            decomp_id = result.get("decomposition_id")
+            decomp_data = decomposition_map.get(decomp_id) if decomp_id else None
+            
+            # Get plan name
+            plan_name = "תכנית ללא שם"
+            created_at = result.get("created_at", "2025-12-11T00:00:00Z")
+            
+            if decomp_data:
+                plan_name = (
+                    decomp_data.get("project_name") or 
+                    decomp_data.get("plan_number") or 
+                    f"תכנית {decomp_id[:8]}"
+                )
+                # Use decomposition created_at if available
+                if decomp_data.get("created_at"):
+                    created_at = decomp_data["created_at"]
+            
+            # Calculate status
+            passed = result.get("passed", 0)
+            failed = result.get("failed", 0)
+            status = "pass" if failed == 0 and passed > 0 else "fail" if failed > 0 else "needs_review"
+            
+            enriched_results.append({
+                **result,
+                "plan_name": plan_name,
+                "status": status,
+                "created_at": created_at
+            })
+        
+        logger.info(f"Returning {len(enriched_results)} validations")
+        
         return {
-            "total": len(results),
-            "validations": results
+            "total": len(enriched_results),
+            "validations": enriched_results
         }
         
     except Exception as e:

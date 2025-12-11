@@ -225,36 +225,25 @@ async def list_project_validations(project_id: str):
 
 @router.get("/requirements")
 async def get_requirements():
-    """Get the current requirements content from requirements-mamad.md.
+    """Get all MAMAD requirements in structured format.
     
     Returns:
-        Current requirements markdown content
+        Structured requirements with sections and subsections
     """
-    logger.info("Fetching current requirements")
+    logger.info("Fetching requirements in structured format")
     
     try:
-        from pathlib import Path
-        requirements_path = Path("requirements-mamad.md")
+        from src.api.routes.requirements import parse_requirements_markdown
+        requirements = parse_requirements_markdown()
+        return requirements
         
-        if not requirements_path.exists():
-            raise HTTPException(
-                status_code=404,
-                detail="קובץ הדרישות לא נמצא"
-            )
-        
-        content = requirements_path.read_text(encoding="utf-8")
-        
-        return {
-            "success": True,
-            "content": content,
-            "file_path": str(requirements_path),
-            "length": len(content)
-        }
-        
-    except HTTPException:
-        raise
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail="קובץ הדרישות לא נמצא"
+        )
     except Exception as e:
-        logger.error("Failed to get requirements", error=str(e))
+        logger.error("Failed to parse requirements", error=str(e))
         raise HTTPException(
             status_code=500,
             detail=f"אירעה שגיאה בקריאת הדרישות: {str(e)}"
