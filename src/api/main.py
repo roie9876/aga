@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from src.config import settings
 from src.utils.logging import setup_logging, get_logger
-from src.api.routes import health, validation
+from src.api.routes import health, validation, decomposition
 
 # Setup logging before anything else
 setup_logging()
@@ -43,6 +43,11 @@ app.include_router(
     validation.router, 
     prefix=f"/api/{settings.api_version}",
     tags=["Validation"]
+)
+app.include_router(
+    decomposition.router,
+    prefix=f"/api/{settings.api_version}",
+    tags=["Decomposition"]
 )
 
 

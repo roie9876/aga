@@ -217,9 +217,24 @@ Detailed validation results with Hebrew explanations
 
 - **GPT-5.1 Analysis Time**: 30-90 seconds (reasoning model is slower but more accurate)
 - **Confidence Score**: 70-90% for high-quality plans with clear annotations
-- **Supported Formats**: PNG, JPG, PDF
+- **Supported Formats**: 
+  - **Images**: PNG, JPG, JPEG
+  - **Documents**: PDF
+  - **CAD Files**: DWF, DWFX (auto-converted to PNG), DWG (planned)
 - **Recommended Resolution**: 1200x800+ pixels
 - **Max File Size**: 10MB
+
+### DWF/DWFX File Support
+
+The system now supports **Design Web Format (DWF)** and **DWF XML (DWFX)** files commonly used in Autodesk workflows:
+
+- **Auto-conversion**: DWF/DWFX files are automatically converted to PNG (1920x1080)
+- **Both formats**: Supports both legacy DWF and modern DWFX (XML-based)
+- **Library**: Uses Aspose.CAD for conversion
+- **Processing time**: +3-5 seconds for conversion
+- **See**: [docs/dwf-support.md](./docs/dwf-support.md) for detailed information
+
+**Note**: Aspose.CAD requires a license for production use. 30-day trial available.
 
 ## 🛠️ Troubleshooting
 

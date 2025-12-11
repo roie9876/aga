@@ -1,8 +1,8 @@
 import { useState } from 'react';
 import { Upload, CheckCircle, Sparkles, ArrowRight, Loader2, Zap } from 'lucide-react';
 import type { PlanDecomposition } from './types';
-import { DecompositionUpload } from './components/DecompositionUpload';
-import { DecompositionReview } from './components/DecompositionReview';
+import DecompositionUpload from './components/DecompositionUpload';
+import DecompositionReview from './components/DecompositionReview';
 
 // Workflow stages
 type WorkflowStage = 'upload' | 'decomposition_review' | 'validation' | 'results';
@@ -11,8 +11,6 @@ function App() {
   const [stage, setStage] = useState<WorkflowStage>('upload');
   const [decompositionId, setDecompositionId] = useState<string | null>(null);
   const [projectId, setProjectId] = useState<string>('demo-project-001');
-  
-  console.log('🎨 App rendering, stage:', stage);
   
   // Handle decomposition complete
   const handleDecompositionComplete = (decompId: string) => {
@@ -130,13 +128,13 @@ function App() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-purple-50 via-blue-50 to-indigo-100" dir="rtl" style={{ minHeight: '100vh', background: 'linear-gradient(to bottom right, #faf5ff, #eff6ff, #e0e7ff)' }}>
+    <div className="min-h-screen bg-gradient-to-br from-purple-50 via-blue-50 to-indigo-100" dir="rtl">
       <div className="container mx-auto px-4 py-8">
         {/* Header */}
         <div className="text-center mb-8">
           <div className="flex items-center justify-center gap-3 mb-4">
             <Sparkles className="w-12 h-12 text-purple-600" />
-            <h1 className="text-5xl font-black bg-gradient-to-r from-purple-600 to-blue-600 bg-clip-text text-transparent" style={{ color: '#7c3aed' }}>
+            <h1 className="text-5xl font-black bg-gradient-to-r from-purple-600 to-blue-600 bg-clip-text text-transparent">
               בודק ממ"ד GPT-5.1
             </h1>
           </div>

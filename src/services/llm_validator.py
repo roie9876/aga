@@ -76,8 +76,8 @@ class LLMValidator:
                     extracted_data=extracted_data
                 )
             
-            # Build prompt for GPT-5.1
-            prompt = self._build_validation_prompt(extracted_data)
+            # Build prompt for GPT-5.1 (include Mamad identification from Step 0)
+            prompt = self._build_validation_prompt(extracted_data, mamad_identification)
         
             # Build messages for GPT-5.1
             messages = [
@@ -459,8 +459,8 @@ class LLMValidator:
 **חשוב:** אם אין הפרות, החזר מערך violations ריק.
 """
     
-    def _build_validation_prompt(self, extracted_data: ExtractedPlanData) -> str:
-        """Build validation prompt with extracted data."""
+    def _build_validation_prompt(self, extracted_data: ExtractedPlanData, mamad_identification: Optional[Dict[str, Any]] = None) -> str:
+        """Build validation prompt with extracted data and Mamad location from Step 0."""
         
         data_dict = {
             "external_wall_count": extracted_data.external_wall_count,
@@ -479,15 +479,38 @@ class LLMValidator:
             "confidence_score": extracted_data.confidence_score
         }
         
-        return f"""# נתונים שזוהו בתוכנית האדריכלית:
+        # Build base prompt
+        prompt = f"""# נתונים שזוהו בתוכנית האדריכלית:
 
 ```json
 {json.dumps(data_dict, ensure_ascii=False, indent=2)}
 ```
+"""
+        
+        # Add Mamad identification from Step 0 if available
+        if mamad_identification and mamad_identification.get("identified"):
+            bbox = mamad_identification.get("bounding_box", {})
+            prompt += f"""
 
+# 🎯 **מיקום הממ״ד שזוהה (שלב 0):**
+
+**חשוב מאוד:** הממ״ד כבר זוהה בשלב קודם. השתמש במידע הזה!
+
+- **תיאור:** {mamad_identification.get('room_label', 'לא זוהה')}
+- **מיקום בתמונה:** x={bbox.get('x', 0):.1f}%, y={bbox.get('y', 0):.1f}%, רוחב={bbox.get('width', 0):.1f}%, גובה={bbox.get('height', 0):.1f}%
+- **הסבר:** {mamad_identification.get('reasoning', '')}
+- **רמת ביטחון:** {mamad_identification.get('confidence', 0)*100:.0f}%
+
+**כל הבדיקות צריכות להתבצע על החדר הזה בדיוק!** 
+אל תחפש את הממ״ד מחדש - הוא כבר מסומן בקואורדינטות למעלה.
+"""
+        
+        prompt += """
 בדוק את כל הנתונים הללו אל מול מסמך הדרישות המלא שקיבלת בהודעת המערכת.
 זהה את כל ההפרות והחזר תשובה בפורמט JSON כפי שהוגדר.
 """
+        
+        return prompt
     
     def _parse_validation_response(self, response_text: str) -> List[ValidationViolation]:
         """Parse GPT-5.1 validation response into violations list."""

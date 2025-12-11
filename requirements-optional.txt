@@ -1,0 +1,12 @@
+# requirements-optional.txt
+# Optional dependencies for advanced features
+
+# DWF/DWG file conversion (requires license for production)
+aspose-cad==24.12.0
+
+# Note: Install with:
+# pip install -r requirements-optional.txt
+#
+# License information:
+# - Aspose.CAD: 30-day free trial, then requires license
+# - See: https://products.aspose.com/cad/python-net/

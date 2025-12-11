@@ -8,6 +8,7 @@ from src.services import get_plan_extractor
 from src.services.llm_validator import get_llm_validator
 from src.azure import get_blob_client, get_cosmos_client
 from src.utils.logging import get_logger
+from src.utils.file_converter import convert_to_image_if_needed, is_supported_format
 
 logger = get_logger(__name__)
 router = APIRouter()
@@ -15,7 +16,7 @@ router = APIRouter()
 
 @router.post("/validate", response_model=ValidationResponse)
 async def validate_plan(
-    file: UploadFile = File(..., description="Architectural plan file (PDF, DWG, PNG, JPG)"),
+    file: UploadFile = File(..., description="Architectural plan file (PDF, DWG, DWF, DWFX, PNG, JPG)"),
     project_id: str = Form(..., description="Project identifier"),
     plan_name: Optional[str] = Form(None, description="Optional plan name")
 ):
@@ -44,6 +45,13 @@ async def validate_plan(
                filename=file.filename)
     
     try:
+        # Validate file format
+        if not is_supported_format(file.filename):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported file format: {file.filename}. Supported: PDF, DWG, DWF, DWFX, PNG, JPG"
+            )
+        
         # Generate unique validation ID
         validation_id = str(uuid.uuid4())
         blob_name = f"{project_id}/{validation_id}/{file.filename}"
@@ -52,24 +60,48 @@ async def validate_plan(
         # Read file content
         file_content = await file.read()
         
-        # 1. Upload to Blob Storage
+        # Convert DWF to image if needed
+        logger.info("Checking if file needs conversion", filename=file.filename)
+        try:
+            processed_bytes, processed_filename, was_converted = convert_to_image_if_needed(
+                file_bytes=file_content,
+                filename=file.filename
+            )
+            
+            if was_converted:
+                logger.info("File converted successfully", 
+                           original=file.filename, 
+                           converted=processed_filename)
+                # Update blob name to reflect converted file
+                blob_name = f"{project_id}/{validation_id}/{processed_filename}"
+            else:
+                processed_bytes = file_content
+                processed_filename = file.filename
+                
+        except ValueError as e:
+            logger.error("File conversion failed", error=str(e))
+            raise HTTPException(status_code=400, detail=str(e))
+        
+        # 1. Upload to Blob Storage (use converted file if applicable)
+        logger.info("Uploading plan to Blob Storage", blob_name=blob_name)
+        # 1. Upload to Blob Storage (use converted file if applicable)
         logger.info("Uploading plan to Blob Storage", blob_name=blob_name)
         blob_client = get_blob_client()
         from io import BytesIO
         plan_blob_url = await blob_client.upload_blob(
             blob_name=blob_name,
-            data=BytesIO(file_content)
+            data=BytesIO(processed_bytes)
         )
         
-        # 2. Extract data with GPT-5.1
+        # 2. Extract data with GPT-5.1 (use converted file)
         logger.info("Extracting data with GPT-5.1", validation_id=validation_id)
         extractor = get_plan_extractor()
         extracted_data = await extractor.extract_from_plan(
-            file_bytes=file_content,
-            file_name=file.filename
+            file_bytes=processed_bytes,
+            file_name=processed_filename
         )
         
-        # 3. Validate against requirements using LLM
+        # 3. Validate against requirements using LLM (use converted file)
         logger.info("Validating against requirements using GPT-5.1", validation_id=validation_id)
         validator = get_llm_validator()
         validation_result = validator.validate(
@@ -78,7 +110,7 @@ async def validate_plan(
             plan_name=display_name,
             plan_blob_url=plan_blob_url,
             extracted_data=extracted_data,
-            plan_image_bytes=file_content  # Pass the image so GPT can provide bounding boxes
+            plan_image_bytes=processed_bytes  # Pass the converted image for GPT bounding boxes
         )
         
         # 4. Store results in Cosmos DB

@@ -12,6 +12,18 @@ from src.models.schemas import (
     IndividualCheck,
     CheckStatus,
 )
+from src.models.decomposition import (
+    SegmentType,
+    ProjectMetadata,
+    PlanSegment,
+    ProcessingStats,
+    DecompositionStatus,
+    PlanDecomposition,
+    DecompositionRequest,
+    DecompositionResponse,
+    SegmentUpdateRequest,
+    ApprovalRequest,
+)
 
 __all__ = [
     "ValidationSeverity",
@@ -25,4 +37,15 @@ __all__ = [
     "BoundingBox",
     "IndividualCheck",
     "CheckStatus",
+    # Decomposition models
+    "SegmentType",
+    "ProjectMetadata",
+    "PlanSegment",
+    "ProcessingStats",
+    "DecompositionStatus",
+    "PlanDecomposition",
+    "DecompositionRequest",
+    "DecompositionResponse",
+    "SegmentUpdateRequest",
+    "ApprovalRequest",
 ]

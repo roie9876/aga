@@ -8,24 +8,36 @@ The Mamad Validation App is a FastAPI-based microservice that validates Israeli 
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                      Client Applications                     │
-│            (Web UI, Mobile App, API Consumers)              │
+│                   React Frontend (Vite)                      │
+│  Multi-stage Workflow: Upload → Review → Validate → Results │
+│  - DecompositionUpload (drag & drop)                        │
+│  - DecompositionReview (segment approval)                   │
+│  - ValidationResults (violation display)                    │
 └─────────────────────────┬───────────────────────────────────┘
-                          │ HTTPS
+                          │ HTTP/REST API
                           ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                    FastAPI Application                       │
 │  ┌──────────────────────────────────────────────────────┐  │
 │  │  API Layer                                            │  │
 │  │  - /health (Health check)                            │  │
-│  │  - /api/v1/validate (Upload & validate)             │  │
+│  │  - /api/v1/decompose (Upload & decompose)           │  │
+│  │  - /api/v1/decomposition/{id} (Get decomposition)   │  │
+│  │  - /api/v1/validate (Run validation)                │  │
 │  │  - /api/v1/results/{id} (Get results)               │  │
 │  └──────────────────────────────────────────────────────┘  │
 │  ┌──────────────────────────────────────────────────────┐  │
 │  │  Business Logic Layer                                 │  │
-│  │  - Requirements Parser                                │  │
+│  │  - Requirements Parser (25+ rules)                   │  │
+│  │  - Plan Decomposition Service (GPT-5.1)             │  │
 │  │  - Plan Extraction Service (GPT-5.1)                 │  │
 │  │  - Validation Engine                                  │  │
+│  │  - Image Cropper (segment extraction)                │  │
+│  └──────────────────────────────────────────────────────┘  │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │  Utilities                                            │  │
+│  │  - File Converter (DWF/DWFX → PNG via Aspose.CAD)   │  │
+│  │  - Image Cropper (PIL/Pillow)                        │  │
 │  └──────────────────────────────────────────────────────┘  │
 │  ┌──────────────────────────────────────────────────────┐  │
 │  │  Azure Integration Layer                              │  │
@@ -40,7 +52,8 @@ The Mamad Validation App is a FastAPI-based microservice that validates Israeli 
 │                      Azure Services                          │
 │  ┌──────────────┐  ┌──────────────┐  ┌─────────────────┐  │
 │  │Azure OpenAI  │  │ Blob Storage │  │   Cosmos DB     │  │
-│  │   GPT-5.1    │  │  (Plans)     │  │  (Results)      │  │
+│  │   GPT-5.1    │  │  (Plans +    │  │(Decompositions  │  │
+│  │  (Reasoning)  │  │  Segments)   │  │  + Results)     │  │
 │  └──────────────┘  └──────────────┘  └─────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -58,6 +71,7 @@ The Mamad Validation App is a FastAPI-based microservice that validates Israeli 
 **Key Files:**
 - `main.py` - FastAPI application entry point, CORS, lifespan
 - `routes/health.py` - Health check endpoints
+- `routes/decomposition.py` - ✅ Plan decomposition endpoints (NEW)
 - `routes/validation.py` - Validation API endpoints
 
 ### 2. Business Logic Layer (`src/services/`)
@@ -65,14 +79,27 @@ The Mamad Validation App is a FastAPI-based microservice that validates Israeli 
 **Responsibilities:**
 - Core validation logic
 - Requirements parsing
+- Plan decomposition and segmentation
 - Plan data extraction orchestration
 
 **Key Files:**
-- `requirements_parser.py` - Parses `requirements-mamad.md` into structured rules
-- `plan_extractor.py` - (TODO) Orchestrates GPT-5.1 extraction with reasoning
-- `validation_engine.py` - (TODO) Applies rules to extracted data
+- `requirements_parser.py` - ✅ Parses `requirements-mamad.md` into structured rules (25+ rules)
+- `plan_decomposition.py` - ✅ Orchestrates GPT-5.1 to identify and segment multi-sheet plans (NEW)
+- `plan_extractor.py` - ✅ Orchestrates GPT-5.1 extraction with reasoning
+- `validation_engine.py` - ✅ Applies rules to extracted data
 
-### 3. Azure Integration Layer (`src/azure/`)
+### 3. Utilities Layer (`src/utils/`)
+
+**Responsibilities:**
+- File format conversion
+- Image processing and cropping
+- Helper functions
+
+**Key Files:**
+- `file_converter.py` - ✅ DWF/DWFX to PNG conversion using Aspose.CAD (NEW)
+- `image_cropper.py` - ✅ Segment cropping, thumbnail generation using PIL/Pillow (NEW)
+
+### 4. Azure Integration Layer (`src/azure/`)
 
 **Responsibilities:**
 - Manage Azure service connections
@@ -95,7 +122,7 @@ credential = DefaultAzureCredential()
 # 3. Environment variables (fallback)
 ```
 
-### 4. Data Models (`src/models/`)
+### 5. Data Models (`src/models/`)
 
 **Responsibilities:**
 - Define API request/response schemas
@@ -103,12 +130,86 @@ credential = DefaultAzureCredential()
 - Type safety across the application
 
 **Key Models:**
+- `DecompositionRequest` - ✅ Plan decomposition request (NEW)
+- `DecompositionResponse` - ✅ Decomposition results with segments (NEW)
+- `PlanSegment` - ✅ Individual segment metadata (NEW)
 - `ValidationRequest` - Plan upload request
 - `ValidationResult` - Complete validation output
 - `ExtractedPlanData` - Structured plan measurements
 - `ValidationViolation` - Single rule violation
 
+### 6. Frontend Layer (`frontend/`)
+
+**Responsibilities:**
+- User interface for plan decomposition and validation
+- Multi-stage workflow management
+- File upload and drag & drop
+- Segment review and approval
+
+**Tech Stack:**
+- **Framework**: React 18 with TypeScript
+- **Build Tool**: Vite 7.2.7 with HMR
+- **Styling**: TailwindCSS
+- **HTTP Client**: Fetch API
+
+**Key Components:**
+- `App.tsx` - ✅ Main workflow orchestration (4 stages)
+- `DecompositionUpload.tsx` - ✅ File upload with progress indicator
+- `DecompositionReview.tsx` - ✅ Segment list, approval UI, confidence display
+- `types.ts` - ✅ TypeScript interfaces matching backend models
+
 ## Data Flow
+
+### Decomposition Flow (NEW)
+
+```
+1. User uploads DWF/DWFX/PNG/JPG file via frontend
+   POST /api/v1/decompose
+   │
+   ▼
+2. Convert DWF/DWFX to PNG (if needed)
+   - Use Aspose.CAD library
+   - Full resolution preservation
+   - Temporary file handling
+   │
+   ▼
+3. Upload full plan to Azure Blob Storage
+   - Container: 'architectural-plans'
+   - Generate unique blob name
+   - Get blob URL for GPT-5.1
+   │
+   ▼
+4. Analyze plan with GPT-5.1 (Reasoning Model)
+   - Send full plan image URL
+   - Hebrew prompt for Israeli architectural standards
+   - GPT identifies all frames/sheets
+   - Extracts: titles, types, bounding boxes, metadata
+   - Returns structured JSON with segments
+   │
+   ▼
+5. Crop segments from full plan
+   - Use PIL/Pillow for image processing
+   - Create full-size crops + thumbnails
+   - Upload each segment to Blob Storage
+   │
+   ▼
+6. Store decomposition in Cosmos DB
+   - Container: 'decompositions'
+   - Document: PlanDecomposition with all segments
+   - Status: 'pending_review'
+   │
+   ▼
+7. Return to frontend for user review
+   - Display all segments with confidence scores
+   - User approves/rejects each segment
+   - Metadata editing (optional)
+   │
+   ▼
+8. User approves segments
+   - Frontend sends approval list
+   - Update Cosmos DB status to 'approved'
+   - Proceed to validation with approved segments only
+```
 
 ### Validation Flow
 
@@ -168,6 +269,39 @@ credential = DefaultAzureCredential()
 ```
 
 ## Database Schema
+
+### Cosmos DB Container: `decompositions` (NEW)
+
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "project_id": "project-123",  // Partition key
+  "original_filename": "full-plan.dwf",
+  "full_plan_blob_url": "https://storage.blob.core.windows.net/plans/full-plan.png",
+  "status": "approved",
+  "segments": [
+    {
+      "segment_id": "seg-001",
+      "title": "קומת קרקע - תוכנית ממ\"ד",
+      "type": "floor_plan",
+      "bbox": {"x": 100, "y": 200, "width": 800, "height": 600},
+      "confidence": 0.95,
+      "metadata": {
+        "floor": "קומת קרקע",
+        "room_type": "ממ\"ד",
+        "scale": "1:50"
+      },
+      "image_url": "https://storage.blob.core.windows.net/segments/seg-001.png",
+      "thumbnail_url": "https://storage.blob.core.windows.net/segments/seg-001-thumb.png",
+      "approved": true
+    }
+  ],
+  "total_segments": 4,
+  "approved_segments": 3,
+  "created_at": "2025-12-11T10:30:00Z",
+  "updated_at": "2025-12-11T10:35:00Z"
+}
+```
 
 ### Cosmos DB Container: `validation-results`
 
@@ -332,6 +466,7 @@ except AzureError as e:
 
 ## Technology Stack
 
+### Backend
 - **Language**: Python 3.11
 - **Framework**: FastAPI 0.109+
 - **Azure SDKs**: azure-identity, azure-storage-blob, azure-cosmos, openai
@@ -339,14 +474,30 @@ except AzureError as e:
 - **Logging**: structlog, python-json-logger
 - **Testing**: pytest, pytest-asyncio
 - **Containerization**: Docker, Docker Compose
+- **File Processing**: Aspose.CAD (DWF/DWFX), Pillow (image cropping)
+
+### Frontend (NEW)
+- **Framework**: React 18 with TypeScript 5.6+
+- **Build Tool**: Vite 7.2.7
+- **Styling**: TailwindCSS 3.4+
+- **HTTP**: Fetch API
+- **Dev Server**: Vite HMR (Hot Module Replacement)
+
+### AI/ML
+- **Model**: Azure OpenAI GPT-5.1 (o1-preview)
+- **Capabilities**: Vision + Reasoning
+- **Use Cases**: Plan decomposition, measurement extraction, Hebrew text understanding
 
 ## Future Enhancements
 
-1. **Frontend UI** - React/Next.js for architects
-2. **Visual Annotations** - Highlight violations on plan images
-3. **PDF Report Generation** - Professional validation reports
-4. **Multi-language Support** - English/Hebrew UI
-5. **Batch Processing** - Validate multiple plans at once
-6. **ML Improvements** - Optimize GPT-5.1 prompts for reasoning and accuracy
-7. **Regulation Versioning** - Track changes to requirements over time
-8. **Reasoning Chain Analysis** - Expose GPT-5.1 reasoning steps for transparency
+1. ~~**Frontend UI**~~ - ✅ **COMPLETED** - React/Vite with multi-stage workflow
+2. ~~**Plan Decomposition**~~ - ✅ **COMPLETED** - GPT-5.1 intelligent segmentation
+3. **Visual Annotations** - Highlight violations on plan images with bounding boxes
+4. **PDF Report Generation** - Professional validation reports in Hebrew
+5. **Multi-language Support** - Full English/Hebrew UI toggle
+6. **Batch Processing** - Validate multiple plans at once
+7. **ML Improvements** - Optimize GPT-5.1 prompts for reasoning and accuracy
+8. **Regulation Versioning** - Track changes to requirements over time
+9. **Reasoning Chain Analysis** - Expose GPT-5.1 reasoning steps for transparency
+10. **Full Plan Viewer** - Interactive viewer with zoom/pan and bounding box overlays
+11. **Violation-to-Segment Mapping** - Show which segment each violation came from

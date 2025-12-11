@@ -4,6 +4,20 @@
 
 This is a FastAPI application for validating Israeli Home Front Command shelter (ממ"ד) architectural plans using Azure OpenAI GPT-5.1 (reasoning model with vision). The app uses GPT-5.1's advanced reasoning capabilities to extract measurements from uploaded plans and validates them against official regulations defined in `requirements-mamad.md`.
 
+**Current Project Status:** As of December 11, 2025
+- ✅ **Backend**: FastAPI fully operational with decomposition + validation APIs
+- ✅ **Frontend**: React/Vite UI with multi-stage workflow (Upload → Review → Validate → Results)
+- ✅ **Plan Decomposition**: GPT-5.1 intelligent segmentation system complete
+- ✅ **File Support**: DWF, DWFX, PNG, JPG, PDF via Aspose.CAD + Pillow
+- 🔄 **Testing Phase**: Ready for end-to-end validation with real files
+
+**🚨 IMPORTANT - Project Status Tracking:**
+- **Always read** `docs/project-status.md` FIRST before making architectural changes
+- **Update** `docs/project-status.md` when completing features/phases
+- **Update** `docs/architecture.md` when adding new components or data flows
+- **Create** feature-specific docs (like `docs/decomposition-feature.md`) for major new capabilities
+- **Update** this section's "Current Project Status" when project phase changes
+
 ## Architecture Principles
 
 ### Azure Authentication
@@ -21,10 +35,27 @@ This is a FastAPI application for validating Israeli Home Front Command shelter 
 
 ### Project Structure
 - `src/api/` - FastAPI route handlers
-- `src/services/` - Business logic (validation engine, plan extraction)
-- `src/azure/` - Azure client wrappers (Blob, Cosmos DB, OpenAI)
-- `src/models/` - Pydantic models and data schemas
-- `src/utils/` - Helper functions and utilities
+  - ✅ `routes/health.py` - Health checks
+  - ✅ `routes/decomposition.py` - Plan decomposition endpoints
+  - ✅ `routes/validation.py` - Validation endpoints
+- `src/services/` - Business logic
+  - ✅ `requirements_parser.py` - Parse 25+ rules from requirements-mamad.md
+  - ✅ `plan_decomposition.py` - GPT-5.1 multi-sheet segmentation
+  - ✅ `plan_extractor.py` - GPT-5.1 measurement extraction
+  - ✅ `validation_engine.py` - Rule application engine
+- `src/azure/` - Azure client wrappers (Entra ID auth only)
+  - ✅ `openai_client.py`, `blob_client.py`, `cosmos_client.py`
+- `src/models/` - Pydantic models
+  - ✅ `decomposition.py` - DecompositionRequest/Response, PlanSegment
+  - ✅ `validation.py` - ValidationRequest/Result, ExtractedPlanData
+- `src/utils/` - Utilities
+  - ✅ `file_converter.py` - DWF/DWFX → PNG (Aspose.CAD)
+  - ✅ `image_cropper.py` - Segment cropping + thumbnails (Pillow)
+- `frontend/` - React + Vite frontend
+  - ✅ `src/App.tsx` - Multi-stage workflow orchestration
+  - ✅ `src/components/DecompositionUpload.tsx` - Drag & drop upload
+  - ✅ `src/components/DecompositionReview.tsx` - Segment approval UI
+  - ✅ `src/types.ts` - TypeScript interfaces (matches backend models)
 
 ### Azure Integration Patterns
 
@@ -119,17 +150,50 @@ client = CosmosClient(
 - Mock Azure clients using `unittest.mock`
 - Use `pytest` for test framework
 - Add integration tests for API endpoints using `TestClient`
-- Test Hebrew text encoding/decoding explicitly
+## Documentation Strategy
 
-## Performance Considerations
-- Cache parsed requirements in memory (singleton pattern)
-- Use async blob upload/download for large files
-- Batch Cosmos DB operations when possible
-- Set reasonable timeouts for OpenAI API calls (90s+ for GPT-5.1 reasoning)
-- Stream large file uploads using FastAPI's `UploadFile`
-- GPT-5.1 reasoning may take longer but provides more accurate results
+**Primary Documentation Files:**
+1. **`docs/project-status.md`** - Single source of truth for project progress
+   - **When to update**: Completing phases, features, major milestones
+   - **What to track**: Completion status, metrics, blockers, next steps, change log
+   - **Format**: Structured with phases, checklists, dates, metrics
 
-## Security
+2. **`docs/architecture.md`** - Technical architecture reference
+   - **When to update**: Adding components, new data flows, tech stack changes
+   - **What to track**: System diagrams, component details, integration patterns
+   - **Format**: Diagrams + detailed component descriptions
+
+3. **`docs/{feature-name}.md`** - Feature-specific deep dives
+   - **When to create**: Major new features (e.g., decomposition-feature.md, dwf-support.md)
+   - **What to include**: Feature overview, architecture, API details, examples
+   - **Format**: Tutorial-style with code samples
+
+4. **`.github/copilot-instructions.md`** - THIS FILE
+   - **When to update**: Coding patterns change, new best practices, project phase shifts
+   - **What to include**: How to code (NOT what's done), quick status summary at top
+   - **Format**: Guidelines, code snippets, common tasks
+
+**Documentation Workflow:**
+```
+Feature Complete → Update docs/project-status.md (mark ✅)
+                 → Update docs/architecture.md (if architecture changed)
+                 → Create docs/feature-name.md (if major feature)
+                 → Update .github/copilot-instructions.md (if coding patterns changed)
+                 → Update change log in docs/project-status.md
+```
+
+**Status Tracking Rules:**
+- ✅ Use `docs/project-status.md` as THE source of truth for "what's done"
+- 📍 Use `.github/copilot-instructions.md` for "how to code it"
+- 🏗️ Use `docs/architecture.md` for "how it's structured"
+- 📚 Use `docs/{feature}.md` for "how it works in detail"
+
+## When in Doubt
+- **Before coding**: Read `docs/project-status.md` to see what's already done
+- **During coding**: Follow patterns in this file (copilot-instructions.md)
+- **For validation logic**: Refer to `requirements-mamad.md`
+- **For architecture**: Check `docs/architecture.md`
+- **After coding**: Update `docs/project-status.md` completion status
 - Validate all user inputs using Pydantic
 - Sanitize file uploads (check file type, size limits)
 - Use CORS middleware for web clients
