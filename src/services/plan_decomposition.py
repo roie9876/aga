@@ -283,7 +283,7 @@ a) **Measure the 4 border lines:**
 
 b) **Identify what's inside:**
    - type: "floor_plan", "section", "detail", "elevation", "legend", "table", or "unknown"
-   - description: Brief description of THIS SPECIFIC frame (not a group)
+   - description: תיאור קצר בעברית של המסגרת הספציפית הזו (לא קבוצה)
 
 **Step 3: Return EACH frame as a separate region**
 - Do NOT write: "Cluster of 4 plans" → Instead: return 4 separate regions
@@ -304,6 +304,8 @@ b) **Identify what's inside:**
 **NOT:** "Group of 2 floor plans and 2 sections"
 
 **OUTPUT FORMAT (JSON ONLY):**
+```json
+{
   "image_width": 3508,
   "image_height": 2480,
   "regions": [
@@ -314,7 +316,7 @@ b) **Identify what's inside:**
       "width": 800,
       "height": 1200,
       "type": "floor_plan",
-      "description": "Main floor plan with rooms and walls"
+      "description": "תוכנית קומה עם חדרים וקירות"
     },
     {
       "id": "D2",
@@ -323,11 +325,13 @@ b) **Identify what's inside:**
       "width": 400,
       "height": 600,
       "type": "section",
-      "description": "Vertical section detail"
+      "description": "פרט חתך אנכי"
     }
   ]
 }
 ```
+
+**חשוב: כל התיאורים (description) חייבים להיות בעברית!**
 
 **NOW ANALYZE THE IMAGE AND RETURN ONLY THE JSON - NO OTHER TEXT:**"""
 

@@ -130,35 +130,6 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
     return labels[type] || type;
   };
 
-  const translateDescription = (description: string): string => {
-    // Common architectural terms translation
-    const translations: Record<string, string> = {
-      'floor plan': 'תוכנית קומה',
-      'section': 'חתך',
-      'detail': 'פרט',
-      'elevation': 'חזית',
-      'reinforcement': 'חיזוק',
-      'narrow': 'צר',
-      'tall': 'גבוה',
-      'rectangular': 'מלבני',
-      'dimensions': 'מידות',
-      'text': 'טקסט',
-      'highlight': 'הדגשה',
-      'cyan': 'תכלת',
-      'internal': 'פנימי',
-      'with': 'עם',
-      'and': 'ו',
-    };
-    
-    let translated = description;
-    Object.entries(translations).forEach(([eng, heb]) => {
-      const regex = new RegExp(eng, 'gi');
-      translated = translated.replace(regex, heb);
-    });
-    
-    return translated;
-  };
-
   if (loading) {
     return (
       <div className="flex flex-col items-center justify-center min-h-[400px] gap-4">
@@ -368,13 +339,8 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
                       </Badge>
                     </div>
                     <p className="text-sm text-text-muted line-clamp-2" title={segment.description}>
-                      {translateDescription(segment.description)}
+                      {segment.description}
                     </p>
-                    {segment.description !== translateDescription(segment.description) && (
-                      <p className="text-xs text-text-muted/70 mt-1 italic">
-                        ({segment.description})
-                      </p>
-                    )}
                   </div>
 
                   <div className="flex flex-col items-end gap-2">

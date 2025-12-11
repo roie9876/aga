@@ -20,69 +20,7 @@ import { StepIndicator } from './components/ValidationComponents';
 
 type WorkflowStage = 'upload' | 'decomposition_review' | 'validation' | 'results' | 'history';
 
-// Helper function to translate English descriptions to Hebrew
-const translateDescription = (description: string): string => {
-  if (!description) return '';
-  
-  const translations: Record<string, string> = {
-    // Segment types
-    'floor plan': 'תוכנית קומה',
-    'section': 'חתך',
-    'detail': 'פרט',
-    'elevation': 'חזית',
-    'reinforcement': 'חיזוק',
-    'schedule': 'לוח זיון',
-    'showing': 'מציג',
-    
-    // Descriptors
-    'narrow': 'צר',
-    'tall': 'גבוה',
-    'rectangular': 'מלבני',
-    'small': 'קטן',
-    'lower': 'תחתון',
-    'upper': 'עליון',
-    
-    // Features
-    'dimensions': 'מידות',
-    'text': 'טקסט',
-    'highlight': 'הדגשה',
-    'cyan': 'כחול בהיר',
-    'internal': 'פנימי',
-    'room': 'חדר',
-    'layout': 'פריסה',
-    
-    // Connectors
-    'with': 'עם',
-    'and': 'ו',
-  };
-  
-  let translated = description.toLowerCase();
-  
-  // First handle exact phrase matches for better context
-  const phrases: Record<string, string> = {
-    'small lower detail showing reinforcement schedule': 'פרט קטן תחתון מציג לוח זיון',
-    'reinforcement schedule': 'לוח זיון',
-    'floor plan with': 'תוכנית קומה עם',
-    'rectangular detail': 'פרט מלבני',
-  };
-  
-  Object.entries(phrases).forEach(([eng, heb]) => {
-    if (translated.includes(eng.toLowerCase())) {
-      translated = translated.replace(eng.toLowerCase(), heb);
-    }
-  });
-  
-  // Then handle individual words
-  Object.entries(translations).forEach(([eng, heb]) => {
-    const regex = new RegExp(`\\b${eng}\\b`, 'gi');
-    translated = translated.replace(regex, heb);
-  });
-  
-  // Capitalize first letter
-  return translated.charAt(0).toUpperCase() + translated.slice(1);
-};
-
-// Helper to translate category names
+// Helper to translate category names (from enum to Hebrew)
 const translateCategory = (category: string): string => {
   const categories: Record<string, string> = {
     'floor_plan': 'תוכנית קומה',
@@ -98,12 +36,12 @@ const translateCategory = (category: string): string => {
   return categories[category.toLowerCase()] || category;
 };
 
-// Helper to translate segment types
+// Helper to translate segment types (from enum to Hebrew)
 const translateType = (type: string): string => {
   const types: Record<string, string> = {
     'floor_plan': 'תוכנית קומה',
     'section': 'חתך',
-    'detail': 'פרט חיזוק',
+    'detail': 'פרט',
     'elevation': 'חזית',
     'legend': 'מקרא',
     'table': 'טבלה',
@@ -111,6 +49,46 @@ const translateType = (type: string): string => {
   };
   
   return types[type?.toLowerCase()] || type || 'לא ידוע';
+};
+
+// Calculate real-time coverage statistics from validation data
+const calculateCoverageStatistics = (validationResult: any) => {
+  // Try to get requirements from by_category structure
+  if (!validationResult?.coverage?.by_category) {
+    return validationResult?.coverage?.statistics || {
+      total_requirements: 0,
+      checked: 0,
+      passed: 0,
+      failed: 0,
+      not_checked: 0,
+      coverage_percentage: 0,
+      pass_percentage: 0
+    };
+  }
+
+  // Flatten all requirements from all categories
+  const allRequirements: any[] = [];
+  Object.values(validationResult.coverage.by_category).forEach((categoryReqs: any) => {
+    allRequirements.push(...categoryReqs);
+  });
+
+  const total = allRequirements.length;
+  const passed = allRequirements.filter((r: any) => r.status === 'passed').length;
+  const failed = allRequirements.filter((r: any) => r.status === 'failed').length;
+  const notChecked = allRequirements.filter((r: any) => r.status === 'not_checked').length;
+  const checked = total - notChecked;
+  const coveragePercentage = total > 0 ? (checked / total * 100) : 0;
+  const passPercentage = total > 0 ? (passed / total * 100) : 0;
+
+  return {
+    total_requirements: total,
+    checked,
+    passed,
+    failed,
+    not_checked: notChecked,
+    coverage_percentage: Math.round(coveragePercentage * 10) / 10,
+    pass_percentage: Math.round(passPercentage * 10) / 10
+  };
 };
 
 function App() {
@@ -126,6 +104,7 @@ function App() {
   const [validationHistory, setValidationHistory] = useState<any[]>([]);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [showRequirementsModal, setShowRequirementsModal] = useState(false);
+  const [requirementsFilter, setRequirementsFilter] = useState<'all' | 'passed' | 'failed' | 'not_checked'>('all');
   
   const handleDecompositionComplete = (decompId: string) => {
     setDecompositionId(decompId);
@@ -542,7 +521,7 @@ function App() {
                                       {translateType(segment.type)}
                                     </h4>
                                     <p className="text-sm text-text-muted mt-1">
-                                      {translateDescription(segment.description || segment.type)}
+                                      {segment.description || translateType(segment.type)}
                                     </p>
                                   </div>
                                   
@@ -655,7 +634,7 @@ function App() {
                                             </h5>
                                             <p className="text-xs text-blue-700 mb-2">
                                               סגמנט מסוג <span className="font-semibold">"{translateType(segment.type)}"</span>{' '}
-                                              ({translateDescription(segment.description || segment.type)}) 
+                                              ({segment.description || translateType(segment.type)}) 
                                               אינו כולל דרישות בדיקה ספציפיות במערכת הנוכחית.
                                             </p>
                                             <p className="text-xs text-blue-600">
@@ -751,59 +730,155 @@ function App() {
                     
                     {/* Coverage Statistics */}
                     <div className="bg-background rounded-xl p-6 mb-8 border border-border">
-                      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-                        <div className="bg-white rounded-lg p-4 shadow-sm border border-border text-center">
-                          <div className="text-3xl font-bold text-primary">
-                            {validationResult.coverage.statistics.coverage_percentage}%
-                          </div>
-                          <div className="text-xs text-text-muted mt-1 font-medium">כיסוי דרישות</div>
-                        </div>
-                        <div className="bg-white rounded-lg p-4 shadow-sm border border-border text-center">
-                          <div className="text-3xl font-bold text-success">
-                            {validationResult.coverage.statistics.passed}
-                          </div>
-                          <div className="text-xs text-text-muted mt-1 font-medium">עברו בדיקה</div>
-                        </div>
-                        <div className="bg-white rounded-lg p-4 shadow-sm border border-border text-center">
-                          <div className="text-3xl font-bold text-error">
-                            {validationResult.coverage.statistics.failed}
-                          </div>
-                          <div className="text-xs text-text-muted mt-1 font-medium">נכשלו</div>
-                        </div>
-                        <div className="bg-white rounded-lg p-4 shadow-sm border border-border text-center">
-                          <div className="text-3xl font-bold text-text-muted">
-                            {validationResult.coverage.statistics.not_checked}
-                          </div>
-                          <div className="text-xs text-text-muted mt-1 font-medium">לא נבדקו</div>
-                        </div>
-                      </div>
-                      
-                      <ProgressBar 
-                        value={validationResult.coverage.statistics.coverage_percentage}
-                        max={100}
-                        color="violet"
-                        size="lg"
-                      />
-                      <p className="text-center text-sm text-text-muted mt-3">
-                        {validationResult.coverage.statistics.checked} מתוך {validationResult.coverage.statistics.total_requirements} דרישות נבדקו
-                      </p>
+                      {(() => {
+                        const stats = calculateCoverageStatistics(validationResult);
+                        return (
+                          <>
+                            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                              <button
+                                onClick={() => setRequirementsFilter('all')}
+                                title="לחץ להצגת כל הדרישות"
+                                className={`bg-white rounded-lg p-4 shadow-sm border transition-all cursor-pointer ${
+                                  requirementsFilter === 'all' 
+                                    ? 'border-primary ring-2 ring-primary/20' 
+                                    : 'border-border hover:border-primary/50 hover:shadow-md'
+                                }`}
+                              >
+                                <div className="text-3xl font-bold text-primary">
+                                  {stats.coverage_percentage}%
+                                </div>
+                                <div className="text-xs text-text-muted mt-1 font-medium">כיסוי דרישות</div>
+                              </button>
+                              <button
+                                onClick={() => setRequirementsFilter('passed')}
+                                title="לחץ להצגת דרישות שעברו"
+                                className={`bg-white rounded-lg p-4 shadow-sm border transition-all cursor-pointer ${
+                                  requirementsFilter === 'passed' 
+                                    ? 'border-success ring-2 ring-success/20' 
+                                    : 'border-border hover:border-success/50 hover:shadow-md'
+                                }`}
+                              >
+                                <div className="text-3xl font-bold text-success">
+                                  {stats.passed}
+                                </div>
+                                <div className="text-xs text-text-muted mt-1 font-medium">עברו בדיקה</div>
+                              </button>
+                              <button
+                                onClick={() => setRequirementsFilter('failed')}
+                                title="לחץ להצגת דרישות שנכשלו"
+                                className={`bg-white rounded-lg p-4 shadow-sm border transition-all cursor-pointer ${
+                                  requirementsFilter === 'failed' 
+                                    ? 'border-error ring-2 ring-error/20' 
+                                    : 'border-border hover:border-error/50 hover:shadow-md'
+                                }`}
+                              >
+                                <div className="text-3xl font-bold text-error">
+                                  {stats.failed}
+                                </div>
+                                <div className="text-xs text-text-muted mt-1 font-medium">נכשלו</div>
+                              </button>
+                              <button
+                                onClick={() => setRequirementsFilter('not_checked')}
+                                title="לחץ להצגת דרישות שלא נבדקו"
+                                className={`bg-white rounded-lg p-4 shadow-sm border transition-all cursor-pointer ${
+                                  requirementsFilter === 'not_checked' 
+                                    ? 'border-gray-400 ring-2 ring-gray-400/20' 
+                                    : 'border-border hover:border-gray-400/50 hover:shadow-md'
+                                }`}
+                              >
+                                <div className="text-3xl font-bold text-text-muted">
+                                  {stats.not_checked}
+                                </div>
+                                <div className="text-xs text-text-muted mt-1 font-medium">לא נבדקו</div>
+                              </button>
+                            </div>
+                            
+                            <ProgressBar 
+                              value={stats.coverage_percentage}
+                              max={100}
+                              color="violet"
+                              size="lg"
+                            />
+                            <p className="text-center text-sm text-text-muted mt-3">
+                              {stats.checked} מתוך {stats.total_requirements} דרישות נבדקו
+                            </p>
+                          </>
+                        );
+                      })()}
                     </div>
                     
                     {/* Requirements by Category */}
                     <div className="space-y-4 mb-8">
-                      <h4 className="text-lg font-semibold text-text-primary">דרישות לפי קטגוריה</h4>
-                      {Object.entries(validationResult.coverage.by_category || {}).map(([category, requirements]: [string, any]) => (
-                        <div key={category} className="border border-border rounded-xl overflow-hidden">
-                          <div className="bg-gray-50 px-5 py-3 border-b border-border">
-                            <h5 className="font-semibold text-text-primary">{category}</h5>
+                      <div className="flex items-center justify-between">
+                        <h4 className="text-lg font-semibold text-text-primary">
+                          דרישות לפי קטגוריה
+                          {requirementsFilter !== 'all' && (
+                            <span className="text-sm font-normal text-text-muted mr-2">
+                              (מסנן: {
+                                requirementsFilter === 'passed' ? 'עברו בדיקה' :
+                                requirementsFilter === 'failed' ? 'נכשלו' :
+                                'לא נבדקו'
+                              })
+                            </span>
+                          )}
+                        </h4>
+                        {requirementsFilter !== 'all' && (
+                          <button
+                            onClick={() => setRequirementsFilter('all')}
+                            className="text-xs text-primary hover:text-primary/80 font-medium underline"
+                          >
+                            הצג הכל
+                          </button>
+                        )}
+                      </div>
+                      {(() => {
+                        const filteredCategories = Object.entries(validationResult.coverage.by_category || {})
+                          .map(([category, requirements]: [string, any]) => {
+                            // Filter requirements based on selected filter
+                            const filteredRequirements = requirements.filter((req: any) => {
+                              if (requirementsFilter === 'all') return true;
+                              if (requirementsFilter === 'passed') return req.status === 'passed';
+                              if (requirementsFilter === 'failed') return req.status === 'failed';
+                              if (requirementsFilter === 'not_checked') return req.status === 'not_checked';
+                              return true;
+                            });
+
+                            return { category, filteredRequirements };
+                          })
+                          .filter(({ filteredRequirements }) => filteredRequirements.length > 0);
+
+                        if (filteredCategories.length === 0) {
+                          return (
+                            <div className="bg-gray-50 border border-border rounded-xl p-8 text-center">
+                              <p className="text-text-muted">
+                                לא נמצאו דרישות עבור הפילטר: {
+                                  requirementsFilter === 'passed' ? 'עברו בדיקה' :
+                                  requirementsFilter === 'failed' ? 'נכשלו' :
+                                  'לא נבדקו'
+                                }
+                              </p>
+                            </div>
+                          );
+                        }
+
+                        return filteredCategories.map(({ category, filteredRequirements }) => (
+                          <div key={category} className="border border-border rounded-xl overflow-hidden">
+                            <div className="bg-gray-50 px-5 py-3 border-b border-border">
+                              <h5 className="font-semibold text-text-primary">
+                                {category}
+                                <span className="text-xs font-normal text-text-muted mr-2">
+                                  ({filteredRequirements.length} דרישות)
+                                </span>
+                              </h5>
+                            </div>
+                            <div className="divide-y divide-border">
+                              {filteredRequirements.map((req: any) => (
+                                <RequirementItem key={req.requirement_id} req={req} />
+                              ))}
+                            </div>
                           </div>
-                          <div className="divide-y divide-border">
-                            {requirements.map((req: any) => (
-                              <RequirementItem key={req.requirement_id} req={req} />
-                            ))}
-                          </div>
-                        </div>
-                      ))}
+                        ));
+                      })()}
                     </div>
                     
                     {/* Missing Segments */}
