@@ -131,3 +131,40 @@ export interface ValidationResponse {
   failed_checks: number;
   created_at: string;
 }
+
+// Coverage tracking types
+export interface RequirementCoverage {
+  requirement_id: string;
+  category: string;
+  description: string;
+  severity: 'critical' | 'error' | 'warning';
+  status: 'passed' | 'failed' | 'not_checked';
+  segments_checked: string[];
+  violations: ValidationViolation[];
+}
+
+export interface CoverageStatistics {
+  total_requirements: number;
+  checked: number;
+  passed: number;
+  failed: number;
+  not_checked: number;
+  coverage_percentage: number;
+  pass_percentage: number;
+}
+
+export interface MissingSegment {
+  requirement_id: string;
+  description: string;
+  category: string;
+  severity: string;
+  needed_segment_type: string;
+}
+
+export interface CoverageReport {
+  statistics: CoverageStatistics;
+  requirements: Record<string, RequirementCoverage>;
+  by_category: Record<string, RequirementCoverage[]>;
+  missing_segments_needed: MissingSegment[];
+}
+

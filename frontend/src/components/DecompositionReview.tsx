@@ -86,6 +86,24 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
     onApprove(approved);
   };
 
+  const handleSelectAll = () => {
+    if (!decomposition) return;
+    
+    setDecomposition({
+      ...decomposition,
+      segments: decomposition.segments.map(s => ({ ...s, approved_by_user: true })),
+    });
+  };
+
+  const handleDeselectAll = () => {
+    if (!decomposition) return;
+    
+    setDecomposition({
+      ...decomposition,
+      segments: decomposition.segments.map(s => ({ ...s, approved_by_user: false })),
+    });
+  };
+
   const getConfidenceColor = (confidence: number) => {
     if (confidence >= 0.85) return 'text-green-600';
     if (confidence >= 0.70) return 'text-yellow-600';
@@ -193,15 +211,35 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
               </button>
             </div>
 
-            <div className="flex items-center gap-2">
-              <span className="text-sm text-gray-600">🔍 Zoom:</span>
-              <button onClick={() => setZoom(Math.max(50, zoom - 10))} className="p-1 hover:bg-gray-100 rounded">
-                <ZoomOut className="w-4 h-4" />
-              </button>
-              <span className="text-sm font-mono w-12 text-center">{zoom}%</span>
-              <button onClick={() => setZoom(Math.min(200, zoom + 10))} className="p-1 hover:bg-gray-100 rounded">
-                <ZoomIn className="w-4 h-4" />
-              </button>
+            <div className="flex items-center gap-4">
+              {/* Select All / Deselect All buttons */}
+              <div className="flex gap-2 border-l pl-4">
+                <button
+                  onClick={handleSelectAll}
+                  className="px-3 py-1 bg-green-500 text-white text-sm rounded hover:bg-green-600 transition-colors"
+                  title="סמן את כל הסגמנטים"
+                >
+                  ✓ סמן הכל
+                </button>
+                <button
+                  onClick={handleDeselectAll}
+                  className="px-3 py-1 bg-gray-500 text-white text-sm rounded hover:bg-gray-600 transition-colors"
+                  title="בטל סימון של כל הסגמנטים"
+                >
+                  ✗ בטל הכל
+                </button>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <span className="text-sm text-gray-600">🔍 Zoom:</span>
+                <button onClick={() => setZoom(Math.max(50, zoom - 10))} className="p-1 hover:bg-gray-100 rounded">
+                  <ZoomOut className="w-4 h-4" />
+                </button>
+                <span className="text-sm font-mono w-12 text-center">{zoom}%</span>
+                <button onClick={() => setZoom(Math.min(200, zoom + 10))} className="p-1 hover:bg-gray-100 rounded">
+                  <ZoomIn className="w-4 h-4" />
+                </button>
+              </div>
             </div>
           </div>
         </div>

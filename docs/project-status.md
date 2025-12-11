@@ -1,7 +1,7 @@
 # Project Status - Mamad Validation App
 
 **Last Updated**: December 11, 2025  
-**Current Phase**: Plan Decomposition Feature Development  
+**Current Phase**: Requirements Coverage Tracking Implementation  
 **Target Release**: Q1 2026
 
 ---
@@ -148,6 +148,72 @@ Building a FastAPI application that validates Israeli Home Front Command shelter
   - [x] Multi-stage App workflow
     - [x] Upload → Review → Validation → Results
     - [x] Progress indicator in header
+
+#### Phase 3.6: Segment Classification & Targeted Validation - COMPLETED ✨
+- [x] **Classification System**
+  - [x] Modify segment_analyzer.py to classify segments first
+  - [x] 9 classification categories (WALL_SECTION, ROOM_LAYOUT, DOOR_DETAILS, etc.)
+  - [x] Hebrew descriptions for all classifications
+  - [x] relevant_requirements field mapping segments to validation rules
+  
+- [x] **Targeted Validation**
+  - [x] Modified mamad_validator.py to only run relevant validations per segment
+  - [x] Validation mapping by classification category
+  - [x] Fixed type conversion bugs (int → string)
+  
+- [x] **UI Enhancements**
+  - [x] Display classification box (blue background) with category + description
+  - [x] Show relevant_requirements list
+  - [x] Reduced image sizes (200px max width, grid cols-4)
+  - [x] Hebrew language for all user-facing text
+
+#### Phase 3.7: Requirements Coverage Tracking - COMPLETED ✨
+- [x] **Backend Coverage Service**
+  - [x] Create requirements_coverage.py service (223 lines)
+  - [x] Track all 16 MAMAD requirements from requirements-mamad.md
+  - [x] Map requirements by category (קירות, גובה, פתחים, אוורור, etc.)
+  - [x] calculate_coverage() method with statistics
+  - [x] Identify missing segments needed to complete coverage
+  - [x] Integrate into segment_validation.py endpoint
+  
+- [x] **Frontend Coverage Dashboard**
+  - [x] Add CoverageReport TypeScript types
+  - [x] Display coverage statistics (coverage %, pass %, counts)
+  - [x] Progress bar visualization
+  - [x] Requirements table grouped by category
+  - [x] Status icons per requirement (✅ passed, ❌ failed, ⚠️ not checked)
+  - [x] "Missing segments needed" recommendations list
+  - [x] Color-coded display (green/red/gray)
+
+- [x] **Coverage Features**
+  - [x] Track 16 requirements across 6 categories
+  - [x] Calculate coverage_percentage (how many requirements checked)
+  - [x] Calculate pass_percentage (how many requirements passed)
+  - [x] Show which segments validated each requirement
+  - [x] List violations per requirement
+  - [x] Recommend which segment types to add
+
+---
+
+## 🎯 Current Status Summary
+
+**All 4 validation workflow parts COMPLETE + Coverage Tracking COMPLETE!**
+
+```
+Part 1: Frame Detection → Part 2: Segment Cropping → 
+Part 3: Classification + Extraction → Part 4: Targeted Validation → 
+Coverage Report (NEW - Tracks all 16 requirements)
+```
+
+**What Users See Now:**
+1. Upload PDF → GPT-5.1 detects frames
+2. Review segments → Approve/reject
+3. Classification → Each segment categorized (Hebrew)
+4. Validation → Only relevant rules applied
+5. **Coverage Dashboard** → Shows which requirements checked/passed/failed/missing
+6. **Recommendations** → What segment types needed to complete coverage
+
+
     - [x] State management
 
 - [x] **Integration & Testing**
@@ -396,4 +462,14 @@ Building a FastAPI application that validates Israeli Home Front Command shelter
 | **2025-12-11** | Fixed TypeScript import issues and Vite cache problems | System |
 | **2025-12-11** | **UI now fully functional - both frontend and backend running** | System |
 | **2025-12-11** | Updated project status to reflect decomposition feature completion | System |
+| **2025-12-11** | **Implemented Segment Classification System (Phase 3.6)** | System |
+| **2025-12-11** | Modified segment_analyzer to classify before validation | System |
+| **2025-12-11** | Implemented targeted validation (only relevant rules per segment) | System |
+| **2025-12-11** | Fixed UI display issues (image size, Hebrew text) | System |
+| **2025-12-11** | **Implemented Requirements Coverage Tracking (Phase 3.7)** | System |
+| **2025-12-11** | Created RequirementsCoverageTracker service (16 requirements tracked) | System |
+| **2025-12-11** | Integrated coverage report into API endpoint | System |
+| **2025-12-11** | Built coverage dashboard UI with statistics and recommendations | System |
+| **2025-12-11** | **Users can now see validation status relative to all requirements** | System |
+
 
