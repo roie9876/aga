@@ -64,27 +64,31 @@ async def decompose_plan(
                    filename=file.filename,
                    size_mb=f"{file_size_mb:.2f}")
         
-        # Convert DWF/DWFX to PNG if needed
-        from src.utils.file_converter import convert_dwf_to_image, is_dwf_file
+        # Convert file to PNG if needed (DWF, PDF, etc.)
+        from src.utils.file_converter import convert_to_image_if_needed
         
-        if is_dwf_file(file.filename):
-            logger.info("Converting DWF/DWFX to PNG", filename=file.filename)
-            try:
-                plan_image_bytes, converted_filename = convert_dwf_to_image(
-                    file_content, 
-                    file.filename
-                )
-                logger.info("DWF conversion successful", 
+        try:
+            plan_image_bytes, processed_filename, was_converted = convert_to_image_if_needed(
+                file_content,
+                file.filename
+            )
+            
+            if was_converted:
+                logger.info("File converted successfully",
                            original=file.filename,
-                           converted=converted_filename)
-            except Exception as conv_error:
-                logger.error("DWF conversion failed", error=str(conv_error))
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"שגיאה בהמרת קובץ DWF: {str(conv_error)}. אנא וודא שהקובץ תקין."
-                )
-        else:
-            plan_image_bytes = file_content
+                           converted=processed_filename)
+        except ValueError as conv_error:
+            logger.error("File conversion failed", error=str(conv_error))
+            raise HTTPException(
+                status_code=400,
+                detail=str(conv_error)
+            )
+        except Exception as conv_error:
+            logger.error("File conversion failed unexpectedly", error=str(conv_error))
+            raise HTTPException(
+                status_code=500,
+                detail=f"שגיאה בלתי צפויה בהמרת קובץ: {str(conv_error)}"
+            )
         
         # Save to temp file for processing
         temp_dir = tempfile.mkdtemp()

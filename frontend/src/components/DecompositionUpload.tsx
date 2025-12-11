@@ -58,7 +58,7 @@ export const DecompositionUpload: React.FC<DecompositionUploadProps> = ({
       formData.append('project_id', projectId);
 
       setProgress(20);
-      setCurrentStep('ממיר DWF/DWFX ל-PNG...');
+      setCurrentStep('ממיר DWF/DWFX (אם נדרש)...');
 
       // Simulate progress for user experience
       const progressInterval = setInterval(() => {
@@ -129,13 +129,13 @@ export const DecompositionUpload: React.FC<DecompositionUploadProps> = ({
             {/* Steps */}
             <div className="space-y-3 text-sm">
               <div className={progress >= 20 ? 'text-green-600' : 'text-gray-400'}>
-                ✅ המרת קובץ DWF ל-PNG
+                ✅ המרת DWF → PNG (ODA File Converter)
               </div>
               <div className={progress >= 40 ? 'text-green-600' : 'text-gray-400'}>
                 🔍 ניתוח חכם של התוכנית (GPT-5.1)
                 {progress >= 40 && progress < 90 && (
                   <div className="mr-6 mt-1 text-xs text-gray-500">
-                    מזהה מסגרות וגיליונות...
+                    מזהה תוכנית קומה, חתכים ופרטים...
                   </div>
                 )}
               </div>
@@ -208,8 +208,18 @@ export const DecompositionUpload: React.FC<DecompositionUploadProps> = ({
           <div className="flex items-start gap-3">
             <FileImage className="w-5 h-5 text-blue-500 flex-shrink-0 mt-0.5" />
             <div className="text-sm text-blue-800">
-              <strong>טיפ:</strong> קבצי DWF/DWFX יעברו פירוק אוטומטי לפני הבדיקה.
-              GPT-5.1 יזהה את כל הסגמנטים בתוכנית ויאפשר לך לסקור אותם לפני המשך.
+              <strong>✨ המרת DWF אוטומטית:</strong> המערכת משתמשת ב-ODA File Converter (ללא סימני מים)
+              להמרת קבצי DWF/DWFX ל-PNG באופן אוטומטי. אם ההמרה נכשלת, תוכל להמיר ידנית.
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-4 p-4 bg-green-50 border border-green-200 rounded-lg">
+          <div className="flex items-start gap-3">
+            <FileImage className="w-5 h-5 text-green-600 flex-shrink-0 mt-0.5" />
+            <div className="text-sm text-green-800">
+              <strong>💡 איך זה עובד:</strong> GPT-5.1 מנתח את התוכנית, מזהה את תוכנית הקומה הראשית, 
+              חתכים ופרטי בניה, ומאפשר לך לבחור אילו סגמנטים רלוונטיים לבדיקת ממ"ד.
             </div>
           </div>
         </div>

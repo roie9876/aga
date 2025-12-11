@@ -17,11 +17,11 @@ class SegmentType(str, Enum):
 
 
 class BoundingBox(BaseModel):
-    """Bounding box coordinates in percentage (0-100)."""
-    x: float = Field(..., ge=0, le=100, description="X coordinate (%)")
-    y: float = Field(..., ge=0, le=100, description="Y coordinate (%)")
-    width: float = Field(..., ge=0, le=100, description="Width (%)")
-    height: float = Field(..., ge=0, le=100, description="Height (%)")
+    """Bounding box coordinates (pixels or percentage)."""
+    x: float = Field(..., ge=0, le=50000, description="X coordinate (pixels or %)")
+    y: float = Field(..., ge=0, le=50000, description="Y coordinate (pixels or %)")
+    width: float = Field(..., ge=0, le=50000, description="Width (pixels or %)")
+    height: float = Field(..., ge=0, le=50000, description="Height (pixels or %)")
 
 
 class ProjectMetadata(BaseModel):

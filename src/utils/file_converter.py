@@ -1,11 +1,11 @@
 """File conversion utilities for architectural plans."""
 import io
+import os
 import tempfile
+import subprocess
 from pathlib import Path
 from typing import Optional, Tuple
 from PIL import Image
-import threading
-import time
 
 from src.utils.logging import get_logger
 
@@ -13,10 +13,13 @@ logger = get_logger(__name__)
 
 
 def convert_dwf_to_image(dwf_bytes: bytes, filename: str) -> Tuple[bytes, str]:
-    """Convert DWF/DWFX file to PNG image.
+    """Convert DWF/DWFX file to PNG using Docker + ODA FileConverter.
     
-    DWF (Design Web Format) and DWFX (DWF XML) files need to be converted to images for GPT-5.1 analysis.
-    DWFX is the newer XML-based format that replaced DWF.
+    Process:
+    1. Save DWF to temporary directory
+    2. Run ODA FileConverter in Docker container (Linux CLI version)
+    3. Convert resulting DWG to PNG using ezdxf + matplotlib
+    4. Return PNG bytes
     
     Args:
         dwf_bytes: Raw DWF/DWFX file bytes
@@ -26,113 +29,166 @@ def convert_dwf_to_image(dwf_bytes: bytes, filename: str) -> Tuple[bytes, str]:
         Tuple of (image_bytes, new_filename)
         
     Raises:
-        ValueError: If conversion fails
+        ValueError: If Docker is not available or conversion fails
     """
-    logger.info("Converting DWF/DWFX to image", filename=filename)
+    logger.info("Converting DWF to PNG using Docker + ODA FileConverter", filename=filename)
     
+    # Check if Docker is available
     try:
-        # Try using aspose-cad with thread-based timeout protection
-        try:
-            import aspose.cad as cad
-            
-            # Save DWF to temp file
-            with tempfile.NamedTemporaryFile(suffix='.dwf', delete=False) as tmp:
-                tmp.write(dwf_bytes)
-                tmp_path = tmp.name
-            
-            try:
-                logger.info("Loading DWF file with Aspose.CAD", path=tmp_path)
-                logger.warning("Aspose.CAD conversion may hang - using 20 second timeout")
-                
-                # Use threading for timeout (works better with native libraries)
-                result = {'image_bytes': None, 'error': None}
-                
-                def convert_dwf():
-                    """Thread function to convert DWF."""
-                    try:
-                        # Load DWF
-                        logger.info("Aspose.CAD: Loading DWF...")
-                        image = cad.Image.load(tmp_path)
-                        logger.info("Aspose.CAD: DWF loaded successfully")
-                        
-                        # Convert to PNG
-                        png_path = tmp_path.replace('.dwf', '.png')
-                        
-                        # Set rasterization options for Aspose.CAD 25.x
-                        logger.info("Aspose.CAD: Setting rasterization options")
-                        rasterization_options = cad.imageoptions.CadRasterizationOptions()
-                        rasterization_options.page_width = float(1920)
-                        rasterization_options.page_height = float(1080)
-                        
-                        png_options = cad.imageoptions.PngOptions()
-                        png_options.vector_rasterization_options = rasterization_options
-                        
-                        # Save as PNG
-                        logger.info("Aspose.CAD: Saving as PNG", path=png_path)
-                        image.save(png_path, png_options)
-                        logger.info("Aspose.CAD: PNG saved successfully")
-                        
-                        # Read PNG bytes
-                        with open(png_path, 'rb') as f:
-                            result['image_bytes'] = f.read()
-                        
-                        # Cleanup PNG
-                        Path(png_path).unlink(missing_ok=True)
-                        
-                    except Exception as e:
-                        result['error'] = str(e)
-                        logger.error("Aspose.CAD conversion failed in thread", error=str(e))
-                
-                # Start conversion in thread
-                conversion_thread = threading.Thread(target=convert_dwf, daemon=True)
-                conversion_thread.start()
-                
-                # Wait with timeout (20 seconds)
-                conversion_thread.join(timeout=20.0)
-                
-                if conversion_thread.is_alive():
-                    # Thread is still running - timeout!
-                    logger.error("DWF conversion timed out after 20 seconds - Aspose.CAD appears to be hanging")
-                    raise ValueError(
-                        "DWF file conversion timed out after 20 seconds. "
-                        "Aspose.CAD library appears to hang on this file. "
-                        "Please convert your DWF to PNG manually using AutoCAD, DWG TrueView, "
-                        "or an online converter (e.g., https://www.zamzar.com/convert/dwf-to-png/)"
-                    )
-                
-                # Check for errors
-                if result['error']:
-                    raise ValueError(f"DWF conversion failed: {result['error']}")
-                
-                if not result['image_bytes']:
-                    raise ValueError("DWF conversion failed: no image data returned")
-                
-                # Success!
-                new_filename = filename.rsplit('.', 1)[0] + '.png'
-                logger.info("DWF converted successfully using aspose-cad", 
-                           original=filename, converted=new_filename,
-                           size_kb=len(result['image_bytes']) / 1024)
-                
-                return result['image_bytes'], new_filename
-                    
-            finally:
-                Path(tmp_path).unlink(missing_ok=True)
-                
-        except ImportError:
-            logger.warning("aspose-cad not installed")
-            raise ValueError(
-                "DWF/DWFX file conversion requires aspose-cad library. "
-                "Please convert your DWF/DWFX file to PNG, JPG, or PDF format manually."
+        result = subprocess.run(
+            ['docker', '--version'],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if result.returncode != 0:
+            raise ValueError("Docker is not running")
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        logger.error("Docker not available")
+        raise ValueError(
+            "❌ Docker לא זמין\n\n"
+            "המרת DWF דורשת Docker.\n\n"
+            "אופציות:\n"
+            "1. התקן Docker Desktop: https://www.docker.com/products/docker-desktop\n"
+            "2. או המר ידנית:\n"
+            "   • פתח ODA File Converter\n"
+            "   • המר DWF → DWG\n"
+            "   • פתח ב-FreeCAD\n"
+            "   • ייצא כ-PNG\n"
+            "   • העלה את ה-PNG"
+        )
+    
+    # Check if ODA Docker image exists, build if not
+    try:
+        result = subprocess.run(
+            ['docker', 'images', '-q', 'oda-converter'],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        if not result.stdout.strip():
+            logger.info("Building ODA Docker image (first time only)...")
+            build_result = subprocess.run(
+                ['docker', 'build', '-t', 'oda-converter', '-f', 'Dockerfile.oda', '.'],
+                capture_output=True,
+                text=True,
+                timeout=300,
+                cwd=str(Path(__file__).parent.parent.parent)
             )
-            
-            raise ValueError(
-                "DWF/DWFX file conversion requires aspose-cad library. "
-                "Please convert your DWF/DWFX file to PNG, JPG, or PDF format manually."
-            )
-            
+            if build_result.returncode != 0:
+                logger.error("Docker image build failed", stderr=build_result.stderr)
+                raise ValueError(f"Failed to build Docker image: {build_result.stderr}")
+            logger.info("ODA Docker image built successfully")
     except Exception as e:
-        logger.error("DWF/DWFX conversion failed", error=str(e), filename=filename)
-        raise ValueError(f"Failed to convert DWF/DWFX file: {str(e)}")
+        logger.error("Docker image check failed", error=str(e))
+        raise ValueError(f"Docker setup failed: {str(e)}")
+    
+    # Import ezdxf for DWG rendering
+    try:
+        import ezdxf
+        from ezdxf.addons.drawing import RenderContext, Frontend
+        from ezdxf.addons.drawing.matplotlib import MatplotlibBackend
+        import matplotlib.pyplot as plt
+    except ImportError as e:
+        logger.error("Missing dependencies for DWG rendering", error=str(e))
+        raise ValueError(
+            "חסרות ספריות נדרשות:\n"
+            "pip install ezdxf matplotlib"
+        )
+    
+    # Create temporary directories
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        input_dir = temp_path / "input"
+        output_dir = temp_path / "output"
+        input_dir.mkdir()
+        output_dir.mkdir()
+        
+        # Save DWF file
+        dwf_file = input_dir / filename
+        dwf_file.write_bytes(dwf_bytes)
+        logger.info("DWF saved to temp file", path=str(dwf_file))
+        
+        try:
+            # Step 1: Convert DWF → DWG using Docker + ODA FileConverter
+            cmd = [
+                'docker', 'run', '--rm',
+                '-v', f'{temp_path}:/data',
+                'oda-converter',
+                '/data/input',      # Input folder
+                '/data/output',     # Output folder
+                'ACAD2018',         # Output version
+                'DWG',              # Output type
+                '0',                # Recurse (0 = no)
+                '1',                # Audit (1 = yes)
+                '*.DWF'             # Filter
+            ]
+            
+            logger.info("Running ODA FileConverter in Docker", cmd=' '.join(cmd))
+            
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=60
+            )
+            
+            if result.returncode != 0:
+                logger.error("ODA conversion failed", stderr=result.stderr, stdout=result.stdout)
+                raise ValueError(f"המרת DWF נכשלה: {result.stderr}")
+            
+            # Find the output DWG file
+            dwg_files = list(output_dir.glob("*.dwg"))
+            if not dwg_files:
+                logger.error("No DWG file created", output_dir=str(output_dir))
+                raise ValueError("לא נוצר קובץ DWG מההמרה")
+            
+            dwg_file = dwg_files[0]
+            logger.info("DWF → DWG conversion successful", dwg_file=str(dwg_file))
+            
+            # Step 2: Convert DWG → PNG using ezdxf + matplotlib
+            logger.info("Converting DWG to PNG", dwg_file=str(dwg_file))
+            
+            doc = ezdxf.readfile(str(dwg_file))
+            msp = doc.modelspace()
+            
+            # Setup rendering
+            fig = plt.figure(figsize=(20, 15), dpi=300)
+            ax = fig.add_axes([0, 0, 1, 1])
+            ctx = RenderContext(doc)
+            out = MatplotlibBackend(ax)
+            
+            # Render drawing
+            Frontend(ctx, out).draw_layout(msp, finalize=True)
+            
+            # Save to PNG bytes
+            png_buffer = io.BytesIO()
+            fig.savefig(
+                png_buffer,
+                format='png',
+                dpi=300,
+                bbox_inches='tight',
+                pad_inches=0,
+                facecolor='white'
+            )
+            plt.close(fig)
+            
+            png_bytes = png_buffer.getvalue()
+            new_filename = filename.rsplit('.', 1)[0] + '.png'
+            
+            logger.info("DWF → PNG conversion complete", 
+                       original=filename, 
+                       converted=new_filename,
+                       size_kb=len(png_bytes) / 1024)
+            
+            return png_bytes, new_filename
+            
+        except subprocess.TimeoutExpired:
+            logger.error("ODA conversion timed out")
+            raise ValueError("המרת DWF לקחה יותר מדי זמן")
+        except Exception as e:
+            logger.error("DWF conversion failed", error=str(e))
+            raise ValueError(f"שגיאה בהמרת DWF: {str(e)}")
 
 
 def is_dwf_file(filename: str) -> bool:
@@ -227,10 +283,78 @@ def convert_to_image_if_needed(
             "Please convert to PDF, PNG, or JPG format, or use DWF format."
         )
     
-    # PDF - no conversion needed (GPT-5.1 supports PDF)
+    # PDF - convert to high-res PNG to preserve quality for tiling
     elif file_type == 'pdf':
-        logger.info("File is PDF - no conversion needed", filename=filename)
-        return file_bytes, filename, False
+        logger.info("Converting PDF to PNG (high resolution)", filename=filename)
+        image_bytes, new_filename = convert_pdf_to_image(file_bytes, filename)
+        return image_bytes, new_filename, True
     
     else:
         raise ValueError(f"Unknown file type: {filename}")
+
+
+def convert_pdf_to_image(pdf_bytes: bytes, filename: str) -> Tuple[bytes, str]:
+    """Convert PDF to high-resolution PNG.
+    
+    Uses pdf2image (Poppler) to convert PDF to PNG at 300 DPI
+    to preserve detail for GPT analysis and tiling.
+    
+    Args:
+        pdf_bytes: Raw PDF file bytes
+        filename: Original filename
+        
+    Returns:
+        Tuple of (png_bytes, new_filename)
+        
+    Raises:
+        ValueError: If conversion fails
+    """
+    try:
+        from pdf2image import convert_from_bytes
+    except ImportError:
+        logger.error("pdf2image not installed")
+        raise ValueError(
+            "PDF conversion requires pdf2image library.\n"
+            "Install: pip install pdf2image\n"
+            "macOS also requires: brew install poppler"
+        )
+    
+    logger.info("Converting PDF to PNG", filename=filename, dpi=300)
+    
+    try:
+        # Convert PDF to images at 300 DPI (high quality for architectural plans)
+        images = convert_from_bytes(
+            pdf_bytes,
+            dpi=300,
+            fmt='png',
+            use_pdftocairo=True  # Better quality than pdftoppm
+        )
+        
+        if not images:
+            raise ValueError("PDF conversion produced no images")
+        
+        # If multi-page PDF, use first page
+        if len(images) > 1:
+            logger.warning("Multi-page PDF detected, using first page only", 
+                          total_pages=len(images))
+        
+        image = images[0]
+        
+        # Convert PIL Image to bytes
+        png_buffer = io.BytesIO()
+        image.save(png_buffer, format='PNG', optimize=True)
+        png_bytes = png_buffer.getvalue()
+        
+        new_filename = filename.rsplit('.', 1)[0] + '.png'
+        
+        logger.info("PDF → PNG conversion complete",
+                   original=filename,
+                   converted=new_filename,
+                   size_kb=len(png_bytes) / 1024,
+                   dimensions=f"{image.width}x{image.height}")
+        
+        return png_bytes, new_filename
+        
+    except Exception as e:
+        logger.error("PDF conversion failed", error=str(e))
+        raise ValueError(f"Failed to convert PDF: {str(e)}")

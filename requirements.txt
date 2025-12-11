@@ -12,7 +12,9 @@ openai==1.10.0
 
 # Image processing
 Pillow==10.2.0
-aspose-cad>=25.3.0  # DWF/DWFX to PNG conversion
+ezdxf==1.3.0  # DWG/DXF rendering for DWF conversion
+matplotlib==3.8.2  # Required by ezdxf for rendering
+pdf2image==1.17.0  # PDF to PNG conversion (requires poppler)
 
 # Utilities
 python-dotenv==1.0.0

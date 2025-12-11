@@ -21,18 +21,24 @@ class ImageCropper:
         output_format: str = "PNG"
     ) -> BytesIO:
         """
-        Crop a segment from a full plan image using percentage-based bounding box.
+        Crop a segment from a full plan image using bounding box coordinates.
+        Automatically detects if coordinates are pixels or percentages.
         
         Args:
             image_path: Path to the full plan image
-            bounding_box: Dict with keys: x, y, width, height (0-100 percentages)
+            bounding_box: Dict with keys: x, y, width, height
+                         Values > 100 are treated as pixels, <= 100 as percentages
             output_format: Output image format (PNG, JPEG, etc.)
             
         Returns:
             BytesIO buffer with cropped image data
             
         Example:
+            >>> # Percentage-based
             >>> bounding_box = {"x": 10, "y": 20, "width": 30, "height": 40}
+            >>> cropped = ImageCropper.crop_segment("full_plan.png", bounding_box)
+            >>> # Pixel-based
+            >>> bounding_box = {"x": 110, "y": 233, "width": 486, "height": 294}
             >>> cropped = ImageCropper.crop_segment("full_plan.png", bounding_box)
         """
         try:
@@ -40,23 +46,43 @@ class ImageCropper:
             with Image.open(image_path) as img:
                 img_width, img_height = img.size
                 
-                # Convert percentage-based bounding box to pixel coordinates
-                x_percent = bounding_box["x"]
-                y_percent = bounding_box["y"]
-                width_percent = bounding_box["width"]
-                height_percent = bounding_box["height"]
+                # Extract bounding box values
+                x_val = bounding_box["x"]
+                y_val = bounding_box["y"]
+                width_val = bounding_box["width"]
+                height_val = bounding_box["height"]
                 
-                # Calculate pixel coordinates
-                left = int((x_percent / 100) * img_width)
-                top = int((y_percent / 100) * img_height)
-                right = int(((x_percent + width_percent) / 100) * img_width)
-                bottom = int(((y_percent + height_percent) / 100) * img_height)
+                # Detect if using pixels or percentages
+                # If any value > 100, treat all as pixels
+                use_pixels = any(val > 100 for val in [x_val, y_val, width_val, height_val])
+                
+                if use_pixels:
+                    # Direct pixel coordinates
+                    left = int(x_val)
+                    top = int(y_val)
+                    right = int(x_val + width_val)
+                    bottom = int(y_val + height_val)
+                    logger.info(f"Using pixel coordinates: ({left},{top})-({right},{bottom})")
+                else:
+                    # Convert percentage to pixels
+                    left = int((x_val / 100) * img_width)
+                    top = int((y_val / 100) * img_height)
+                    right = int(((x_val + width_val) / 100) * img_width)
+                    bottom = int(((y_val + height_val) / 100) * img_height)
+                    logger.info(f"Converted percentage to pixels: ({left},{top})-({right},{bottom})")
                 
                 # Ensure coordinates are within image bounds
                 left = max(0, min(left, img_width))
                 top = max(0, min(top, img_height))
                 right = max(0, min(right, img_width))
                 bottom = max(0, min(bottom, img_height))
+                
+                # Validate crop region
+                if left >= right or top >= bottom:
+                    raise ValueError(
+                        f"Invalid crop region: left={left}, top={top}, right={right}, bottom={bottom}. "
+                        f"Image size: {img_width}x{img_height}"
+                    )
                 
                 # Crop the segment
                 cropped = img.crop((left, top, right, bottom))
@@ -67,9 +93,9 @@ class ImageCropper:
                 buffer.seek(0)
                 
                 logger.info(
-                    f"Cropped segment: {bounding_box} -> "
+                    f"Cropped segment: bbox={bounding_box} -> "
                     f"pixels ({left},{top})-({right},{bottom}), "
-                    f"size {cropped.size}"
+                    f"size {cropped.size}, mode={'pixels' if use_pixels else 'percentages'}"
                 )
                 
                 return buffer
