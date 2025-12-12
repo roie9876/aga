@@ -47,7 +47,7 @@ class PlanExtractor:
             # Note: GPT-5.1 does NOT support temperature, top_p, max_tokens, etc.
             from src.config import settings
             
-            response = self.openai_client.client.chat.completions.create(
+            response = self.openai_client.chat_completions_create(
                 model=settings.azure_openai_deployment_name,
                 messages=[
                     {

@@ -58,22 +58,54 @@ class RequirementsCoverageTracker:
         # Process each analyzed segment
         for segment in validation_result.get("analyzed_segments", []):
             classification = segment.get("analysis_data", {}).get("classification", {})
-            relevant_reqs = classification.get("relevant_requirements", [])
             validation = segment.get("validation", {})
-            
-            # Mark relevant requirements as checked
-            for req_id in relevant_reqs:
+
+            # Fallback mapping for older results where we didn't store checked_requirements.
+            # This should stay aligned with src/services/mamad_validator.py.
+            category_to_checked_requirements = {
+                "WALL_SECTION": ["1.2"],
+                "ROOM_LAYOUT": ["2.1", "2.2"],
+                "DOOR_DETAILS": ["3.1"],
+                "WINDOW_DETAILS": ["3.2"],
+                "REBAR_DETAILS": ["6.3"],
+                "MATERIALS_SPECS": ["6.1", "6.2"],
+                "GENERAL_NOTES": ["4.2"],
+                "SECTIONS": ["2.1", "2.2"],
+            }
+
+            # Prefer deterministic list from validator; fall back to LLM classification field
+            checked_reqs = validation.get("checked_requirements")
+            if not checked_reqs:
+                checked_reqs = classification.get("relevant_requirements", [])
+
+            # If the LLM gave non-ID strings (or nothing), derive from primary_category
+            if not checked_reqs or not all(isinstance(x, str) and x in self.ALL_REQUIREMENTS for x in checked_reqs):
+                primary_category = classification.get("primary_category", "")
+                derived = category_to_checked_requirements.get(primary_category, [])
+                checked_reqs = derived.copy() if derived else []
+
+            # Map violations to official requirement IDs
+            violations = validation.get("violations", []) or []
+            violations_by_req: Dict[str, List[Dict[str, Any]]] = {}
+            for v in violations:
+                req_id = self._map_rule_id_to_requirement_id(v.get("rule_id", ""))
+                if not req_id:
+                    continue
+                violations_by_req.setdefault(req_id, []).append(v)
+
+            # If a violation maps to a requirement, that requirement was effectively checked.
+            for req_id in violations_by_req.keys():
+                if req_id in coverage and req_id not in checked_reqs:
+                    checked_reqs.append(req_id)
+
+            # Mark checked requirements as passed/failed
+            for req_id in checked_reqs:
                 if req_id not in coverage:
                     continue
-                
+
                 coverage[req_id]["segments_checked"].append(segment.get("segment_id"))
-                
-                # Check if there are violations for this requirement
-                segment_violations = [
-                    v for v in validation.get("violations", [])
-                    if v.get("rule_id", "").startswith(req_id.replace(".", "_"))
-                ]
-                
+
+                segment_violations = violations_by_req.get(req_id, [])
                 if segment_violations:
                     coverage[req_id]["status"] = "failed"
                     coverage[req_id]["violations"].extend(segment_violations)
@@ -120,6 +152,42 @@ class RequirementsCoverageTracker:
             "by_category": by_category,
             "missing_segments_needed": self._get_missing_segments(coverage)
         }
+
+    def _map_rule_id_to_requirement_id(self, rule_id: str) -> str:
+        """Map internal validator rule IDs (e.g., HEIGHT_002) to official requirement IDs (e.g., 2.1).
+
+        The coverage report is keyed by official IDs from requirements-mamad.md.
+        """
+        mapping = {
+            # Walls -> 1.2
+            "WALL_001": "1.2",
+            "WALL_002": "1.2",
+            "WALL_003": "1.2",
+
+            # Heights -> 2.1 / 2.2
+            "HEIGHT_001": "2.1",
+            "HEIGHT_002": "2.2",
+            "HEIGHT_003": "2.1",
+
+            # Openings
+            "DOOR_001": "3.1",
+            "WINDOW_001": "3.2",
+
+            # Rebar
+            "REBAR_001": "6.3",
+            "REBAR_002": "6.3",
+            "REBAR_003": "6.3",
+
+            # Materials
+            "CONCRETE_001": "6.1",
+            "CONCRETE_002": "6.1",
+            "STEEL_001": "6.2",
+
+            # Notes
+            "VENT_001": "4.2",
+        }
+
+        return mapping.get(rule_id, "")
     
     def _get_missing_segments(self, coverage: Dict[str, Any]) -> List[Dict[str, str]]:
         """Get list of segment types needed to complete coverage.

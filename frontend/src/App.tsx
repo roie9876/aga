@@ -53,9 +53,15 @@ const translateType = (type: string): string => {
 
 // Calculate real-time coverage statistics from validation data
 const calculateCoverageStatistics = (validationResult: any) => {
-  // Try to get requirements from by_category structure
+  // Prefer backend-calculated statistics when available (they are derived from validator checks)
+  const backendStats = validationResult?.coverage?.statistics;
+  if (backendStats && typeof backendStats.total_requirements === 'number') {
+    return backendStats;
+  }
+
+  // Fallback: compute from by_category if present
   if (!validationResult?.coverage?.by_category) {
-    return validationResult?.coverage?.statistics || {
+    return {
       total_requirements: 0,
       checked: 0,
       passed: 0,
@@ -66,7 +72,6 @@ const calculateCoverageStatistics = (validationResult: any) => {
     };
   }
 
-  // Flatten all requirements from all categories
   const allRequirements: any[] = [];
   Object.values(validationResult.coverage.by_category).forEach((categoryReqs: any) => {
     allRequirements.push(...categoryReqs);
@@ -111,10 +116,12 @@ function App() {
     setStage('decomposition_review');
   };
   
-  const handleApprovalComplete = async (approvedSegmentIds: string[]) => {
+  const handleApprovalComplete = async (params: { mode: 'segments' | 'full_plan'; approvedSegments: string[] }) => {
     setStage('validation');
+
+    const totalToValidate = params.mode === 'full_plan' ? 1 : params.approvedSegments.length;
     setValidationProgress({
-      total: approvedSegmentIds.length,
+      total: totalToValidate,
       current: 0,
       currentSegment: 'מתחיל בדיקה...'
     });
@@ -125,7 +132,8 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           decomposition_id: decompositionId,
-          approved_segment_ids: approvedSegmentIds,
+          approved_segment_ids: params.approvedSegments,
+          mode: params.mode,
         }),
       });
       
@@ -569,23 +577,32 @@ function App() {
                             </div>
                             
                             {/* Analysis Details */}
-                            {segment.status === 'analyzed' && (
-                              <div className="p-5 space-y-4">
-                                {/* Relevant Requirements Checked */}
-                                {classification.relevant_requirements && classification.relevant_requirements.length > 0 && (
+                            <div className="p-5 space-y-4">
+                              {/* Requirements Checked */}
+                              {(() => {
+                                const checkedReqs: string[] =
+                                  (segment?.analysis_data?.validation?.checked_requirements as string[] | undefined) ||
+                                  (segment?.validation?.checked_requirements as string[] | undefined) ||
+                                  (classification.relevant_requirements as string[] | undefined) ||
+                                  [];
+
+                                if (!checkedReqs || checkedReqs.length === 0) return null;
+
+                                return (
                                   <div>
                                     <h5 className="text-sm font-semibold text-text-primary mb-3">
                                       דרישות שנבדקו:
                                     </h5>
                                     <div className="flex flex-wrap gap-2">
-                                      {classification.relevant_requirements.map((reqId: string) => (
+                                      {checkedReqs.map((reqId: string) => (
                                         <Badge key={reqId} variant="info" size="sm">
                                           {reqId}
                                         </Badge>
                                       ))}
                                     </div>
                                   </div>
-                                )}
+                                );
+                              })()}
                                 
                                 {/* Validation Results */}
                                 {validation.violations && validation.violations.length > 0 && (
@@ -694,18 +711,31 @@ function App() {
                                 )}
                                 
                                 {/* LLM Reasoning */}
-                                {analysis.reasoning && (
-                                  <details className="text-sm">
-                                    <summary className="cursor-pointer text-text-muted hover:text-text-primary font-medium">
-                                      הסבר GPT-5.1
-                                    </summary>
-                                    <p className="mt-2 text-text-muted bg-background rounded-lg p-3 border border-border">
-                                      {analysis.reasoning}
-                                    </p>
-                                  </details>
-                                )}
+                                {(() => {
+                                  const decisionSummary = segment?.validation?.decision_summary_he;
+                                  const llmReasoning = analysis.reasoning;
+
+                                  if (!decisionSummary && !llmReasoning) return null;
+
+                                  return (
+                                    <details open className="text-sm mt-3 border-t border-border pt-3">
+                                      <summary className="cursor-pointer text-text-primary hover:text-primary font-semibold mb-2">
+                                        הסבר בדיקות
+                                      </summary>
+                                      {decisionSummary && (
+                                        <div className="mt-2 text-text-muted bg-background rounded-lg p-3 border border-border text-sm leading-relaxed">
+                                          {decisionSummary}
+                                        </div>
+                                      )}
+                                      {llmReasoning && (
+                                        <div className="mt-2 text-text-muted bg-blue-50 rounded-lg p-3 border border-blue-200 text-sm leading-relaxed">
+                                          {llmReasoning}
+                                        </div>
+                                      )}
+                                    </details>
+                                  );
+                                })()}
                               </div>
-                            )}
                             
                             {/* Error State */}
                             {segment.status === 'error' && (

@@ -170,3 +170,18 @@ class ApprovalRequest(BaseModel):
     approved_segments: List[str] = Field(..., description="List of segment IDs to use")
     rejected_segments: List[str] = Field(default_factory=list, description="List of segment IDs to ignore")
     custom_metadata: Optional[ProjectMetadata] = Field(None, description="User-corrected metadata")
+
+
+class ManualRoi(BaseModel):
+    """A manually selected region-of-interest on the full plan (relative coordinates)."""
+
+    x: float = Field(..., ge=0.0, le=1.0, description="Left (0..1) relative to full plan")
+    y: float = Field(..., ge=0.0, le=1.0, description="Top (0..1) relative to full plan")
+    width: float = Field(..., gt=0.0, le=1.0, description="Width (0..1) relative to full plan")
+    height: float = Field(..., gt=0.0, le=1.0, description="Height (0..1) relative to full plan")
+
+
+class AddManualSegmentsRequest(BaseModel):
+    """Request to append manual ROI segments to an existing decomposition."""
+
+    rois: List[ManualRoi] = Field(..., min_length=1, description="List of ROIs to append")

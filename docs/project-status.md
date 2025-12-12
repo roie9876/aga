@@ -1,7 +1,7 @@
 # Project Status - Mamad Validation App
 
-**Last Updated**: December 11, 2025  
-**Current Phase**: Modern UI/UX Design System Implementation  
+**Last Updated**: December 12, 2025  
+**Current Phase**: End-to-End Validation + Coverage Transparency (Testing Phase)  
 **Target Release**: Q1 2026
 
 ---
@@ -170,11 +170,13 @@ Building a FastAPI application that validates Israeli Home Front Command shelter
 #### Phase 3.7: Requirements Coverage Tracking - COMPLETED ✨
 - [x] **Backend Coverage Service**
   - [x] Create requirements_coverage.py service (223 lines)
-  - [x] Track all 16 MAMAD requirements from requirements-mamad.md
+  - [x] Track the **implemented machine-checkable subset** (16 key requirements across 6 categories)
   - [x] Map requirements by category (קירות, גובה, פתחים, אוורור, etc.)
   - [x] calculate_coverage() method with statistics
   - [x] Identify missing segments needed to complete coverage
   - [x] Integrate into segment_validation.py endpoint
+  - [x] Fix coverage correctness by mapping internal validator rule IDs (e.g., HEIGHT_002) → official requirement IDs (e.g., 2.2)
+  - [x] Recompute coverage on read for history results (no data migration required)
   
 - [x] **Frontend Coverage Dashboard**
   - [x] Add CoverageReport TypeScript types
@@ -182,16 +184,28 @@ Building a FastAPI application that validates Israeli Home Front Command shelter
   - [x] Progress bar visualization
   - [x] Requirements table grouped by category
   - [x] Status icons per requirement (✅ passed, ❌ failed, ⚠️ not checked)
+  - [x] Clickable statistics cards to filter requirements by status (all/passed/failed/not_checked)
   - [x] "Missing segments needed" recommendations list
   - [x] Color-coded display (green/red/gray)
 
 - [x] **Coverage Features**
-  - [x] Track 16 requirements across 6 categories
+  - [x] Track 16 implemented requirements across 6 categories (coverage is based on what the validator actually runs)
   - [x] Calculate coverage_percentage (how many requirements checked)
   - [x] Calculate pass_percentage (how many requirements passed)
   - [x] Show which segments validated each requirement
   - [x] List violations per requirement
   - [x] Recommend which segment types to add
+
+#### Phase 3.8: Requirements Catalog + History UX - COMPLETED ✨ (December 12, 2025)
+- [x] **Requirements Catalog API**
+  - [x] Add `GET /api/v1/requirements` returning the full parsed requirements catalog from requirements-mamad.md (66 requirements)
+  - [x] Add `GET /api/v1/requirements/summary` for counts by section
+- [x] **History (No Re-Upload)**
+  - [x] Add `GET /api/v1/segments/validations` to list previous validations
+  - [x] Add `GET /api/v1/segments/validation/{validation_id}` to load a past validation with recomputed coverage
+- [x] **Explainability Fields (Per Segment)**
+  - [x] Add deterministic `checked_requirements` and `decision_summary_he` in segment validation payloads
+  - [x] Backfill these fields on read for older stored validations
 
 #### Phase 4: Modern UI/UX Design System - COMPLETED ✨
 - [x] **Design System Foundation**
@@ -274,7 +288,7 @@ Building a FastAPI application that validates Israeli Home Front Command shelter
 ```
 Part 1: Frame Detection → Part 2: Segment Cropping → 
 Part 3: Classification + Extraction → Part 4: Targeted Validation → 
-Coverage Report (NEW - Tracks all 16 requirements)
+Coverage Report (NEW - Tracks 16 implemented checks)
 ```
 
 **What Users See Now:**
@@ -539,10 +553,14 @@ Coverage Report (NEW - Tracks all 16 requirements)
 | **2025-12-11** | Implemented targeted validation (only relevant rules per segment) | System |
 | **2025-12-11** | Fixed UI display issues (image size, Hebrew text) | System |
 | **2025-12-11** | **Implemented Requirements Coverage Tracking (Phase 3.7)** | System |
-| **2025-12-11** | Created RequirementsCoverageTracker service (16 requirements tracked) | System |
+| **2025-12-11** | Created RequirementsCoverageTracker service (16 implemented checks tracked) | System |
 | **2025-12-11** | Integrated coverage report into API endpoint | System |
 | **2025-12-11** | Built coverage dashboard UI with statistics and recommendations | System |
-| **2025-12-11** | **Users can now see validation status relative to all requirements** | System |
+| **2025-12-11** | **Users can now see validation status relative to implemented checks** | System |
+| **2025-12-12** | Added requirements catalog API (66 requirements) + summary endpoint | System |
+| **2025-12-12** | Added validation history endpoints (list + detail) and load-from-history UX | System |
+| **2025-12-12** | Fixed coverage correctness via rule_id → requirement_id mapping + recompute on read | System |
+| **2025-12-12** | Added clickable requirement-status filters in results UI | System |
 | **2025-12-11** | **Complete UI/UX Redesign (Phase 4)** | System |
 | **2025-12-11** | Created modern design system with color palette and spacing scale | System |
 | **2025-12-11** | Built component library: 7 core UI + 3 validation components | System |

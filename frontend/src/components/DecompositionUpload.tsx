@@ -10,7 +10,6 @@ interface DecompositionUploadProps {
 
 export const DecompositionUpload: React.FC<DecompositionUploadProps> = ({
   projectId,
-  onProjectIdChange,
   onDecompositionComplete,
 }) => {
   const [isDragging, setIsDragging] = useState(false);

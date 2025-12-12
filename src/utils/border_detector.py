@@ -57,20 +57,45 @@ class BorderDetector:
             
             # Convert to grayscale
             gray = cv2.cvtColor(search_region, cv2.COLOR_BGR2GRAY)
-            
-            # Apply edge detection
-            edges = cv2.Canny(gray, 50, 150, apertureSize=3)
-            
-            # Find contours
-            contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            # Improve border visibility (thin grey lines, compression artifacts, etc.)
+            blur = cv2.GaussianBlur(gray, (3, 3), 0)
+            th = cv2.adaptiveThreshold(
+                blur,
+                255,
+                cv2.ADAPTIVE_THRESH_MEAN_C,
+                cv2.THRESH_BINARY_INV,
+                15,
+                4,
+            )
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+            th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, kernel, iterations=1)
+
+            # Find contours on the binarized image
+            contours, _ = cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             
             if not contours:
                 logger.info("No contours found, using original bbox")
                 return bbox
             
-            # Find the largest rectangular contour that overlaps with GPT's estimate
+            # Choose a rectangle that best matches the original bbox.
+            # We score candidates by IoU and constrain area to avoid snapping to huge regions.
+            def _iou(ax, ay, aw, ah, bx, by, bw, bh) -> float:
+                ax2, ay2 = ax + aw, ay + ah
+                bx2, by2 = bx + bw, by + bh
+                ix1, iy1 = max(ax, bx), max(ay, by)
+                ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+                iw, ih = max(0, ix2 - ix1), max(0, iy2 - iy1)
+                inter = iw * ih
+                ua = (aw * ah) + (bw * bh) - inter
+                return inter / ua if ua > 0 else 0.0
+
+            orig_area = max(1, width * height)
+            min_area = max(2000, int(orig_area * 0.35))
+            max_area = int(orig_area * 3.5)
+
             best_rect = None
-            best_area = 0
+            best_score = 0.0
             
             for contour in contours:
                 # Approximate contour to polygon
@@ -81,16 +106,18 @@ class BorderDetector:
                 if len(approx) == 4:
                     rect_x, rect_y, rect_w, rect_h = cv2.boundingRect(contour)
                     area = rect_w * rect_h
-                    
-                    # Check if this rectangle overlaps with GPT's estimate
-                    gpt_center_x = (x - search_x) + width / 2
-                    gpt_center_y = (y - search_y) + height / 2
-                    
-                    if (rect_x <= gpt_center_x <= rect_x + rect_w and
-                        rect_y <= gpt_center_y <= rect_y + rect_h and
-                        area > best_area):
+
+                    if area < min_area or area > max_area:
+                        continue
+
+                    # Score by IoU with original bbox in the search-region coordinate space
+                    orig_x_local = x - search_x
+                    orig_y_local = y - search_y
+                    score = _iou(rect_x, rect_y, rect_w, rect_h, orig_x_local, orig_y_local, width, height)
+
+                    if score > best_score:
+                        best_score = score
                         best_rect = (rect_x, rect_y, rect_w, rect_h)
-                        best_area = area
             
             # If we found a good rectangular border, use it
             if best_rect:

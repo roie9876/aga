@@ -2,6 +2,7 @@
 import uuid
 import tempfile
 import os
+from datetime import datetime
 from pathlib import Path
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 from typing import Optional
@@ -12,9 +13,16 @@ from src.models.decomposition import (
     DecompositionStatus,
     SegmentUpdateRequest,
     ApprovalRequest,
+    AddManualSegmentsRequest,
+    PlanSegment,
+    SegmentType,
+    BoundingBox,
+    ManualRoi,
 )
 from src.services.plan_decomposition import get_decomposition_service
 from src.azure import get_cosmos_client
+from src.azure.blob_client import get_blob_client
+from src.utils.image_cropper import get_image_cropper
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -107,6 +115,13 @@ async def decompose_plan(
             plan_image_bytes=plan_image_bytes,
             file_size_mb=file_size_mb
         )
+
+        # If the service returned a FAILED decomposition, surface it as an HTTP error
+        if decomposition.error_message or decomposition.status == DecompositionStatus.FAILED:
+            raise HTTPException(
+                status_code=500,
+                detail=f"שגיאה בפירוק התוכנית: {decomposition.error_message or 'Unknown error'}",
+            )
         
         # Crop and upload segments
         logger.info("Cropping and uploading segments",
@@ -145,7 +160,9 @@ async def decompose_plan(
             estimated_time_seconds=60,
             message=f"פירוק התוכנית הושלם בהצלחה. זוהו {len(decomposition.segments)} סגמנטים."
         )
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Decomposition failed",
                     error=str(e),
@@ -301,6 +318,348 @@ async def update_segment(
         raise HTTPException(
             status_code=500,
             detail=f"שגיאה בעדכון הסגמנט: {str(e)}"
+        )
+
+
+@router.post("/{decomposition_id}/manual-segments")
+async def add_manual_segments(
+    decomposition_id: str,
+    request: AddManualSegmentsRequest,
+):
+    """Append manual ROI segments to an existing decomposition (additive).
+
+    The client sends ROIs in relative coordinates (0..1). The server converts them
+    to pixel bounding boxes using the stored full plan dimensions, crops them from
+    the stored full plan image, uploads the crops/thumbnails, and appends them as
+    additional segments.
+    """
+
+    logger.info(
+        "Adding manual segments",
+        decomposition_id=decomposition_id,
+        rois_count=len(request.rois),
+    )
+
+    try:
+        cosmos_client = get_cosmos_client()
+
+        query = """
+            SELECT * FROM c
+            WHERE c.id = @decomposition_id
+            AND c.type = 'decomposition'
+        """
+
+        items = await cosmos_client.query_items(
+            query=query,
+            parameters=[
+                {"name": "@decomposition_id", "value": decomposition_id},
+            ],
+        )
+
+        if not items:
+            raise HTTPException(status_code=404, detail="פירוק לא נמצא")
+
+        decomp_data = items[0]
+        decomposition = PlanDecomposition(**decomp_data)
+
+        if decomposition.full_plan_width <= 0 or decomposition.full_plan_height <= 0:
+            raise HTTPException(status_code=400, detail="ממדי התוכנית אינם זמינים")
+
+        validation_id = decomposition.validation_id
+        if not validation_id:
+            raise HTTPException(status_code=400, detail="validation_id חסר בפירוק")
+
+        existing_ids = {s.get("segment_id") for s in decomp_data.get("segments", [])}
+        next_index = 1
+        while f"manual_{next_index:03d}" in existing_ids:
+            next_index += 1
+
+        new_segments: list[PlanSegment] = []
+        for roi in request.rois:
+            seg_id = f"manual_{next_index:03d}"
+            next_index += 1
+
+            # Convert relative ROI (0..1) to pixel bbox
+            x = float(roi.x) * float(decomposition.full_plan_width)
+            y = float(roi.y) * float(decomposition.full_plan_height)
+            w = float(roi.width) * float(decomposition.full_plan_width)
+            h = float(roi.height) * float(decomposition.full_plan_height)
+
+            # Clamp to image bounds
+            x = max(0.0, min(float(decomposition.full_plan_width), x))
+            y = max(0.0, min(float(decomposition.full_plan_height), y))
+            w = max(1.0, min(float(decomposition.full_plan_width) - x, w))
+            h = max(1.0, min(float(decomposition.full_plan_height) - y, h))
+
+            bbox = BoundingBox(x=x, y=y, width=w, height=h)
+
+            new_segments.append(
+                PlanSegment(
+                    segment_id=seg_id,
+                    type=SegmentType.UNKNOWN,
+                    title=f"אזור ידני {len(new_segments) + 1}",
+                    description="אזור נבחר ידנית לבחינה",
+                    bounding_box=bbox,
+                    blob_url=f"https://placeholder.blob.core.windows.net/{validation_id}/segments/{seg_id}.png",
+                    thumbnail_url=f"https://placeholder.blob.core.windows.net/{validation_id}/segments/{seg_id}_thumb.png",
+                    confidence=1.0,
+                    llm_reasoning="MANUAL_ROI",
+                    approved_by_user=True,
+                    used_in_checks=[],
+                )
+            )
+
+        # Download the stored full plan image and crop only the new segments
+        blob_client = get_blob_client()
+        full_plan_blob_name = f"{validation_id}/full_plan.png"
+        try:
+            full_plan_bytes = await blob_client.download_blob(full_plan_blob_name)
+        except Exception as e:
+            logger.error(
+                "Failed to download full plan for manual cropping",
+                decomposition_id=decomposition_id,
+                blob_name=full_plan_blob_name,
+                error=str(e),
+            )
+            raise HTTPException(status_code=500, detail="שגיאה בטעינת התוכנית המלאה לחיתוך")
+
+        temp_dir = tempfile.mkdtemp()
+        temp_image_path = os.path.join(temp_dir, "full_plan.png")
+        with open(temp_image_path, "wb") as f:
+            f.write(full_plan_bytes)
+
+        try:
+            decomposition_service = get_decomposition_service()
+
+            manual_decomposition = PlanDecomposition(
+                id=decomposition.id,
+                validation_id=decomposition.validation_id,
+                project_id=decomposition.project_id,
+                status=decomposition.status,
+                full_plan_url=decomposition.full_plan_url,
+                full_plan_width=decomposition.full_plan_width,
+                full_plan_height=decomposition.full_plan_height,
+                file_size_mb=decomposition.file_size_mb,
+                metadata=decomposition.metadata,
+                segments=new_segments,
+                processing_stats=decomposition.processing_stats,
+            )
+
+            manual_decomposition = await decomposition_service.crop_and_upload_segments(
+                decomposition=manual_decomposition,
+                plan_image_path=temp_image_path,
+            )
+        finally:
+            try:
+                os.remove(temp_image_path)
+                os.rmdir(temp_dir)
+            except Exception:
+                pass
+
+        # Append new segments to existing decomposition document
+        decomp_data["full_plan_url"] = manual_decomposition.full_plan_url
+
+        appended = 0
+        for seg in manual_decomposition.segments:
+            decomp_data.setdefault("segments", []).append(seg.model_dump(mode="json"))
+            appended += 1
+
+        decomp_data["status"] = DecompositionStatus.REVIEW_NEEDED.value
+        decomp_data["updated_at"] = datetime.utcnow().isoformat()
+
+        # Keep stats in sync
+        if isinstance(decomp_data.get("processing_stats"), dict):
+            decomp_data["processing_stats"]["total_segments"] = len(decomp_data.get("segments", []))
+
+        await cosmos_client.upsert_item(decomp_data)
+
+        logger.info(
+            "Manual segments appended",
+            decomposition_id=decomposition_id,
+            appended=appended,
+            total_segments=len(decomp_data.get("segments", [])),
+        )
+
+        return decomp_data
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(
+            "Failed to add manual segments",
+            decomposition_id=decomposition_id,
+            error=str(e),
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"שגיאה בהוספת סגמנטים ידניים: {str(e)}",
+        )
+
+
+@router.patch("/{decomposition_id}/segments/{segment_id}/bbox")
+async def update_segment_bbox(
+    decomposition_id: str,
+    segment_id: str,
+    roi: ManualRoi,
+):
+    """Update a segment bounding box (used for manual ROI resizing).
+
+    Accepts ROI in relative coords (0..1), converts to pixel bbox, re-crops from the
+    stored full plan image, overwrites the segment blob + thumbnail, and updates the
+    decomposition document.
+    """
+
+    logger.info(
+        "Updating segment bbox",
+        decomposition_id=decomposition_id,
+        segment_id=segment_id,
+    )
+
+    try:
+        cosmos_client = get_cosmos_client()
+
+        query = """
+            SELECT * FROM c
+            WHERE c.id = @decomposition_id
+            AND c.type = 'decomposition'
+        """
+
+        items = await cosmos_client.query_items(
+            query=query,
+            parameters=[
+                {"name": "@decomposition_id", "value": decomposition_id},
+            ],
+        )
+
+        if not items:
+            raise HTTPException(status_code=404, detail="פירוק לא נמצא")
+
+        decomp_data = items[0]
+        decomposition = PlanDecomposition(**decomp_data)
+
+        if decomposition.full_plan_width <= 0 or decomposition.full_plan_height <= 0:
+            raise HTTPException(status_code=400, detail="ממדי התוכנית אינם זמינים")
+
+        validation_id = decomposition.validation_id
+        if not validation_id:
+            raise HTTPException(status_code=400, detail="validation_id חסר בפירוק")
+
+        # Find segment
+        segment_idx: Optional[int] = None
+        segments_list = decomp_data.get("segments", [])
+        for idx, seg in enumerate(segments_list):
+            if seg.get("segment_id") == segment_id:
+                segment_idx = idx
+                break
+
+        if segment_idx is None:
+            raise HTTPException(status_code=404, detail="סגמנט לא נמצא")
+
+        # Convert relative ROI (0..1) to pixel bbox
+        x = float(roi.x) * float(decomposition.full_plan_width)
+        y = float(roi.y) * float(decomposition.full_plan_height)
+        w = float(roi.width) * float(decomposition.full_plan_width)
+        h = float(roi.height) * float(decomposition.full_plan_height)
+
+        # Clamp
+        x = max(0.0, min(float(decomposition.full_plan_width), x))
+        y = max(0.0, min(float(decomposition.full_plan_height), y))
+        w = max(1.0, min(float(decomposition.full_plan_width) - x, w))
+        h = max(1.0, min(float(decomposition.full_plan_height) - y, h))
+
+        pixel_bbox = {"x": x, "y": y, "width": w, "height": h}
+
+        # Download full plan
+        blob_client = get_blob_client()
+        full_plan_blob_name = f"{validation_id}/full_plan.png"
+        try:
+            full_plan_bytes = await blob_client.download_blob(full_plan_blob_name)
+        except Exception as e:
+            logger.error(
+                "Failed to download full plan for bbox update",
+                decomposition_id=decomposition_id,
+                blob_name=full_plan_blob_name,
+                error=str(e),
+            )
+            raise HTTPException(status_code=500, detail="שגיאה בטעינת התוכנית המלאה לחיתוך")
+
+        temp_dir = tempfile.mkdtemp()
+        temp_image_path = os.path.join(temp_dir, "full_plan.png")
+        with open(temp_image_path, "wb") as f:
+            f.write(full_plan_bytes)
+
+        try:
+            # Crop + thumbnail
+            cropper = get_image_cropper()
+
+            pad = float(max(4.0, min(40.0, min(w, h) * 0.02)))
+            crop_bbox = {
+                "x": max(0.0, x - pad),
+                "y": max(0.0, y - pad),
+                "width": min(float(decomposition.full_plan_width) - max(0.0, x - pad), w + 2 * pad),
+                "height": min(float(decomposition.full_plan_height) - max(0.0, y - pad), h + 2 * pad),
+            }
+
+            cropped_buffer, thumb_buffer = cropper.crop_and_create_thumbnail(
+                image_path=temp_image_path,
+                bounding_box=crop_bbox,
+            )
+
+            # Overwrite blob + thumb
+            segment_blob = f"{validation_id}/segments/{segment_id}.png"
+            segment_url = await blob_client.upload_blob(
+                blob_name=segment_blob,
+                data=cropped_buffer,
+                overwrite=True,
+            )
+
+            thumb_blob = f"{validation_id}/segments/{segment_id}_thumb.png"
+            thumb_url = await blob_client.upload_blob(
+                blob_name=thumb_blob,
+                data=thumb_buffer,
+                overwrite=True,
+            )
+        finally:
+            try:
+                os.remove(temp_image_path)
+                os.rmdir(temp_dir)
+            except Exception:
+                pass
+
+        # Update document segment fields
+        seg_doc = segments_list[segment_idx]
+        seg_doc["bounding_box"] = BoundingBox(**pixel_bbox).model_dump()
+        seg_doc["blob_url"] = segment_url
+        seg_doc["thumbnail_url"] = thumb_url
+        seg_doc["approved_by_user"] = True
+        seg_doc["llm_reasoning"] = seg_doc.get("llm_reasoning") or "MANUAL_ROI"
+
+        decomp_data["segments"] = segments_list
+        decomp_data["status"] = DecompositionStatus.REVIEW_NEEDED.value
+        decomp_data["updated_at"] = datetime.utcnow().isoformat()
+
+        await cosmos_client.upsert_item(decomp_data)
+
+        logger.info(
+            "Segment bbox updated",
+            decomposition_id=decomposition_id,
+            segment_id=segment_id,
+        )
+
+        return decomp_data
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(
+            "Failed to update segment bbox",
+            decomposition_id=decomposition_id,
+            segment_id=segment_id,
+            error=str(e),
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"שגיאה בעדכון אזור הסגמנט: {str(e)}",
         )
 
 

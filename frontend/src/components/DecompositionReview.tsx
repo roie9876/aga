@@ -1,15 +1,15 @@
-import React, { useState, useEffect } from 'react';
+import React, { useRef, useState, useEffect } from 'react';
 import { 
   Check, X, AlertTriangle, ZoomIn, ZoomOut, 
-  Edit, Trash2, Upload, Save, RefreshCw, ChevronDown, ChevronUp,
+  RefreshCw, ChevronDown, ChevronUp,
   Maximize2, LayoutGrid, List
 } from 'lucide-react';
-import type { PlanDecomposition, PlanSegment } from '../types';
+import type { PlanDecomposition } from '../types';
 import { Button, Card, Badge } from './ui';
 
 interface DecompositionReviewProps {
   decompositionId: string;
-  onApprove: (approvedSegments: string[]) => void;
+  onApprove: (params: { mode: 'segments' | 'full_plan'; approvedSegments: string[] }) => void;
   onReject: () => void;
 }
 
@@ -22,8 +22,16 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<'full' | 'segments'>('full');
+  const [validationMode, setValidationMode] = useState<'segments' | 'full_plan'>('segments');
   const [zoom, setZoom] = useState(100);
   const [expandedSegments, setExpandedSegments] = useState<Set<string>>(new Set());
+
+  const planImgRef = useRef<HTMLImageElement | null>(null);
+  const [isDrawing, setIsDrawing] = useState(false);
+  const [drawStart, setDrawStart] = useState<{ x: number; y: number } | null>(null);
+  const [drawCurrent, setDrawCurrent] = useState<{ x: number; y: number } | null>(null);
+  const [savingManual, setSavingManual] = useState(false);
+  const [editingSegmentId, setEditingSegmentId] = useState<string | null>(null);
 
   useEffect(() => {
     loadDecomposition();
@@ -79,12 +87,17 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
 
   const handleApprove = () => {
     if (!decomposition) return;
-    
+
+    if (validationMode === 'full_plan') {
+      onApprove({ mode: 'full_plan', approvedSegments: [] });
+      return;
+    }
+
     const approved = decomposition.segments
       .filter(s => s.approved_by_user)
       .map(s => s.segment_id);
-    
-    onApprove(approved);
+
+    onApprove({ mode: 'segments', approvedSegments: approved });
   };
 
   const handleSelectAll = () => {
@@ -105,12 +118,6 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
     });
   };
 
-  const getConfidenceColor = (confidence: number) => {
-    if (confidence >= 0.85) return 'text-success';
-    if (confidence >= 0.70) return 'text-warning';
-    return 'text-error';
-  };
-
   const getConfidenceBadgeVariant = (confidence: number) => {
     if (confidence >= 0.85) return 'success';
     if (confidence >= 0.70) return 'warning';
@@ -128,6 +135,125 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
       unknown: 'לא מזוהה',
     };
     return labels[type] || type;
+  };
+
+  const bboxToPercent = (bbox: { x: number; y: number; width: number; height: number }) => {
+    if (!decomposition) return bbox;
+    const isPixels = [bbox.x, bbox.y, bbox.width, bbox.height].some(v => v > 100);
+    if (!isPixels) return bbox;
+    const w = decomposition.full_plan_width || 0;
+    const h = decomposition.full_plan_height || 0;
+    if (w <= 0 || h <= 0) return bbox;
+    return {
+      x: (bbox.x / w) * 100,
+      y: (bbox.y / h) * 100,
+      width: (bbox.width / w) * 100,
+      height: (bbox.height / h) * 100,
+    };
+  };
+
+  const getRelativePoint = (e: React.PointerEvent) => {
+    const img = planImgRef.current;
+    if (!img) return null;
+    const rect = img.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / rect.width;
+    const y = (e.clientY - rect.top) / rect.height;
+    return {
+      x: Math.max(0, Math.min(1, x)),
+      y: Math.max(0, Math.min(1, y)),
+    };
+  };
+
+  const addManualRoi = async (roi: { x: number; y: number; width: number; height: number }) => {
+    try {
+      setSavingManual(true);
+      const response = await fetch(`/api/v1/decomposition/${decompositionId}/manual-segments`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rois: [roi] }),
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to add manual segment');
+      }
+
+      const data: PlanDecomposition = await response.json();
+      setDecomposition(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'שגיאה בהוספת אזור ידני');
+    } finally {
+      setSavingManual(false);
+    }
+  };
+
+  const updateManualRoi = async (segmentId: string, roi: { x: number; y: number; width: number; height: number }) => {
+    try {
+      setSavingManual(true);
+      const response = await fetch(`/api/v1/decomposition/${decompositionId}/segments/${segmentId}/bbox`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(roi),
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to update manual segment');
+      }
+
+      const data: PlanDecomposition = await response.json();
+      setDecomposition(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'שגיאה בעדכון אזור ידני');
+    } finally {
+      setSavingManual(false);
+      setEditingSegmentId(null);
+    }
+  };
+
+  const handlePlanPointerDown = (e: React.PointerEvent) => {
+    if (validationMode !== 'segments') return;
+    if (savingManual) return;
+    const p = getRelativePoint(e);
+    if (!p) return;
+    e.preventDefault();
+    setIsDrawing(true);
+    setDrawStart(p);
+    setDrawCurrent(p);
+  };
+
+  const handlePlanPointerMove = (e: React.PointerEvent) => {
+    if (!isDrawing) return;
+    const p = getRelativePoint(e);
+    if (!p) return;
+    e.preventDefault();
+    setDrawCurrent(p);
+  };
+
+  const handlePlanPointerUp = async (e: React.PointerEvent) => {
+    if (!isDrawing || !drawStart) return;
+    const p = getRelativePoint(e);
+    e.preventDefault();
+    setIsDrawing(false);
+
+    const end = p ?? drawCurrent ?? drawStart;
+    const x1 = Math.min(drawStart.x, end.x);
+    const y1 = Math.min(drawStart.y, end.y);
+    const x2 = Math.max(drawStart.x, end.x);
+    const y2 = Math.max(drawStart.y, end.y);
+    const w = x2 - x1;
+    const h = y2 - y1;
+
+    setDrawStart(null);
+    setDrawCurrent(null);
+
+    // Ignore tiny drags
+    if (w < 0.01 || h < 0.01) return;
+
+    if (editingSegmentId) {
+      await updateManualRoi(editingSegmentId, { x: x1, y: y1, width: w, height: h });
+      return;
+    }
+
+    await addManualRoi({ x: x1, y: y1, width: w, height: h });
   };
 
   if (loading) {
@@ -156,6 +282,9 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
 
   const approvedCount = decomposition.segments.filter(s => s.approved_by_user).length;
   const lowConfidenceCount = decomposition.segments.filter(s => s.confidence < 0.75).length;
+  const avgConfidence = decomposition.segments.length > 0
+    ? (decomposition.segments.reduce((acc, s) => acc + s.confidence, 0) / decomposition.segments.length)
+    : 0;
 
   return (
     <div className="space-y-6 animate-in fade-in duration-500">
@@ -182,7 +311,7 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
             <div className="px-4 py-2 rounded-lg bg-background border border-border text-center">
               <div className="text-xs text-text-muted uppercase tracking-wider font-medium">דיוק ממוצע</div>
               <div className="text-xl font-bold text-text-primary">
-                {(decomposition.segments.reduce((acc, s) => acc + s.confidence, 0) / decomposition.segments.length * 100).toFixed(0)}%
+                {(avgConfidence * 100).toFixed(0)}%
               </div>
             </div>
           </div>
@@ -190,7 +319,7 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
 
         {lowConfidenceCount > 0 && (
           <div className="p-4 bg-warning/5 border border-warning/20 rounded-xl flex items-center gap-3 text-sm">
-            <AlertTriangle className="w-5 h-5 text-warning flex-shrink-0" />
+            <AlertTriangle className="w-5 h-5 text-warning shrink-0" />
             <span className="text-warning-dark font-medium">
               שים לב: {lowConfidenceCount} סגמנטים עם רמת ביטחון נמוכה - מומלץ לבדוק ידנית
             </span>
@@ -226,12 +355,39 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
             </button>
           </div>
 
+          <div className="flex gap-2 bg-background p-1 rounded-lg border border-border">
+            <button
+              onClick={() => setValidationMode('segments')}
+              className={`px-3 py-1.5 rounded-md text-sm font-medium transition-all flex items-center gap-2 ${
+                validationMode === 'segments'
+                  ? 'bg-white shadow-sm text-primary'
+                  : 'text-text-muted hover:text-text-primary'
+              }`}
+              title="בדיקה לפי הסגמנטים שנבחרו"
+            >
+              <List className="w-4 h-4" />
+              בדיקה לפי סגמנטים
+            </button>
+            <button
+              onClick={() => setValidationMode('full_plan')}
+              className={`px-3 py-1.5 rounded-md text-sm font-medium transition-all flex items-center gap-2 ${
+                validationMode === 'full_plan'
+                  ? 'bg-white shadow-sm text-primary'
+                  : 'text-text-muted hover:text-text-primary'
+              }`}
+              title="ניסוי: שליחת התוכנית המלאה ל-GPT ללא חיתוך"
+            >
+              <Maximize2 className="w-4 h-4" />
+              בדיקה תוכנית מלאה
+            </button>
+          </div>
+
           <div className="flex items-center gap-4">
             <div className="flex gap-2">
-              <Button size="sm" variant="outline" onClick={handleSelectAll}>
+              <Button size="sm" variant="outline" onClick={handleSelectAll} disabled={validationMode === 'full_plan'}>
                 סמן הכל
               </Button>
-              <Button size="sm" variant="ghost" onClick={handleDeselectAll}>
+              <Button size="sm" variant="ghost" onClick={handleDeselectAll} disabled={validationMode === 'full_plan'}>
                 בטל הכל
               </Button>
             </div>
@@ -239,7 +395,7 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
             <div className="h-6 w-px bg-border mx-2" />
 
             <div className="flex items-center gap-2 bg-background rounded-lg border border-border p-1">
-              <button onClick={() => setZoom(Math.max(50, zoom - 10))} className="p-1.5 hover:bg-muted rounded-md text-text-muted hover:text-text-primary">
+              <button onClick={() => setZoom(Math.max(10, zoom - 10))} className="p-1.5 hover:bg-muted rounded-md text-text-muted hover:text-text-primary">
                 <ZoomOut className="w-4 h-4" />
               </button>
               <span className="text-sm font-mono w-12 text-center text-text-primary">{zoom}%</span>
@@ -254,6 +410,20 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
       {/* Full Plan View */}
       {viewMode === 'full' && decomposition.full_plan_url && (
         <Card className="p-6 overflow-hidden">
+          {validationMode === 'segments' && (
+            <div className="mb-4 p-3 bg-primary/5 border border-primary/10 rounded-xl text-sm text-text-primary flex items-center justify-between gap-3">
+              <div>
+                <strong className="font-semibold">בחירה ידנית:</strong>{' '}
+                {editingSegmentId
+                  ? 'עריכת אזור: גרור מחדש על התוכנית כדי להגדיר את האזור.'
+                  : 'גרור על התוכנית כדי לסמן אזור לבדיקה (אפשר כמה פעמים). האזור יתווסף כסגמנט חדש.'}
+                {' '}כדי להתקדם לשלב הבא לחץ למטה על “אשר והמשך”.
+              </div>
+              {savingManual && (
+                <div className="text-text-muted whitespace-nowrap">שומר…</div>
+              )}
+            </div>
+          )}
           <div 
             className="border border-border rounded-xl overflow-auto bg-background/50 relative min-h-[500px]"
             style={{ maxHeight: '70vh' }}
@@ -264,8 +434,29 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
                 alt="תוכנית מלאה"
                 className="max-w-none"
                 style={{ direction: 'ltr' }}
+                ref={planImgRef}
               />
+
+              {/* Drawing overlay (manual ROI selection) */}
+              {validationMode === 'segments' && (
+                <div
+                  className="absolute inset-0 cursor-crosshair z-30"
+                  style={{ touchAction: 'none' }}
+                  onPointerDown={handlePlanPointerDown}
+                  onPointerMove={handlePlanPointerMove}
+                  onPointerUp={handlePlanPointerUp}
+                  onPointerCancel={() => {
+                    setIsDrawing(false);
+                    setDrawStart(null);
+                    setDrawCurrent(null);
+                  }}
+                />
+              )}
+
               {decomposition.segments.map((segment) => (
+                (() => {
+                  const b = bboxToPercent(segment.bounding_box);
+                  return (
                 <div
                   key={segment.segment_id}
                   className={`absolute border-2 transition-all cursor-pointer group ${
@@ -274,10 +465,10 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
                       : 'border-error bg-error/10 hover:bg-error/20'
                   }`}
                   style={{
-                    left: `${segment.bounding_box.x}%`,
-                    top: `${segment.bounding_box.y}%`,
-                    width: `${segment.bounding_box.width}%`,
-                    height: `${segment.bounding_box.height}%`,
+                    left: `${b.x}%`,
+                    top: `${b.y}%`,
+                    width: `${b.width}%`,
+                    height: `${b.height}%`,
                   }}
                   onClick={() => updateSegmentApproval(segment.segment_id, !segment.approved_by_user)}
                 >
@@ -287,7 +478,25 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
                     </div>
                   </div>
                 </div>
+                  );
+                })()
               ))}
+
+              {/* Current drawn rectangle */}
+              {isDrawing && drawStart && drawCurrent && (
+                (() => {
+                  const x1 = Math.min(drawStart.x, drawCurrent.x) * 100;
+                  const y1 = Math.min(drawStart.y, drawCurrent.y) * 100;
+                  const x2 = Math.max(drawStart.x, drawCurrent.x) * 100;
+                  const y2 = Math.max(drawStart.y, drawCurrent.y) * 100;
+                  return (
+                    <div
+                      className="absolute border-2 border-primary bg-primary/10 z-40"
+                      style={{ left: `${x1}%`, top: `${y1}%`, width: `${x2 - x1}%`, height: `${y2 - y1}%` }}
+                    />
+                  );
+                })()
+              )}
             </div>
           </div>
         </Card>
@@ -306,7 +515,7 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
           >
             <div className="p-4 flex items-start gap-4">
               {/* Thumbnail */}
-              <div className="flex-shrink-0 w-32 h-24 rounded-lg border border-border bg-muted overflow-hidden relative group">
+              <div className="shrink-0 w-32 h-24 rounded-lg border border-border bg-muted overflow-hidden relative group">
                 {segment.thumbnail_url ? (
                   <img
                     src={segment.thumbnail_url}
@@ -321,14 +530,14 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
               </div>
 
               {/* Content */}
-              <div className="flex-grow min-w-0">
+              <div className="grow min-w-0">
                 <div className="flex items-start justify-between gap-4">
                   <div>
                     <h4 className="font-semibold text-text-primary text-lg mb-1 truncate">
                       {segment.title}
                     </h4>
                     <div className="flex flex-wrap items-center gap-2 mb-2">
-                      <Badge variant="secondary" className="text-xs">
+                      <Badge variant="neutral" className="text-xs">
                         {getSegmentTypeLabel(segment.type)}
                       </Badge>
                       <Badge 
@@ -362,6 +571,20 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
                         onChange={(e) => updateSegmentApproval(segment.segment_id, e.target.checked)}
                       />
                     </label>
+
+                    {segment.llm_reasoning === 'MANUAL_ROI' && validationMode === 'segments' && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => {
+                          setValidationMode('segments');
+                          setViewMode('full');
+                          setEditingSegmentId(segment.segment_id);
+                        }}
+                      >
+                        ערוך אזור
+                      </Button>
+                    )}
                   </div>
                 </div>
 
@@ -383,8 +606,15 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
                       <div>
                         <strong className="text-text-primary block mb-1">מיקום בתוכנית (Bounding Box):</strong>
                         <div className="text-xs text-text-muted font-mono bg-background p-2 rounded border border-border">
-                          x: {segment.bounding_box.x.toFixed(1)}%, y: {segment.bounding_box.y.toFixed(1)}%<br />
-                          w: {segment.bounding_box.width.toFixed(1)}%, h: {segment.bounding_box.height.toFixed(1)}%
+                          {(() => {
+                            const b = bboxToPercent(segment.bounding_box);
+                            return (
+                              <>
+                                x: {b.x.toFixed(1)}%, y: {b.y.toFixed(1)}%<br />
+                                w: {b.width.toFixed(1)}%, h: {b.height.toFixed(1)}%
+                              </>
+                            );
+                          })()}
                         </div>
                       </div>
                       {segment.llm_reasoning && (
@@ -465,11 +695,13 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
 
               <Button
                 onClick={handleApprove}
-                disabled={approvedCount === 0}
+                disabled={validationMode === 'segments' && approvedCount === 0}
                 className="min-w-[200px] shadow-lg shadow-primary/20"
               >
                 <Check className="w-4 h-4 ml-2" />
-                אשר {approvedCount} סגמנטים והמשך
+                {validationMode === 'full_plan'
+                  ? 'בדוק תוכנית מלאה (ניסוי)'
+                  : `אשר ${approvedCount} סגמנטים והמשך`}
               </Button>
             </div>
           </div>

@@ -39,6 +39,23 @@
 - ✅ Cosmos DB: Store decompositions with type="decomposition"
 - ✅ OpenAI GPT-5.1: Intelligent plan analysis with reasoning
 
+#### 4. **Segment Validation + Coverage + History (NEW)**
+- ✅ **Segment Validation API** (`src/api/routes/segment_validation.py`)
+  - `POST /api/v1/segments/validate-segments` - בדיקת סגמנטים מאושרים
+  - `GET /api/v1/segments/validations` - רשימת היסטוריית בדיקות (ללא העלאה מחדש)
+  - `GET /api/v1/segments/validation/{validation_id}` - טעינת תוצאות בדיקה מלאה
+- ✅ **Coverage Tracking** (`src/services/requirements_coverage.py`)
+  - מעקב כיסוי עבור 16 דרישות “ממוכנות” (subset מיושם כרגע)
+  - תיקון התאמה בין `rule_id` פנימי (לדוגמה `HEIGHT_002`) לבין מזהי דרישות רשמיים (לדוגמה `2.2`)
+  - חישוב מחדש של כיסוי בעת טעינת היסטוריה כדי לשקף לוגיקה עדכנית
+- ✅ **Explainability (Per Segment)** (`src/services/mamad_validator.py` + backfill)
+  - `checked_requirements`: אילו דרישות נבדקו בפועל בסגמנט
+  - `decision_summary_he`: הסבר קצר בעברית למה הופעלו/לא הופעלו בדיקות
+
+#### 5. **Requirements Catalog (66 דרישות) (NEW)**
+- ✅ `GET /api/v1/requirements` - קטלוג דרישות מלא מתוך requirements-mamad.md (סה"כ 66)
+- ✅ `GET /api/v1/requirements/summary` - ספירה לפי פרקים
+
 ### Frontend Components
 
 #### 1. **DecompositionUpload** (`frontend/src/components/DecompositionUpload.tsx`)
@@ -63,7 +80,7 @@
 - ✅ Metadata display from legend
 - ✅ Approve/Reject workflow
 
-#### 3. **Multi-Stage App** (`frontend/src/App.clean.tsx`)
+#### 3. **Multi-Stage App** (`frontend/src/App.tsx`)
 - ✅ 4-stage workflow:
   1. **Upload**: File upload with progress
   2. **Decomposition Review**: User reviews and approves segments
@@ -72,13 +89,19 @@
 - ✅ Progress indicator in header
 - ✅ Clean state management
 
+#### 4. **Results UX Improvements (NEW)**
+- ✅ טעינת בדיקות מהיסטוריה בלי להעלות קובץ מחדש
+- ✅ פילטרים לכיסוי דרישות (all / passed / failed / not_checked) דרך כרטיסיות סטטיסטיקה לחיצות
+- ✅ תצוגת “לא רלוונטי” עבור סגמנטים ללא דרישות רלוונטיות
+- ✅ חלון/מודאל להצגת כלל הדרישות (66) למשתמש
+
 ## 🔄 In Progress
 
 ### Integration Tasks
-- ⏳ Replace `App.tsx` with `App.clean.tsx`
-- ⏳ Connect approved segments to validation engine
 - ⏳ Full plan viewer with bounding box overlays
 - ⏳ Visual heatmap showing which segments used in which checks
+- ⏳ הרחבת כיסוי הבדיקות מעבר ל-16 דרישות ממוכנות (מיפוי קטגוריות/כללים נוספים)
+- ⏳ בדיקות end-to-end עם קבצים אמיתיים + כיול פרומפטים לפי תוצאות
 
 ## 📋 Next Steps
 
@@ -88,16 +111,19 @@
    - Test with real DWF files
    - Verify blob storage URLs work correctly
 
-2. **Full Plan Viewer**
+2. **Coverage & Explainability Verification**
+  - לוודא שמספרי הסטטיסטיקה מתעדכנים נכון לאחר טעינת היסטוריה
+  - לוודא שמוצגים `checked_requirements` ו-`decision_summary_he` לכל סגמנט
+
+3. **Full Plan Viewer**
    - Create interactive viewer component
    - Overlay bounding boxes on full plan
    - Click segment to highlight
    - Zoom/pan controls
 
-3. **Validation Integration**
-   - Connect approved segments to validation engine
-   - Pass segment URLs instead of full plan
-   - Map violations back to source segments
+4. **Validation Coverage Expansion**
+  - הוספת בדיקות ממוכנות נוספות (בהתאם לדרישות במסמך)
+  - הרחבת מיפוי `rule_id` → מזהי דרישות רשמיים
 
 ### Medium Priority
 4. **Segment Editing**

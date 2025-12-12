@@ -2,7 +2,7 @@
 import uuid
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Literal
 
 from src.azure import get_cosmos_client, get_openai_client
 from src.services.segment_analyzer import get_segment_analyzer
@@ -18,6 +18,10 @@ class SegmentValidationRequest(BaseModel):
     """Request to validate approved segments."""
     decomposition_id: str = Field(..., description="Decomposition ID")
     approved_segment_ids: List[str] = Field(..., description="List of approved segment IDs to validate")
+    mode: Literal["segments", "full_plan"] = Field(
+        "segments",
+        description="Validation mode: 'segments' validates selected segment crops; 'full_plan' validates the full plan image as a single unit"
+    )
 
 
 class SegmentValidationResponse(BaseModel):
@@ -73,18 +77,32 @@ async def validate_segments(request: SegmentValidationRequest):
         
         decomposition = results[0]
         
-        # 2. Filter approved segments
+        # 2. Determine what to validate (segments vs full plan)
         all_segments = decomposition.get("segments", [])
-        approved_segments = [
-            seg for seg in all_segments 
-            if seg["segment_id"] in request.approved_segment_ids
-        ]
-        
-        if not approved_segments:
-            raise HTTPException(
-                status_code=400,
-                detail="No approved segments found"
-            )
+
+        if request.mode == "full_plan":
+            full_plan_url = decomposition.get("full_plan_url")
+            if not full_plan_url:
+                raise HTTPException(status_code=400, detail="Decomposition missing full_plan_url")
+            approved_segments = [
+                {
+                    "segment_id": "full_plan",
+                    "blob_url": full_plan_url,
+                    "type": "floor_plan",
+                    "description": "תוכנית מלאה (ללא חיתוך)"
+                }
+            ]
+        else:
+            approved_segments = [
+                seg for seg in all_segments
+                if seg.get("segment_id") in request.approved_segment_ids
+            ]
+
+            if not approved_segments:
+                raise HTTPException(
+                    status_code=400,
+                    detail="No approved segments found"
+                )
         
         logger.info("Found approved segments",
                    total=len(all_segments),
@@ -325,7 +343,64 @@ async def get_validation_results(validation_id: str):
                 detail=f"Validation not found: {validation_id}"
             )
         
-        return results[0]
+        doc = results[0]
+
+        # Backfill UX fields for older stored validations (no schema migration needed)
+        category_to_checked_requirements = {
+            "WALL_SECTION": ["1.2"],
+            "ROOM_LAYOUT": ["2.1", "2.2"],
+            "DOOR_DETAILS": ["3.1"],
+            "WINDOW_DETAILS": ["3.2"],
+            "REBAR_DETAILS": ["6.3"],
+            "MATERIALS_SPECS": ["6.1", "6.2"],
+            "GENERAL_NOTES": ["4.2"],
+            "SECTIONS": ["2.1", "2.2"],
+        }
+
+        enriched_segments = []
+        for seg in doc.get("analyzed_segments", []) or []:
+            analysis_data = seg.get("analysis_data", {}) or {}
+            classification = analysis_data.get("classification", {}) or {}
+            primary_category = classification.get("primary_category", "OTHER")
+
+            validation = seg.get("validation", {}) or {}
+            if not validation.get("checked_requirements"):
+                validation["checked_requirements"] = category_to_checked_requirements.get(primary_category, [])
+
+            if not validation.get("decision_summary_he"):
+                checked = validation.get("checked_requirements") or []
+                if checked:
+                    validation["decision_summary_he"] = (
+                        f"הופעלו בדיקות לפי קטגוריית הסגמנט '{primary_category}'. "
+                        f"דרישות שנבדקו בסגמנט זה: {', '.join(checked)}. "
+                        "דרישות אחרות לא נבדקו כי הן ממופות לקטגוריות אחרות או דורשות סגמנטים מסוג אחר (למשל פרט/חתך)."
+                    )
+                else:
+                    validation["decision_summary_he"] = (
+                        f"לא הופעלו בדיקות כי הקטגוריה שסווגה היא '{primary_category}'. "
+                        "המערכת מפעילה בדיקות רק עבור קטגוריות מוגדרות."
+                    )
+
+            enriched_segments.append({
+                **seg,
+                "validation": validation,
+            })
+
+        doc = {
+            **doc,
+            "analyzed_segments": enriched_segments,
+        }
+
+        # Always (re)compute coverage on read so history reflects latest mapping logic
+        tracker = get_coverage_tracker()
+        coverage_report = tracker.calculate_coverage({
+            "analyzed_segments": doc.get("analyzed_segments", [])
+        })
+
+        return {
+            **doc,
+            "coverage": coverage_report,
+        }
         
     except HTTPException:
         raise

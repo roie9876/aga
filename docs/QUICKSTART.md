@@ -5,9 +5,13 @@
 A **complete MVP** FastAPI application that:
 1. ✅ Accepts architectural plan uploads (PDF, images)
 2. ✅ Extracts measurements using GPT-5.1 with reasoning
-3. ✅ Validates against all ממ"ד requirements
+3. ✅ Validates against the currently implemented machine-checkable subset of ממ"ד requirements
 4. ✅ Stores results in Cosmos DB
 5. ✅ Returns detailed violation reports in Hebrew
+
+Also included:
+- ✅ Plan decomposition (DWF/DWFX → segments) + segment-based validation workflow
+- ✅ Full requirements catalog endpoint (66 requirements) for user transparency
 
 ## 🚀 Getting Started
 
@@ -173,6 +177,44 @@ curl http://localhost:8000/api/v1/projects/project-123/validations
 curl -X DELETE http://localhost:8000/api/v1/results/{validation_id}
 ```
 
+## 🧩 Decomposition + Segment Validation (Recommended Flow)
+
+### 1) Analyze / Decompose a plan
+```bash
+curl -X POST http://localhost:8000/api/v1/decomposition/analyze \
+   -F "file=@/path/to/plan.dwf" \
+   -F "project_id=project-123" \
+   -F "plan_name=My Plan"
+```
+
+### 2) Validate approved segments
+```bash
+curl -X POST http://localhost:8000/api/v1/segments/validate-segments \
+   -H "Content-Type: application/json" \
+   -d '{
+      "decomposition_id": "decomp-...",
+      "approved_segment_ids": ["seg_001", "seg_002"]
+   }'
+```
+
+### 3) Load history (no re-upload)
+```bash
+curl http://localhost:8000/api/v1/segments/validations
+curl http://localhost:8000/api/v1/segments/validation/{validation_id}
+```
+
+## 📚 Requirements Catalog (Full List)
+
+### Get all parsed requirements (66)
+```bash
+curl http://localhost:8000/api/v1/requirements
+```
+
+### Get a summary (counts by section)
+```bash
+curl http://localhost:8000/api/v1/requirements/summary
+```
+
 ## 🧪 Testing
 
 ### Manual Testing with Swagger UI
@@ -198,7 +240,11 @@ print(results.json())
 
 ## 📊 What Gets Validated
 
-All 8 sections from `requirements-mamad.md`:
+### Automatic validation (implemented today)
+The segment-validation flow automatically checks a focused, machine-checkable subset (16 key requirements across 6 categories). The coverage dashboard reflects what was actually executed.
+
+### Full requirements catalog (transparency)
+The complete requirements document is still exposed via `GET /api/v1/requirements` and includes 8 sections from `requirements-mamad.md`:
 
 1. **קירות חיצוניים ועוביים**
    - Wall count (1-4)

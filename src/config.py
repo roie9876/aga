@@ -27,6 +27,11 @@ class Settings(BaseSettings):
     azure_openai_endpoint: str
     azure_openai_deployment_name: str = "gpt-5.1"
     azure_openai_api_version: str = "2024-12-01-preview"
+
+    # Azure OpenAI reliability
+    azure_openai_max_retries: int = 6
+    azure_openai_retry_base_seconds: float = 1.0
+    azure_openai_retry_max_seconds: float = 30.0
     
     # Azure Cosmos DB
     azure_cosmosdb_endpoint: str
@@ -36,6 +41,15 @@ class Settings(BaseSettings):
     # Azure Blob Storage
     azure_storage_account_name: str
     azure_storage_container_name: str = "architectural-plans"
+
+    # Decomposition tuning
+    decomposition_merge_enabled: bool = False
+    decomposition_merge_margin_ratio: float = 0.02
+
+    # Decomposition post-processing (helps keep only the "top-level" drawings)
+    decomposition_filter_nested_frames_enabled: bool = True
+    decomposition_nested_containment_threshold: float = 0.90
+    decomposition_min_box_area_ratio: float = 0.005
     
     # Optional Azure Identity
     azure_tenant_id: Optional[str] = None

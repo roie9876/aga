@@ -5,6 +5,7 @@ from typing import Dict, Any, Optional
 from io import BytesIO
 
 from src.azure import get_openai_client, get_blob_client
+from src.config import settings
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -15,7 +16,7 @@ class SegmentAnalyzer:
     
     def __init__(self):
         """Initialize the segment analyzer."""
-        self.openai_client = get_openai_client().client
+        self.openai_client = get_openai_client()
         self.blob_client = get_blob_client()
         logger.info("SegmentAnalyzer initialized")
     
@@ -232,10 +233,10 @@ What does this segment primarily show? Choose ONE or MORE categories:
 - Include units for all measurements
 - Be comprehensive - this data will be used for compliance validation"""
 
-        # Call GPT-5.1 (o1-preview)
+        # Call Azure OpenAI deployment configured via AZURE_OPENAI_DEPLOYMENT_NAME
         try:
-            response = self.openai_client.chat.completions.create(
-                model="gpt-5.1",
+            response = self.openai_client.chat_completions_create(
+                model=settings.azure_openai_deployment_name,
                 messages=[
                     {
                         "role": "user",

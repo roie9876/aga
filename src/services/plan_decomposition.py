@@ -31,7 +31,7 @@ class PlanDecompositionService:
     
     def __init__(self):
         """Initialize the decomposition service."""
-        self.openai_client = get_openai_client().client  # Get the actual AzureOpenAI client
+        self.openai_client = get_openai_client()
         self.blob_client = get_blob_client()
         self.image_cropper = get_image_cropper()
         self.border_detector = get_border_detector()
@@ -75,6 +75,44 @@ class PlanDecompositionService:
             segments_data, metadata_data, tokens_used = self._analyze_plan_with_gpt(
                 plan_image_bytes=plan_image_bytes
             )
+
+            # Optional: keep only "top-level" frames (drop nested/internal detail boxes)
+            # This is often closer to how a human perceives separate drawings on a sheet.
+            if settings.decomposition_filter_nested_frames_enabled and len(segments_data) > 1:
+                before_count = len(segments_data)
+                gpt_width_for_filter = float(metadata_data.get("image_width", actual_width) or actual_width)
+                gpt_height_for_filter = float(metadata_data.get("image_height", actual_height) or actual_height)
+                segments_data = self._filter_nested_segments(
+                    segments_data=segments_data,
+                    image_width=gpt_width_for_filter,
+                    image_height=gpt_height_for_filter,
+                )
+                logger.info(
+                    "Filtered nested frames",
+                    before=before_count,
+                    after=len(segments_data),
+                    containment_threshold=settings.decomposition_nested_containment_threshold,
+                    min_area_ratio=settings.decomposition_min_box_area_ratio,
+                )
+
+            # Optional: merge nearby detected frames into larger "macro" regions
+            # This creates crops closer to the manual red-box grouping (clusters/columns)
+            if settings.decomposition_merge_enabled and segments_data:
+                before_count = len(segments_data)
+                gpt_width_for_merge = metadata_data.get("image_width", actual_width)
+                gpt_height_for_merge = metadata_data.get("image_height", actual_height)
+                segments_data = self._merge_nearby_segments(
+                    segments_data=segments_data,
+                    image_width=float(gpt_width_for_merge),
+                    image_height=float(gpt_height_for_merge),
+                )
+                logger.info(
+                    "Merged nearby segments",
+                    before=before_count,
+                    after=len(segments_data),
+                    merge_enabled=True,
+                    margin_ratio=settings.decomposition_merge_margin_ratio,
+                )
             analysis_time = time.time() - analysis_start
             logger.info("GPT analysis complete", 
                        segments_found=len(segments_data),
@@ -96,17 +134,11 @@ class PlanDecompositionService:
             
             # Step 4: Create segment objects with SCALED coordinates + MODERATE PADDING
             segments = []
-            
-            # Add moderate padding to give OpenCV room to search for actual borders
-            # Padding is ~5% of image dimensions - OpenCV will refine to exact borders
-            # This provides a search area for border detection while avoiding excessive overlap
-            padding_x = int(actual_width * 0.05)  # 5% horizontal padding (~175px for 3500px image)
-            padding_y = int(actual_height * 0.05)  # 5% vertical padding (~125px for 2500px image)
-            
-            logger.info("Applying moderate padding (OpenCV will refine to exact borders)",
-                       padding_x=padding_x,
-                       padding_y=padding_y,
-                       reason="Provide search area for OpenCV border detection")
+
+            # Note: we no longer apply a fixed % padding here.
+            # Fixed global padding can cause small details to expand into neighboring drawings,
+            # making some crops look wrong. Instead, we keep scaled boxes tight and let
+            # OpenCV use a dynamic search margin based on the box size during cropping.
             
             for idx, seg_data in enumerate(segments_data, 1):
                 # Scale bounding box coordinates to original image size
@@ -117,18 +149,18 @@ class PlanDecompositionService:
                 scaled_y = bbox.get("y", 0) * scale_y
                 scaled_width = bbox.get("width", 0) * scale_x
                 scaled_height = bbox.get("height", 0) * scale_y
-                
-                # Then, add padding while ensuring we stay within image bounds
-                padded_x = max(0, scaled_x - padding_x)
-                padded_y = max(0, scaled_y - padding_y)
-                padded_width = min(actual_width - padded_x, scaled_width + (2 * padding_x))
-                padded_height = min(actual_height - padded_y, scaled_height + (2 * padding_y))
-                
+
+                # Clamp to image bounds
+                clamped_x = max(0.0, min(float(actual_width), float(scaled_x)))
+                clamped_y = max(0.0, min(float(actual_height), float(scaled_y)))
+                clamped_w = max(0.0, min(float(actual_width) - clamped_x, float(scaled_width)))
+                clamped_h = max(0.0, min(float(actual_height) - clamped_y, float(scaled_height)))
+
                 scaled_bbox = {
-                    "x": padded_x,
-                    "y": padded_y,
-                    "width": padded_width,
-                    "height": padded_height
+                    "x": clamped_x,
+                    "y": clamped_y,
+                    "width": clamped_w,
+                    "height": clamped_h,
                 }
                 
                 # Update segment data with scaled + padded coordinates
@@ -209,6 +241,288 @@ class PlanDecompositionService:
                 ),
                 error_message=str(e)
             )
+
+    def _merge_nearby_segments(
+        self,
+        segments_data: List[Dict[str, Any]],
+        image_width: float,
+        image_height: float,
+    ) -> List[Dict[str, Any]]:
+        """Merge detected frame boxes that are close/adjacent into larger regions.
+
+        We intentionally keep GPT detecting "fine" rectangles (individual frames),
+        then merge them into macro regions (like a column of details) to match
+        the desired UX while avoiding reliance on a drawn outer border.
+        """
+        if len(segments_data) < 2:
+            return segments_data
+
+        margin_ratio = float(settings.decomposition_merge_margin_ratio)
+        margin_ratio = max(0.0, min(0.10, margin_ratio))
+        margin_x = image_width * margin_ratio
+        margin_y = image_height * margin_ratio
+
+        # Heuristics tuned to avoid "chaining" that collapses everything into one cluster.
+        min_axis_overlap_ratio = 0.25  # require meaningful alignment to merge
+        max_cluster_area_ratio = 0.70  # safety cap against mega-cluster
+
+        def _bbox_xyxy(seg: Dict[str, Any]) -> Tuple[float, float, float, float]:
+            b = seg.get("bounding_box", {}) or {}
+            x1 = float(b.get("x", 0))
+            y1 = float(b.get("y", 0))
+            w = float(b.get("width", 0))
+            h = float(b.get("height", 0))
+            x2 = x1 + max(0.0, w)
+            y2 = y1 + max(0.0, h)
+            return x1, y1, x2, y2
+
+        def _overlap(a1: float, a2: float, b1: float, b2: float) -> float:
+            return max(0.0, min(a2, b2) - max(a1, b1))
+
+        def _gap(a1: float, a2: float, b1: float, b2: float) -> float:
+            # distance between two intervals (0 if overlapping)
+            return max(0.0, max(a1, b1) - min(a2, b2))
+
+        def _mergeable(box_a: Tuple[float, float, float, float], box_b: Tuple[float, float, float, float]) -> bool:
+            ax1, ay1, ax2, ay2 = box_a
+            bx1, by1, bx2, by2 = box_b
+
+            aw = max(1.0, ax2 - ax1)
+            ah = max(1.0, ay2 - ay1)
+            bw = max(1.0, bx2 - bx1)
+            bh = max(1.0, by2 - by1)
+
+            ox = _overlap(ax1, ax2, bx1, bx2)
+            oy = _overlap(ay1, ay2, by1, by2)
+            overlap_x_ratio = ox / min(aw, bw)
+            overlap_y_ratio = oy / min(ah, bh)
+
+            gx = _gap(ax1, ax2, bx1, bx2)
+            gy = _gap(ay1, ay2, by1, by2)
+
+            # Merge vertical stacks: strong X alignment + small vertical gap
+            if overlap_x_ratio >= min_axis_overlap_ratio and gy <= margin_y:
+                return True
+            # Merge horizontal neighbors: strong Y alignment + small horizontal gap
+            if overlap_y_ratio >= min_axis_overlap_ratio and gx <= margin_x:
+                return True
+            return False
+
+        def _union(a: Tuple[float, float, float, float], b: Tuple[float, float, float, float]) -> Tuple[float, float, float, float]:
+            ax1, ay1, ax2, ay2 = a
+            bx1, by1, bx2, by2 = b
+            return (min(ax1, bx1), min(ay1, by1), max(ax2, bx2), max(ay2, by2))
+
+        def _area(box: Tuple[float, float, float, float]) -> float:
+            x1, y1, x2, y2 = box
+            return max(0.0, x2 - x1) * max(0.0, y2 - y1)
+
+        image_area = max(1.0, image_width * image_height)
+
+        # Sort boxes top-to-bottom, left-to-right for stable greedy clustering
+        boxes = [_bbox_xyxy(seg) for seg in segments_data]
+        order = sorted(range(len(segments_data)), key=lambda i: (boxes[i][1], boxes[i][0]))
+
+        clusters: List[Dict[str, Any]] = []
+        # each cluster: {"indices": [...], "bbox": (x1,y1,x2,y2)}
+
+        for idx in order:
+            box = boxes[idx]
+            best_cluster = None
+            best_increase = None
+
+            for c in clusters:
+                cb = c["bbox"]
+                if not _mergeable(cb, box):
+                    continue
+
+                ub = _union(cb, box)
+                if _area(ub) / image_area > max_cluster_area_ratio:
+                    continue
+
+                increase = _area(ub) - _area(cb)
+                if best_increase is None or increase < best_increase:
+                    best_increase = increase
+                    best_cluster = c
+
+            if best_cluster is None:
+                clusters.append({"indices": [idx], "bbox": box})
+            else:
+                best_cluster["indices"].append(idx)
+                best_cluster["bbox"] = _union(best_cluster["bbox"], box)
+
+        # Prefer stable ordering
+        clusters.sort(key=lambda c: (c["bbox"][1], c["bbox"][0]))
+
+        cluster_indices_list: List[List[int]] = [sorted(c["indices"]) for c in clusters]
+
+        def _pick_type(indices: List[int]) -> str:
+            types = {str(segments_data[i].get("type", "unknown")) for i in indices}
+            priority = [
+                "floor_plan",
+                "section",
+                "elevation",
+                "detail",
+                "table",
+                "legend",
+                "unknown",
+            ]
+            for t in priority:
+                if t in types:
+                    return t
+            return "unknown"
+
+        def _title_for_type(type_str: str, count: int) -> str:
+            if count <= 1:
+                return "ללא כותרת"
+            if type_str == "floor_plan":
+                return f"אזור תוכניות ({count})"
+            if type_str == "section":
+                return f"אזור חתכים ({count})"
+            if type_str == "elevation":
+                return f"אזור חזיתות ({count})"
+            if type_str == "detail":
+                return f"מקבץ פרטים ({count})"
+            if type_str == "table":
+                return f"אזור טבלאות ({count})"
+            if type_str == "legend":
+                return f"אזור מקרא ({count})"
+            return f"אזור שרטוטים ({count})"
+
+        merged: List[Dict[str, Any]] = []
+
+        for indices in cluster_indices_list:
+            if len(indices) == 1:
+                merged.append(segments_data[indices[0]])
+                continue
+
+            # Union bbox
+            x1 = float("inf")
+            y1 = float("inf")
+            x2 = 0.0
+            y2 = 0.0
+            descriptions: List[str] = []
+            confidences: List[float] = []
+            region_ids: List[str] = []
+
+            for idx in indices:
+                seg = segments_data[idx]
+                bx1, by1, bx2, by2 = _bbox_xyxy(seg)
+                x1 = min(x1, bx1)
+                y1 = min(y1, by1)
+                x2 = max(x2, bx2)
+                y2 = max(y2, by2)
+                d = str(seg.get("description", "")).strip()
+                if d:
+                    descriptions.append(d)
+                try:
+                    confidences.append(float(seg.get("confidence", 1.0)))
+                except Exception:
+                    pass
+                rid = str(seg.get("region_id", "")).strip()
+                if rid:
+                    region_ids.append(rid)
+
+            cluster_type = _pick_type(indices)
+            title = _title_for_type(cluster_type, len(indices))
+
+            # Keep description short and human readable
+            short_desc = "; ".join(descriptions[:3])
+            if len(descriptions) > 3:
+                short_desc = short_desc + "..."
+
+            merged.append(
+                {
+                    "title": title,
+                    "type": cluster_type,
+                    "description": short_desc or "אזור מקובץ של מספר שרטוטים",
+                    "bounding_box": {
+                        "x": max(0.0, x1),
+                        "y": max(0.0, y1),
+                        "width": max(0.0, x2 - x1),
+                        "height": max(0.0, y2 - y1),
+                    },
+                    "confidence": sum(confidences) / len(confidences) if confidences else 1.0,
+                    # Marker used later to skip OpenCV border snapping
+                    "reasoning": f"MERGED_CLUSTER:{len(indices)} ids={','.join(region_ids[:12])}",
+                }
+            )
+
+        return merged
+
+    def _filter_nested_segments(
+        self,
+        segments_data: List[Dict[str, Any]],
+        image_width: float,
+        image_height: float,
+    ) -> List[Dict[str, Any]]:
+        if len(segments_data) < 2:
+            return segments_data
+
+        image_area = max(1.0, float(image_width) * float(image_height))
+        min_area = max(1.0, float(settings.decomposition_min_box_area_ratio))
+        min_area = max(0.0, min(0.20, min_area))
+        min_area_px = image_area * min_area
+
+        containment = float(settings.decomposition_nested_containment_threshold)
+        containment = max(0.50, min(0.99, containment))
+
+        def _bbox_xyxy(seg: Dict[str, Any]) -> Tuple[float, float, float, float]:
+            b = seg.get("bounding_box", {}) or {}
+            x1 = float(b.get("x", 0))
+            y1 = float(b.get("y", 0))
+            w = float(b.get("width", 0))
+            h = float(b.get("height", 0))
+            x2 = x1 + max(0.0, w)
+            y2 = y1 + max(0.0, h)
+            return x1, y1, x2, y2
+
+        def _area(box: Tuple[float, float, float, float]) -> float:
+            x1, y1, x2, y2 = box
+            return max(0.0, x2 - x1) * max(0.0, y2 - y1)
+
+        def _intersection(a: Tuple[float, float, float, float], b: Tuple[float, float, float, float]) -> float:
+            ax1, ay1, ax2, ay2 = a
+            bx1, by1, bx2, by2 = b
+            ix1 = max(ax1, bx1)
+            iy1 = max(ay1, by1)
+            ix2 = min(ax2, bx2)
+            iy2 = min(ay2, by2)
+            return _area((ix1, iy1, ix2, iy2))
+
+        boxes = [_bbox_xyxy(seg) for seg in segments_data]
+        areas = [_area(b) for b in boxes]
+
+        # Drop tiny boxes first
+        candidates = [i for i, a in enumerate(areas) if a >= min_area_px]
+        if len(candidates) < 2:
+            return [segments_data[i] for i in candidates] if candidates else segments_data
+
+        # Keep larger boxes first, and drop boxes that are mostly contained inside a kept larger box
+        order = sorted(candidates, key=lambda i: areas[i], reverse=True)
+        kept: List[int] = []
+
+        for i in order:
+            bi = boxes[i]
+            ai = areas[i]
+            is_nested = False
+
+            for j in kept:
+                bj = boxes[j]
+                aj = areas[j]
+                if aj <= ai:
+                    continue
+                inter = _intersection(bi, bj)
+                if ai > 0 and (inter / ai) >= containment:
+                    is_nested = True
+                    break
+
+            if not is_nested:
+                kept.append(i)
+
+        # Stable ordering top-to-bottom, left-to-right
+        kept.sort(key=lambda i: (boxes[i][1], boxes[i][0]))
+        return [segments_data[i] for i in kept]
     
     def _analyze_plan_with_gpt(
         self,
@@ -337,7 +651,7 @@ b) **Identify what's inside:**
 
         # Call GPT-5.1
         try:
-            response = self.openai_client.chat.completions.create(
+            response = self.openai_client.chat_completions_create(
                 model=settings.azure_openai_deployment_name,  # Use deployment name from settings
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -511,6 +825,40 @@ b) **Identify what's inside:**
                    total_segments=len(decomposition.segments))
         
         try:
+            # Load image size once for clamping
+            try:
+                with Image.open(plan_image_path) as img:
+                    img_w, img_h = img.size
+            except Exception:
+                img_w = int(decomposition.full_plan_width or 0)
+                img_h = int(decomposition.full_plan_height or 0)
+
+            def _clamp_bbox(b: Dict[str, Any]) -> Dict[str, Any]:
+                if img_w <= 0 or img_h <= 0:
+                    return b
+                x = float(b.get("x", 0))
+                y = float(b.get("y", 0))
+                w = float(b.get("width", 0))
+                h = float(b.get("height", 0))
+                x = max(0.0, min(float(img_w), x))
+                y = max(0.0, min(float(img_h), y))
+                w = max(0.0, min(float(img_w) - x, w))
+                h = max(0.0, min(float(img_h) - y, h))
+                return {"x": x, "y": y, "width": w, "height": h}
+
+            def _expand_bbox(b: Dict[str, Any], pad: float) -> Dict[str, Any]:
+                x = float(b.get("x", 0))
+                y = float(b.get("y", 0))
+                w = float(b.get("width", 0))
+                h = float(b.get("height", 0))
+                x2 = x + w
+                y2 = y + h
+                x = x - pad
+                y = y - pad
+                x2 = x2 + pad
+                y2 = y2 + pad
+                return _clamp_bbox({"x": x, "y": y, "width": x2 - x, "height": y2 - y})
+
             # Upload full plan first
             with open(plan_image_path, 'rb') as f:
                 full_plan_blob = f"{decomposition.validation_id}/full_plan.png"
@@ -524,32 +872,69 @@ b) **Identify what's inside:**
             # Crop and upload each segment
             for segment in decomposition.segments:
                 try:
-                    # STEP 1: Refine bounding box using OpenCV border detection
-                    # This snaps GPT's estimate to actual rectangular borders in the image
-                    original_bbox = segment.bounding_box.model_dump()
-                    
-                    logger.info("Refining bounding box with OpenCV",
-                               segment_id=segment.segment_id,
-                               gpt_bbox=original_bbox)
-                    
-                    refined_bbox = self.border_detector.refine_bounding_box(
-                        image_path=plan_image_path,
-                        bbox=original_bbox,
-                        search_margin=100  # Search 100px beyond GPT's estimate for borders
+                    original_bbox = _clamp_bbox(segment.bounding_box.model_dump())
+
+                    # STEP 1: Optionally refine using OpenCV border detection
+                    # For merged macro-clusters (no guaranteed outer border), skip snapping.
+                    refined_bbox = original_bbox
+                    is_merged_cluster = bool(
+                        segment.llm_reasoning
+                        and isinstance(segment.llm_reasoning, str)
+                        and segment.llm_reasoning.startswith("MERGED_CLUSTER:")
                     )
-                    
-                    # Update segment with refined coordinates
-                    segment.bounding_box = BoundingBox(**refined_bbox)
-                    
-                    logger.info("Bounding box refined",
-                               segment_id=segment.segment_id,
-                               original=original_bbox,
-                               refined=refined_bbox)
+
+                    if not is_merged_cluster:
+                        logger.info(
+                            "Refining bounding box with OpenCV",
+                            segment_id=segment.segment_id,
+                            gpt_bbox=original_bbox,
+                        )
+
+                        # Dynamic search margin: scale with bbox size (helps small/large drawings)
+                        ow = float(original_bbox.get("width", 0))
+                        oh = float(original_bbox.get("height", 0))
+                        base = max(1.0, min(ow, oh))
+                        search_margin = int(max(25.0, min(220.0, base * 0.18)))
+
+                        refined_bbox = self.border_detector.refine_bounding_box(
+                            image_path=plan_image_path,
+                            bbox=original_bbox,
+                            search_margin=search_margin,
+                        )
+
+                        refined_bbox = _clamp_bbox(refined_bbox)
+
+                        # Update segment with refined coordinates
+                        segment.bounding_box = BoundingBox(**refined_bbox)
+
+                        logger.info(
+                            "Bounding box refined",
+                            segment_id=segment.segment_id,
+                            original=original_bbox,
+                            refined=refined_bbox,
+                            search_margin=search_margin,
+                        )
+
+                        if refined_bbox == original_bbox:
+                            logger.info(
+                                "OpenCV border refinement made no change",
+                                segment_id=segment.segment_id,
+                            )
+                    else:
+                        logger.info(
+                            "Skipping OpenCV border refinement for merged cluster",
+                            segment_id=segment.segment_id,
+                            bbox=original_bbox,
+                        )
                     
                     # STEP 2: Crop segment using refined bounding box
+                    # Add a small safety padding to avoid cutting off border lines.
+                    pad = float(max(4.0, min(40.0, min(float(refined_bbox.get("width", 0)), float(refined_bbox.get("height", 0))) * 0.02)))
+                    crop_bbox = _expand_bbox(refined_bbox, pad) if (img_w > 0 and img_h > 0) else refined_bbox
+
                     cropped_buffer, thumb_buffer = self.image_cropper.crop_and_create_thumbnail(
                         image_path=plan_image_path,
-                        bounding_box=refined_bbox
+                        bounding_box=crop_bbox
                     )
                     
                     # Upload cropped segment

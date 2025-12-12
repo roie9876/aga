@@ -1,4 +1,4 @@
-"""Architecture Documentation
+# Architecture Documentation
 
 ## System Overview
 
@@ -21,10 +21,14 @@ The Mamad Validation App is a FastAPI-based microservice that validates Israeli 
 │  ┌──────────────────────────────────────────────────────┐  │
 │  │  API Layer                                            │  │
 │  │  - /health (Health check)                            │  │
-│  │  - /api/v1/decompose (Upload & decompose)           │  │
-│  │  - /api/v1/decomposition/{id} (Get decomposition)   │  │
-│  │  - /api/v1/validate (Run validation)                │  │
-│  │  - /api/v1/results/{id} (Get results)               │  │
+│  │  - /api/v1/decomposition/analyze (Upload & decompose)│  │
+│  │  - /api/v1/decomposition/{id} (Get decomposition)    │  │
+│  │  - /api/v1/segments/validate-segments (Validate segs)│  │
+│  │  - /api/v1/segments/validations (History list)       │  │
+│  │  - /api/v1/segments/validation/{id} (History detail) │  │
+│  │  - /api/v1/validate (Legacy: validate full plan)     │  │
+│  │  - /api/v1/requirements (Requirements catalog)       │  │
+│  │  - /api/v1/requirements/summary (Counts)             │  │
 │  └──────────────────────────────────────────────────────┘  │
 │  ┌──────────────────────────────────────────────────────┐  │
 │  │  Business Logic Layer                                 │  │
@@ -73,6 +77,8 @@ The Mamad Validation App is a FastAPI-based microservice that validates Israeli 
 - `routes/health.py` - Health check endpoints
 - `routes/decomposition.py` - ✅ Plan decomposition endpoints (NEW)
 - `routes/validation.py` - Validation API endpoints
+- `routes/segment_validation.py` - ✅ Segment-based validation + history endpoints
+- `routes/requirements.py` - ✅ Requirements catalog endpoints
 
 ### 2. Business Logic Layer (`src/services/`)
 
@@ -164,7 +170,7 @@ credential = DefaultAzureCredential()
 
 ```
 1. User uploads DWF/DWFX/PNG/JPG file via frontend
-   POST /api/v1/decompose
+   POST /api/v1/decomposition/analyze
    │
    ▼
 2. Convert DWF/DWFX to PNG (if needed)
@@ -209,6 +215,32 @@ credential = DefaultAzureCredential()
    - Frontend sends approval list
    - Update Cosmos DB status to 'approved'
    - Proceed to validation with approved segments only
+
+### Segment Validation + Coverage Flow (NEW)
+
+```
+1. Client sends decomposition_id + approved_segment_ids
+   POST /api/v1/segments/validate-segments
+   │
+   ▼
+2. Backend analyzes each segment (GPT-5.1)
+   - classification.primary_category
+   - Hebrew description
+   │
+   ▼
+3. Backend runs targeted validations (deterministic mapping by category)
+   - Emits internal rule IDs (e.g., HEIGHT_002)
+   - Also returns UX fields per segment:
+     - checked_requirements: ["2.1", "2.2", ...]
+     - decision_summary_he: short explanation in Hebrew
+   │
+   ▼
+4. Backend computes coverage report
+   - Maps internal rule_id → official requirement_id for correct attribution
+   │
+   ▼
+5. Store segment_validation doc in Cosmos DB (type="segment_validation")
+```
 ```
 
 ### Validation Flow
@@ -338,6 +370,14 @@ credential = DefaultAzureCredential()
   "failed_checks": 1,
   "created_at": "2024-12-09T10:30:00Z"
 }
+
+### Cosmos DB Container: `validation-results` (segment validations)
+
+Segment-based validations are stored with `type="segment_validation"` and include:
+- `analyzed_segments[]` with `analysis_data.classification` and `validation.*`
+- `coverage` report returned to UI
+
+The history detail endpoint recomputes `coverage` on read so older stored results reflect updated mapping logic.
 ```
 
 ## Security

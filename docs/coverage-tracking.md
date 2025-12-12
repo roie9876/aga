@@ -2,7 +2,8 @@
 
 **Feature**: Automated tracking of MAMAD requirements validation coverage  
 **Created**: December 11, 2025  
-**Status**: ✅ Complete and Integrated
+**Last Updated**: December 12, 2025  
+**Status**: ✅ Complete and Integrated (for implemented checks)
 
 ---
 
@@ -15,12 +16,14 @@ The Requirements Coverage Tracking system provides users with comprehensive visi
 ## Problem Solved
 
 **User Challenge**: After uploading a plan and getting validation results, users had no way to know:
-- Which of the 16 MAMAD requirements were actually checked
+- Which of the **implemented** MAMAD checks were actually executed
 - Which requirements have no relevant segments in their uploaded plan
 - What additional drawings/segments they need to provide for complete coverage
 - Overall validation status relative to the full requirements document
 
-**Solution**: Real-time coverage dashboard that tracks all 16 requirements across 6 categories, showing exactly what's validated, what passed/failed, and what's missing.
+**Solution**:
+- A full **Requirements Catalog** (66 requirements) for transparency: `GET /api/v1/requirements`
+- A real-time **Coverage Dashboard** for the **implemented machine-checkable subset** (16 checks across 6 categories), showing exactly what was checked, what passed/failed, and what is missing for coverage completeness.
 
 ---
 
@@ -31,7 +34,7 @@ The Requirements Coverage Tracking system provides users with comprehensive visi
 #### 1. **RequirementsCoverageTracker Service**
 **File**: `src/services/requirements_coverage.py` (223 lines)
 
-**Core Data Structure**:
+**Core Data Structure (Implemented Checks)**:
 ```python
 ALL_REQUIREMENTS = {
     "1.1": {"category": "קירות", "description": "מיקום ממ\"ד - מרחק מקיר חיצוני", "severity": "critical"},
@@ -68,7 +71,9 @@ ALL_REQUIREMENTS = {
             },
             "validation": {
                 "passed": True,
-                "violations": []
+                "violations": [],
+                "checked_requirements": ["2.1", "2.2"],
+                "decision_summary_he": "הופעלו בדיקות לפי קטגוריית הסגמנט..."
             }
         },
         ...
@@ -85,7 +90,7 @@ ALL_REQUIREMENTS = {
         "passed": 6,            # 6 requirements passed validation
         "failed": 2,            # 2 requirements failed validation
         "not_checked": 8,       # 8 requirements have no relevant segments
-        "coverage_percentage": 50.0,  # 8/16 = 50%
+        "coverage_percentage": 50.0,  # 8/16 implemented checks = 50%
         "pass_percentage": 37.5       # 6/16 = 37.5%
     },
     "requirements": {
@@ -123,7 +128,10 @@ ALL_REQUIREMENTS = {
 #### 2. **API Integration**
 **File**: `src/api/routes/segment_validation.py`
 
-**Endpoint**: `POST /api/v1/segments/validate-segments`
+**Endpoints**:
+- `POST /api/v1/segments/validate-segments` - validate approved segments and return coverage
+- `GET /api/v1/segments/validations` - list history (no re-upload)
+- `GET /api/v1/segments/validation/{validation_id}` - load one validation (recomputes coverage on read)
 
 **Response Model**:
 ```python
@@ -154,6 +162,18 @@ return {
     "coverage": coverage_report  # Include in response
 }
 ```
+
+#### 3. **Correctness: Rule ID → Requirement ID Mapping**
+Older coverage logic assumed the validator emits official requirement IDs. In practice, the validator emits internal rule IDs (e.g., `HEIGHT_002`).
+
+The tracker now maps internal IDs to official IDs (examples):
+- `HEIGHT_002` → `2.2`
+- `HEIGHT_001` / `HEIGHT_003` → `2.1`
+- `WALL_001..003` → `1.2`
+- `DOOR_001` → `3.1`
+- `WINDOW_001` → `3.2`
+
+This ensures violations are correctly attributed to the official requirement rows the UI displays.
 
 ---
 
@@ -204,9 +224,11 @@ export interface CoverageReport {
    - Failed count (red)
    - Not checked count (gray)
 
+    **NEW (Dec 12, 2025)**: Cards are clickable filters (all/passed/failed/not_checked).
+
 2. **Progress Bar**:
    - Visual representation of coverage_percentage
-   - Shows X out of 16 requirements checked
+    - Shows X out of 16 implemented checks covered
 
 3. **Requirements Table** (grouped by category):
    - ✅ Green background for passed requirements
@@ -228,22 +250,35 @@ export interface CoverageReport {
 
 ### Step 1: Initialize Coverage Map
 ```python
-# All 16 requirements start as "not_checked"
+# All tracked (implemented) requirements start as "not_checked"
 coverage = {req_id: {"status": "not_checked", ...} for req_id in ALL_REQUIREMENTS}
 ```
 
 ### Step 2: Process Analyzed Segments
 ```python
 for segment in analyzed_segments:
-    classification = segment["classification"]
-    relevant_reqs = classification["relevant_requirements"]  # e.g., ["1.2", "6.3"]
+    classification = segment.get("analysis_data", {}).get("classification", {})
+    validation = segment.get("validation", {})
+
+    # Prefer deterministic list from validator; fall back to classification
+    checked_reqs = validation.get("checked_requirements") or classification.get("relevant_requirements") or []
+
+    # Map internal rule IDs (e.g., HEIGHT_002) to official requirement IDs (e.g., 2.2)
+    violations_by_req = {}
+    for v in (validation.get("violations") or []):
+        req_id = _map_rule_id_to_requirement_id(v.get("rule_id", ""))
+        if req_id:
+            violations_by_req.setdefault(req_id, []).append(v)
+
+    # Any mapped violation implies that requirement was checked
+    for req_id in violations_by_req.keys():
+        if req_id not in checked_reqs:
+            checked_reqs.append(req_id)
     
-    for req_id in relevant_reqs:
+    for req_id in checked_reqs:
         coverage[req_id]["segments_checked"].append(segment_id)
         
-        # Check if this segment has violations for this requirement
-        segment_violations = [v for v in segment["validation"]["violations"] 
-                             if v["rule_id"].startswith(req_id.replace(".", "_"))]
+        segment_violations = violations_by_req.get(req_id, [])
         
         if segment_violations:
             coverage[req_id]["status"] = "failed"
@@ -254,7 +289,7 @@ for segment in analyzed_segments:
 
 ### Step 3: Calculate Statistics
 ```python
-total = 16
+total = len(ALL_REQUIREMENTS)
 checked = count(status != "not_checked")
 passed = count(status == "passed")
 failed = count(status == "failed")
@@ -315,7 +350,7 @@ System automatically calculates coverage after validation completes
 
 **Example Scenario**:
 ```
-Coverage: 50% (8/16 requirements checked)
+Coverage: 50% (8/16 implemented checks checked)
 Pass Rate: 75% (6/8 checked requirements passed)
 
 ✅ Passed (6):
@@ -354,7 +389,7 @@ Pass Rate: 75% (6/8 checked requirements passed)
 2. **Actionable**: Clear recommendations for what's missing
 3. **Prioritized**: Severity levels (critical/error/warning) guide user focus
 4. **Progressive**: Users can incrementally add segments to improve coverage
-5. **Compliance**: Ensures all 16 MAMAD requirements eventually validated
+5. **Extensible**: Designed so additional requirements can be added to the implemented set over time
 
 ---
 
@@ -409,7 +444,7 @@ Pass Rate: 75% (6/8 checked requirements passed)
 ---
 
 ## Related Documentation
-- `requirements-mamad.md` - Full list of 16 MAMAD requirements
+- `requirements-mamad.md` - Full requirements catalog (currently parsed as 66 items)
 - `docs/architecture.md` - System architecture overview
 - `docs/decomposition-feature.md` - Plan decomposition system
 - `docs/project-status.md` - Overall project status

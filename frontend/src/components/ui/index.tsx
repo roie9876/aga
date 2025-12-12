@@ -94,12 +94,14 @@ interface BadgeProps {
   children: React.ReactNode;
   variant?: 'success' | 'error' | 'warning' | 'info' | 'neutral';
   size?: 'sm' | 'md';
+  className?: string;
 }
 
 export const Badge: React.FC<BadgeProps> = ({ 
   children, 
   variant = 'neutral',
-  size = 'sm' 
+  size = 'sm',
+  className = ''
 }) => {
   const variants = {
     success: 'bg-success/10 text-success border-success/20',
@@ -119,6 +121,7 @@ export const Badge: React.FC<BadgeProps> = ({
       inline-flex items-center font-medium rounded-full border
       ${variants[variant]}
       ${sizes[size]}
+      ${className}
     `}>
       {children}
     </span>
@@ -190,15 +193,6 @@ export const StatCard: React.FC<StatCardProps> = ({
   trend,
   color = 'violet' 
 }) => {
-  const colors = {
-    violet: 'bg-card text-primary border-border', // Simplified to card style
-    green: 'bg-card text-success border-border',
-    blue: 'bg-card text-primary border-border',
-    amber: 'bg-card text-warning border-border',
-    red: 'bg-card text-error border-border',
-    gray: 'bg-card text-text-muted border-border',
-  };
-  
   // We can add a subtle indicator line or icon color instead of full background
   const iconColors = {
     violet: 'text-primary bg-primary/10',
@@ -215,7 +209,9 @@ export const StatCard: React.FC<StatCardProps> = ({
         <span className="text-sm font-medium text-text-muted">{label}</span>
         {icon && (
           <div className={`p-2 rounded-lg ${iconColors[color]}`}>
-            {React.cloneElement(icon as React.ReactElement, { className: 'w-4 h-4' })}
+            {React.isValidElement(icon)
+              ? React.cloneElement(icon as React.ReactElement<{ className?: string }>, { className: 'w-4 h-4' })
+              : icon}
           </div>
         )}
       </div>

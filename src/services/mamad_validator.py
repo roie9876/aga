@@ -17,6 +17,7 @@ import structlog
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass
 from enum import Enum
+import re
 
 logger = structlog.get_logger(__name__)
 
@@ -62,8 +63,27 @@ class MamadValidator:
         
         # Get segment classification
         classification = analysis_data.get("classification", {})
-        primary_category = classification.get("primary_category", "OTHER")
+        primary_category_raw = classification.get("primary_category", "OTHER")
+        secondary_categories_raw = classification.get("secondary_categories", [])
         relevant_requirements = classification.get("relevant_requirements", [])
+
+        # Normalize categories: support multi-label primary_category like "ROOM_LAYOUT|DOOR_DETAILS"
+        # and include secondary_categories as additional signals.
+        categories: List[str] = []
+        if isinstance(primary_category_raw, str) and primary_category_raw.strip():
+            parts = re.split(r"[|,]", primary_category_raw)
+            categories.extend([p.strip().upper() for p in parts if p.strip()])
+        elif isinstance(primary_category_raw, list):
+            categories.extend([str(p).strip().upper() for p in primary_category_raw if str(p).strip()])
+
+        if isinstance(secondary_categories_raw, list):
+            categories.extend([str(c).strip().upper() for c in secondary_categories_raw if str(c).strip()])
+
+        # Default
+        if not categories:
+            categories = ["OTHER"]
+
+        primary_category = categories[0]
         
         logger.info("Starting MAMAD validation", 
                    category=primary_category,
@@ -82,17 +102,50 @@ class MamadValidator:
             "GENERAL_NOTES": [self._validate_ventilation_note],
             "SECTIONS": [self._validate_room_height],
         }
+
+        # Which official requirement IDs this validator actually checks per category.
+        # This is used for coverage reporting (and UI) and should match the rules implemented below.
+        category_to_checked_requirements = {
+            "WALL_SECTION": ["1.2"],
+            "ROOM_LAYOUT": ["2.1", "2.2"],
+            "DOOR_DETAILS": ["3.1"],
+            "WINDOW_DETAILS": ["3.2"],
+            "REBAR_DETAILS": ["6.3"],
+            "MATERIALS_SPECS": ["6.1", "6.2"],
+            "GENERAL_NOTES": ["4.2"],
+            "SECTIONS": ["2.1", "2.2"],
+        }
         
-        # Run only relevant validations based on classification
-        validations_to_run = validation_map.get(primary_category, [])
+        # Run validations based on ALL classified categories (primary + secondary)
+        validations_to_run = []
+        checked_set = set()
+        for cat in categories:
+            for fn in validation_map.get(cat, []):
+                if fn not in validations_to_run:
+                    validations_to_run.append(fn)
+            for req in category_to_checked_requirements.get(cat, []):
+                checked_set.add(req)
+        checked_requirements = sorted(checked_set)
         
+        decision_summary_he = ""
+
         if not validations_to_run:
             # If category not recognized or OTHER, skip validation
             logger.info("No specific validations for this segment category",
                        category=primary_category)
+            decision_summary_he = (
+                f"לא הופעלו בדיקות כי הקטגוריה שסווגה היא '{primary_category}'. "
+                "המערכת מפעילה בדיקות רק עבור קטגוריות מוגדרות (כמו ROOM_LAYOUT/SECTIONS/WALL_SECTION וכו')."
+            )
         else:
             for validation_func in validations_to_run:
                 validation_func(analysis_data)
+
+            decision_summary_he = (
+                f"הופעלו בדיקות לפי קטגוריות הסגמנט: {', '.join(categories)}. "
+                f"דרישות שנבדקו בסגמנט זה: {', '.join(checked_requirements) if checked_requirements else 'אין'}. "
+                "דרישות אחרות לא נבדקו כי הן ממופות לקטגוריות אחרות או דורשות סגמנטים מסוג אחר (למשל פרט/חתך)."
+            )
         
         # Categorize violations
         critical = [v for v in self.violations if v.severity == ViolationSeverity.CRITICAL]
@@ -114,7 +167,9 @@ class MamadValidator:
             "critical_count": len(critical),
             "error_count": len(errors),
             "warning_count": len(warnings),
-            "violations": [self._violation_to_dict(v) for v in self.violations]
+            "violations": [self._violation_to_dict(v) for v in self.violations],
+            "checked_requirements": checked_requirements,
+            "decision_summary_he": decision_summary_he,
         }
     
     def _violation_to_dict(self, v: Violation) -> Dict[str, Any]:

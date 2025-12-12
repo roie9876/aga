@@ -14,6 +14,7 @@ from src.models import (
     CheckStatus,
 )
 from src.azure.openai_client import get_openai_client
+from src.config import settings
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -107,16 +108,15 @@ class LLMValidator:
                     }
                 })
             
-            # Call GPT-5.1 for validation
-            response = self.openai_client.client.chat.completions.create(
-                model="gpt-5.1",
+            # Call Azure OpenAI deployment configured via AZURE_OPENAI_DEPLOYMENT_NAME
+            response = self.openai_client.chat_completions_create(
+                model=settings.azure_openai_deployment_name,
                 messages=messages
             )
             
             # Parse response
             response_text = response.choices[0].message.content
-            logger.info("GPT-5.1 validation completed", 
-                       response_length=len(response_text))
+            logger.info("LLM validation completed", response_length=len(response_text))
             
             # Extract JSON from response
             violations = self._parse_validation_response(response_text)
@@ -131,11 +131,14 @@ class LLMValidator:
                 violations=violations,
                 mamad_identification=mamad_identification
             )
-            
-            logger.info("Validation completed",
-                       status=result.status.value,
-                       total_checks=result.total_checks,
-                       failed_checks=result.failed_checks)
+
+            logger.info(
+                "Validation completed",
+                validation_id=validation_id,
+                status=result.status.value,
+                total_checks=result.total_checks,
+                failed_checks=result.failed_checks,
+            )
             
             return result
             
@@ -182,8 +185,8 @@ class LLMValidator:
 }}"""
         
         try:
-            response = self.openai_client.client.chat.completions.create(
-                model="gpt-5.1",
+            response = self.openai_client.chat_completions_create(
+                model=settings.azure_openai_deployment_name,
                 messages=[
                     {
                         "role": "system",
@@ -203,13 +206,14 @@ class LLMValidator:
             json_end = response_text.rfind("}") + 1
             json_text = response_text[json_start:json_end]
             result = json.loads(json_text)
-            
-            logger.info("Mamad identification completed", 
-                       identified=result.get("identified"),
-                       confidence=result.get("confidence"))
-            
+
+            logger.info(
+                "Mamad identification completed",
+                identified=result.get("identified"),
+                confidence=result.get("confidence"),
+            )
+
             return result
-            
         except Exception as e:
             logger.error("Mamad identification failed", error=str(e))
             return {
@@ -285,8 +289,8 @@ class LLMValidator:
 **רק במקרה שהתמונה לא ברורה בכלל** (מטושטשת/חסרה) - `identified: false`"""
         
         try:
-            response = self.openai_client.client.chat.completions.create(
-                model="gpt-5.1",
+            response = self.openai_client.chat_completions_create(
+                model=settings.azure_openai_deployment_name,
                 messages=[
                     {
                         "role": "system",

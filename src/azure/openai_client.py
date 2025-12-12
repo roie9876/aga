@@ -1,8 +1,11 @@
 """Azure OpenAI client wrapper with Entra ID authentication."""
 import os
+import random
+import time
 from typing import Optional
 from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 from openai import AzureOpenAI
+from openai import APIConnectionError, APITimeoutError, APIStatusError, RateLimitError
 
 from src.config import settings
 from src.utils.logging import get_logger
@@ -76,6 +79,69 @@ class OpenAIClient:
         except Exception as e:
             logger.error("Azure OpenAI health check failed", error=str(e))
             return False
+
+    def chat_completions_create(self, **kwargs):
+        """Create a chat completion with retry/backoff for transient capacity errors.
+
+        Retries common transient failures:
+        - 429 (RateLimit / NoCapacity)
+        - 5xx (service transient)
+        - timeouts / connection errors
+
+        Notes:
+        - This is a synchronous helper; callers from async code will block the event loop.
+        - If Azure is truly out of capacity, retries may still fail; Provisioned Throughput
+          is the reliable fix.
+        """
+        max_attempts = max(1, int(settings.azure_openai_max_retries))
+        base_delay = max(0.1, float(settings.azure_openai_retry_base_seconds))
+        max_delay = max(base_delay, float(settings.azure_openai_retry_max_seconds))
+
+        last_error: Optional[Exception] = None
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return self.client.chat.completions.create(**kwargs)
+            except (RateLimitError, APIStatusError, APITimeoutError, APIConnectionError) as e:
+                last_error = e
+
+                status_code = getattr(e, "status_code", None)
+                error_text = str(e)
+                is_no_capacity = "NoCapacity" in error_text
+                is_retryable_status = status_code in {429, 500, 502, 503, 504}
+
+                if attempt >= max_attempts or (not is_retryable_status and not is_no_capacity):
+                    raise
+
+                retry_after_seconds: Optional[float] = None
+                headers = getattr(e, "headers", None)
+                if isinstance(headers, dict):
+                    retry_after_value = headers.get("retry-after") or headers.get("Retry-After")
+                    if retry_after_value is not None:
+                        try:
+                            retry_after_seconds = float(retry_after_value)
+                        except Exception:
+                            retry_after_seconds = None
+
+                backoff = min(max_delay, base_delay * (2 ** (attempt - 1)))
+                delay = retry_after_seconds if retry_after_seconds is not None else backoff
+                # Add jitter to reduce thundering herd
+                delay = min(max_delay, delay + random.uniform(0, delay * 0.25))
+
+                logger.warning(
+                    "Azure OpenAI call failed; retrying",
+                    attempt=attempt,
+                    max_attempts=max_attempts,
+                    status_code=status_code,
+                    no_capacity=is_no_capacity,
+                    sleep_seconds=delay,
+                )
+                time.sleep(delay)
+
+        # Should not reach here, but keep mypy/happy path clear
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("Azure OpenAI call failed with unknown error")
 
 
 # Global singleton instance
