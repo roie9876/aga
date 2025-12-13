@@ -76,7 +76,7 @@ interface FileUploadZoneProps {
 
 export const FileUploadZone: React.FC<FileUploadZoneProps> = ({ 
   onFileSelect, 
-  accept = '.pdf,.dwf,.dwfx,.png,.jpg,.jpeg',
+  accept = '.pdf,.png,.jpg,.jpeg',
   maxSize = 50 * 1024 * 1024, // 50MB
   loading = false
 }) => {
@@ -163,7 +163,7 @@ export const FileUploadZone: React.FC<FileUploadZoneProps> = ({
             {loading ? 'מעלה קובץ...' : 'גרור קובץ לכאן או לחץ לבחירה'}
           </p>
           <p className="text-sm text-text-muted">
-            PDF, DWF, DWFX, PNG, JPG עד {maxSize / (1024 * 1024)}MB
+            PDF, PNG, JPG עד {maxSize / (1024 * 1024)}MB
           </p>
         </div>
         

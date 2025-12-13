@@ -9,7 +9,7 @@ import { Button, Card, Badge } from './ui';
 
 interface DecompositionReviewProps {
   decompositionId: string;
-  onApprove: (params: { mode: 'segments' | 'full_plan'; approvedSegments: string[] }) => void;
+  onApprove: (params: { mode: 'segments' | 'full_plan'; approvedSegments: string[]; check_groups: string[] }) => void;
   onReject: () => void;
 }
 
@@ -41,6 +41,13 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
     }>
   >([]);
   const [analyzingSegments, setAnalyzingSegments] = useState(false);
+
+  const [selectedCheckGroups, setSelectedCheckGroups] = useState<string[]>([
+    'walls',
+    'heights',
+    'doors',
+    'windows',
+  ]);
 
   const fetchWithTimeout = async (
     url: string,
@@ -227,7 +234,14 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
       .filter(s => s.approved_by_user)
       .map(s => s.segment_id);
 
-    onApprove({ mode: 'segments', approvedSegments: approved });
+    onApprove({ mode: 'segments', approvedSegments: approved, check_groups: selectedCheckGroups });
+  };
+
+  const toggleCheckGroup = (group: string) => {
+    setSelectedCheckGroups((prev) => {
+      if (prev.includes(group)) return prev.filter((g) => g !== group);
+      return [...prev, group];
+    });
   };
 
   const handleSelectAll = () => {
@@ -666,34 +680,26 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
               {/* Content */}
               <div className="grow min-w-0">
                 <div className="flex items-start justify-between gap-4">
-                  <div>
-                    <h4 className="font-semibold text-text-primary text-lg mb-1 truncate">
-                      {segment.title}
-                    </h4>
-                    <div className="flex flex-wrap items-center gap-2 mb-2">
-                      <Badge variant="neutral" className="text-xs">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-3">
+                      <h3 className="text-base font-semibold text-text-primary truncate">
+                        {segment.title}
+                      </h3>
+                      <Badge variant={getConfidenceBadgeVariant(segment.confidence) as any}>
+                        {Math.round(segment.confidence * 100)}%
+                      </Badge>
+                      <Badge variant="neutral" className="hidden sm:inline-flex">
                         {getSegmentTypeLabel(segment.type)}
                       </Badge>
-                      <Badge 
-                        variant={getConfidenceBadgeVariant(segment.confidence) as any}
-                        className="text-xs"
-                      >
-                        {(segment.confidence * 100).toFixed(0)}% דיוק
-                      </Badge>
-                      {segment.analysis_data?.classification?.primary_category && (
-                        <Badge variant="info" className="text-xs">
-                          {String(segment.analysis_data.classification.primary_category)}
-                        </Badge>
-                      )}
                     </div>
-                    <p className="text-sm text-text-muted line-clamp-2" title={segment.description}>
+                    <p className="text-sm text-text-muted mt-1 line-clamp-2">
                       {segment.description}
                     </p>
                   </div>
 
-                  <div className="flex flex-col items-end gap-2">
-                    <label className="flex items-center gap-2 cursor-pointer select-none group">
-                      <span className={`text-sm font-medium transition-colors ${segment.approved_by_user ? 'text-success' : 'text-text-muted group-hover:text-text-primary'}`}>
+                  <div className="flex items-center gap-3 shrink-0">
+                    <label className="flex items-center gap-2 cursor-pointer select-none">
+                      <span className="text-sm text-text-primary">
                         {segment.approved_by_user ? 'מאושר' : 'לא מאושר'}
                       </span>
                       <div className={`w-6 h-6 rounded border flex items-center justify-center transition-all ${
@@ -862,34 +868,72 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
       {/* Action Buttons */}
       <div className="sticky bottom-6 z-30">
         <Card className="p-4 shadow-xl border-primary/10 bg-card/95 backdrop-blur-xl">
-          <div className="flex items-center justify-between gap-4">
-            <Button
-              variant="ghost"
-              onClick={onReject}
-              className="text-text-muted hover:text-error hover:bg-error/5"
-            >
-              <X className="w-4 h-4 ml-2" />
-              ביטול וחזרה
-            </Button>
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center gap-4">
+              <div className="text-sm font-medium text-text-primary">בחר סט בדיקות להרצה:</div>
+              <label className="flex items-center gap-2 text-sm text-text-primary">
+                <input
+                  type="checkbox"
+                  checked={selectedCheckGroups.includes('walls')}
+                  onChange={() => toggleCheckGroup('walls')}
+                />
+                קירות
+              </label>
+              <label className="flex items-center gap-2 text-sm text-text-primary">
+                <input
+                  type="checkbox"
+                  checked={selectedCheckGroups.includes('heights')}
+                  onChange={() => toggleCheckGroup('heights')}
+                />
+                גובה/נפח
+              </label>
+              <label className="flex items-center gap-2 text-sm text-text-primary">
+                <input
+                  type="checkbox"
+                  checked={selectedCheckGroups.includes('doors')}
+                  onChange={() => toggleCheckGroup('doors')}
+                />
+                דלתות
+              </label>
+              <label className="flex items-center gap-2 text-sm text-text-primary">
+                <input
+                  type="checkbox"
+                  checked={selectedCheckGroups.includes('windows')}
+                  onChange={() => toggleCheckGroup('windows')}
+                />
+                חלונות
+              </label>
+            </div>
 
-            <div className="flex gap-3">
+            <div className="flex items-center justify-between gap-4">
               <Button
-                variant="outline"
-                onClick={loadDecomposition}
-                className="hidden sm:flex"
+                variant="ghost"
+                onClick={onReject}
+                className="text-text-muted hover:text-error hover:bg-error/5"
               >
-                <RefreshCw className="w-4 h-4 ml-2" />
-                רענן נתונים
+                <X className="w-4 h-4 ml-2" />
+                ביטול וחזרה
               </Button>
 
-              <Button
-                onClick={handleApprove}
-                disabled={approvedCount === 0}
-                className="min-w-[200px] shadow-lg shadow-primary/20"
-              >
-                <Check className="w-4 h-4 ml-2" />
-                {`אשר ${approvedCount} סגמנטים והמשך`}
-              </Button>
+              <div className="flex gap-3">
+                <Button
+                  variant="outline"
+                  onClick={loadDecomposition}
+                  className="hidden sm:flex"
+                >
+                  <RefreshCw className="w-4 h-4 ml-2" />
+                  רענן נתונים
+                </Button>
+
+                <Button
+                  onClick={handleApprove}
+                  disabled={approvedCount === 0 || selectedCheckGroups.length === 0}
+                  className="min-w-[200px] shadow-lg shadow-primary/20"
+                >
+                  <Check className="w-4 h-4 ml-2" />
+                  {`אשר ${approvedCount} סגמנטים והמשך`}
+                </Button>
+              </div>
             </div>
           </div>
         </Card>

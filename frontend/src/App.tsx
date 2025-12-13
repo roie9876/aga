@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { 
   CheckCircle2, 
   Sparkles, 
@@ -109,6 +109,13 @@ function App() {
     current: number;
     currentSegment: string;
   } | null>(null);
+  const [validationLive, setValidationLive] = useState<{
+    segmentId: string | null;
+    stage: string;
+    logs: Array<{ ts: number; line: string }>;
+    door31: { status?: string; reason_not_checked?: string } | null;
+  } | null>(null);
+  const abortValidationRef = useRef<AbortController | null>(null);
   const [validationResult, setValidationResult] = useState<any>(null);
   const [validationHistory, setValidationHistory] = useState<any[]>([]);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
@@ -120,7 +127,7 @@ function App() {
     setStage('decomposition_review');
   };
   
-  const handleApprovalComplete = async (params: { mode: 'segments' | 'full_plan'; approvedSegments: string[] }) => {
+  const handleApprovalComplete = async (params: { mode: 'segments' | 'full_plan'; approvedSegments: string[]; check_groups: string[] }) => {
     setStage('validation');
     setLastApprovedSegmentIds(params.approvedSegments || []);
 
@@ -130,9 +137,29 @@ function App() {
       current: 0,
       currentSegment: 'מתחיל בדיקה...'
     });
+
+    setValidationLive({
+      segmentId: null,
+      stage: 'starting',
+      logs: [{ ts: Date.now(), line: 'Starting validation stream…' }],
+      door31: null,
+    });
+
+    // Abort any prior stream
+    if (abortValidationRef.current) {
+      try { abortValidationRef.current.abort(); } catch { /* ignore */ }
+    }
+    abortValidationRef.current = new AbortController();
     
     try {
-      const response = await fetch('/api/v1/segments/validate-segments', {
+
+      // Preload decomposition snapshot for segment image URLs.
+      const decompResponse = await fetch(`/api/v1/decomposition/${decompositionId}`);
+      if (!decompResponse.ok) throw new Error('Failed to fetch decomposition data');
+      const decompData = await decompResponse.json();
+      setDecompositionSnapshot(decompData);
+
+      const response = await fetch('/api/v1/segments/validate-segments-stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -140,36 +167,170 @@ function App() {
           approved_segment_ids: params.approvedSegments,
           mode: params.mode,
           demo_mode: DEMO_MODE,
+          check_groups: params.check_groups,
         }),
+        signal: abortValidationRef.current.signal,
       });
-      
-      if (!response.ok) throw new Error('Validation failed');
-      
-      const result = await response.json();
-      
-      const decompResponse = await fetch(`/api/v1/decomposition/${decompositionId}`);
-      if (!decompResponse.ok) throw new Error('Failed to fetch decomposition data');
-      const decompData = await decompResponse.json();
-      setDecompositionSnapshot(decompData);
-      
-      const enrichedResult = {
-        ...result,
-        segments: result.analyzed_segments?.map((analysis: any) => {
-          const segment = decompData.segments?.find(
-            (s: any) => s.segment_id === analysis.segment_id
-          );
-          return {
-            ...analysis,
-            blob_url: segment?.blob_url,
-            thumbnail_url: segment?.thumbnail_url,
-            type: segment?.type,
-            description: segment?.description
-          };
-        }) || []
+
+      if (!response.ok || !response.body) throw new Error('Validation failed');
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      let buffer = '';
+
+      const appendLog = (line: string) => {
+        setValidationLive((prev) => {
+          const next = prev ?? { segmentId: null, stage: 'starting', logs: [], door31: null };
+          const logs = [...next.logs, { ts: Date.now(), line }];
+          // Keep last 80 lines
+          const trimmed = logs.length > 80 ? logs.slice(logs.length - 80) : logs;
+          return { ...next, logs: trimmed };
+        });
       };
-      
-      setValidationResult(enrichedResult);
-      setStage('results');
+
+      const handleEvent = (evt: any) => {
+        const type = String(evt?.event || 'unknown');
+
+        if (type === 'start') {
+          setValidationLive((prev) => ({
+            ...(prev ?? { segmentId: null, stage: 'starting', logs: [], door31: null }),
+            stage: 'started',
+          }));
+          appendLog(`start: total_segments=${evt.total_segments}`);
+          return;
+        }
+        if (type === 'config') {
+          appendLog(`config: check_groups=${(evt.check_groups || []).join(', ')}`);
+          return;
+        }
+        if (type === 'segment_start') {
+          setValidationProgress((prev) => ({
+            total: prev?.total ?? evt.total ?? 0,
+            current: Math.max(0, Number(evt.current || 0) - 1),
+            currentSegment: `בודק ${evt.segment_id}…`,
+          }));
+          setValidationLive((prev) => ({
+            ...(prev ?? { segmentId: null, stage: 'starting', logs: [], door31: null }),
+            segmentId: String(evt.segment_id || ''),
+            stage: 'segment_start',
+            door31: null,
+          }));
+          appendLog(`segment_start: ${evt.segment_id}`);
+          return;
+        }
+        if (type === 'analysis_start') {
+          appendLog(`analysis_start: ${evt.segment_id}`);
+          return;
+        }
+        if (type === 'analysis_done') {
+          appendLog(`analysis_done: text=${evt.text_items}, dims=${evt.dimensions}, elems=${evt.structural_elements}`);
+          return;
+        }
+        if (type === 'door_focus_start') {
+          setValidationLive((prev) => ({
+            ...(prev ?? { segmentId: null, stage: 'starting', logs: [], door31: null }),
+            stage: 'door_focus',
+          }));
+          appendLog(`door_focus_start: ${evt.segment_id}`);
+          return;
+        }
+        if (type === 'door_focus_done') {
+          appendLog(`door_focus_done: doors=${evt.doors_found ?? 0}, best_conf=${evt.best_confidence ?? ''}`);
+          return;
+        }
+        if (type === 'door_focus_error') {
+          appendLog(`door_focus_error: ${evt.message || ''}`);
+          return;
+        }
+        if (type === 'validation_start') {
+          setValidationLive((prev) => ({
+            ...(prev ?? { segmentId: null, stage: 'starting', logs: [], door31: null }),
+            stage: 'validation',
+          }));
+          appendLog(`validation_start: ${evt.segment_id}`);
+          return;
+        }
+        if (type === 'validation_done') {
+          setValidationProgress((prev) => ({
+            total: prev?.total ?? 0,
+            current: Math.min(prev?.total ?? 0, Number(prev?.current ?? 0) + 0),
+            currentSegment: `סיים ולידציה ${evt.segment_id} (${evt.status})`,
+          }));
+          if (evt.door_3_1) {
+            setValidationLive((prev) => ({
+              ...(prev ?? { segmentId: null, stage: 'starting', logs: [], door31: null }),
+              door31: evt.door_3_1,
+            }));
+          }
+          appendLog(`validation_done: status=${evt.status}, checked=${(evt.checked_requirements || []).join(', ')}`);
+          if (evt.door_3_1) {
+            appendLog(`door 3.1: ${evt.door_3_1.status}${evt.door_3_1.reason_not_checked ? ' (' + evt.door_3_1.reason_not_checked + ')' : ''}`);
+          }
+          return;
+        }
+        if (type === 'segment_done') {
+          setValidationProgress((prev) => ({
+            total: prev?.total ?? evt.total ?? 0,
+            current: Number(evt.current || prev?.current || 0),
+            currentSegment: `הושלם ${evt.segment_id}`,
+          }));
+          appendLog(`segment_done: ${evt.segment_id} (${evt.current}/${evt.total})`);
+          return;
+        }
+        if (type === 'segment_error') {
+          appendLog(`segment_error: ${evt.segment_id} ${evt.message || ''}`);
+          return;
+        }
+        if (type === 'error') {
+          appendLog(`error: ${evt.message || ''}`);
+          throw new Error(String(evt.message || 'Validation stream error'));
+        }
+        if (type === 'final') {
+          appendLog('final: received result');
+          const result = evt.result;
+          const enrichedResult = {
+            ...result,
+            segments: result.analyzed_segments?.map((analysis: any) => {
+              const segment = decompData.segments?.find(
+                (s: any) => s.segment_id === analysis.segment_id
+              );
+              return {
+                ...analysis,
+                blob_url: segment?.blob_url,
+                thumbnail_url: segment?.thumbnail_url,
+                type: segment?.type,
+                description: segment?.description
+              };
+            }) || []
+          };
+
+          setValidationResult(enrichedResult);
+          setStage('results');
+          return;
+        }
+
+        appendLog(`${type}: ${JSON.stringify(evt)}`);
+      };
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let idx;
+        // Process full lines
+        while ((idx = buffer.indexOf('\n')) >= 0) {
+          const line = buffer.slice(0, idx).trim();
+          buffer = buffer.slice(idx + 1);
+          if (!line) continue;
+          try {
+            const evt = JSON.parse(line);
+            handleEvent(evt);
+          } catch {
+            // best-effort: show raw line
+            appendLog(`raw: ${line.slice(0, 300)}`);
+          }
+        }
+      }
       
     } catch (error) {
       console.error('Validation error:', error);
@@ -177,6 +338,14 @@ function App() {
       setStage('decomposition_review');
     }
   };
+
+  useEffect(() => {
+    return () => {
+      if (abortValidationRef.current) {
+        try { abortValidationRef.current.abort(); } catch { /* ignore */ }
+      }
+    };
+  }, []);
 
   const downloadJsonReport = () => {
     if (!validationResult) return;
@@ -269,6 +438,7 @@ function App() {
   <div class="card">
     <div class="row">
       <span class="pill">מזהה בדיקה: ${esc(validationResult.validation_id || '')}</span>
+      <span class="pill">תאריך בדיקה: ${esc(new Date(validationResult.created_at || Date.now()).toLocaleString('he-IL'))}</span>
       <span class="pill">מזהה פירוק: ${esc(decompositionId || '')}</span>
       <span class="pill">סגמנטים שנותחו: ${esc(validationResult.total_segments ?? analyzedSegments.length ?? '')}</span>
       <span class="pill">עברו: ${esc(validationResult.passed || 0)}</span>
@@ -298,14 +468,21 @@ function App() {
         </tr>
       </thead>
       <tbody>
-        ${selectedSegments.map((s: any) => `
+        ${selectedSegments.map((s: any, idx: number) => {
+          const vid = String(validationResult.validation_id || '').replace(/^val-/, '');
+          const shortVid = vid ? vid.slice(0, 8) : '';
+          const runDate = new Date(validationResult.created_at || Date.now()).toLocaleDateString('he-IL');
+          const title = `בדיקה ${shortVid || '—'} · #${idx + 1} · ${runDate}`;
+          const typeLabel = (!s?.type || String(s.type).toLowerCase() === 'unknown') ? 'ידני' : String(s.type);
+          return `
           <tr>
             <td>${esc(s.segment_id)}</td>
-            <td>${esc(s.title || s.segment_id)}</td>
-            <td>${esc(s.type || '')}</td>
+            <td>${esc(title)}</td>
+            <td>${esc(typeLabel)}</td>
             <td>${esc(s.description || '')}</td>
           </tr>
-        `).join('')}
+          `;
+        }).join('')}
       </tbody>
     </table>
     ${selectedIds.length ? `<div class="muted" style="margin-top:8px;">Selected IDs: ${esc(selectedIds.join(', '))}</div>` : ''}
@@ -320,12 +497,18 @@ function App() {
       const debug = validation.debug || {};
       const violations = Array.isArray(validation.violations) ? validation.violations : [];
 
+      const vid = String(validationResult.validation_id || '').replace(/^val-/, '');
+      const shortVid = vid ? vid.slice(0, 8) : '';
+      const runDateTime = new Date(validationResult.created_at || Date.now()).toLocaleString('he-IL');
+
       const segImgUrl = getSegmentImageUrl(seg.segment_id);
 
       return `
         <div class="card segment">
           <div class="row">
             <span class="pill">#${idx + 1}</span>
+            <span class="pill">בדיקה: ${esc(shortVid || (validationResult.validation_id || ''))}</span>
+            <span class="pill">תאריך: ${esc(runDateTime)}</span>
             <span class="pill">segment_id: ${esc(seg.segment_id)}</span>
             <span class="pill">סטטוס: ${esc(seg.status || '')}</span>
             <span class="pill">passed: ${esc(Boolean(validation.passed))}</span>
@@ -592,7 +775,7 @@ function App() {
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 gap-4">
                 <Card padding="md" className="text-left hover:shadow-md transition-shadow">
                   <div className="flex items-start gap-4">
-                    <div className="w-10 h-10 rounded-lg bg-primary/10 flex items-center justify-center flex-shrink-0">
+                    <div className="w-10 h-10 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
                       <Sparkles className="w-5 h-5 text-primary" />
                     </div>
                     <div>
@@ -613,7 +796,7 @@ function App() {
                     className="text-left hover:shadow-md transition-shadow"
                   >
                     <div className="flex items-start gap-4">
-                      <div className="w-10 h-10 rounded-lg bg-success/10 flex items-center justify-center flex-shrink-0">
+                      <div className="w-10 h-10 rounded-lg bg-success/10 flex items-center justify-center shrink-0">
                         <BookOpen className="w-5 h-5 text-success" />
                       </div>
                       <div>
@@ -625,7 +808,7 @@ function App() {
                 </div>
                 <Card padding="md" className="text-left hover:shadow-md transition-shadow">
                   <div className="flex items-start gap-4">
-                    <div className="w-10 h-10 rounded-lg bg-primary/10 flex items-center justify-center flex-shrink-0">
+                    <div className="w-10 h-10 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
                       <TrendingUp className="w-5 h-5 text-primary" />
                     </div>
                     <div>
@@ -696,6 +879,45 @@ function App() {
                   {validationProgress.current} מתוך {validationProgress.total} סגמנטים
                 </p>
               </div>
+
+              {validationLive && (
+                <div className="mt-8 space-y-4">
+                  <div className="text-sm font-semibold text-text-primary">מה קורה עכשיו</div>
+                  <div className="text-xs text-text-muted">
+                    מצב: {String(validationLive.stage || 'starting')}
+                    {validationLive.segmentId ? ` · סגמנט: ${String(validationLive.segmentId)}` : ' · ממתין להתחלת ניתוח הסגמנט הראשון…'}
+                  </div>
+
+                  <div className="text-sm font-semibold text-text-primary">סגמנט נבדק כעת</div>
+                  <div className="rounded-lg border border-border bg-white p-3">
+                    {validationLive.segmentId ? (
+                      <img
+                        src={`/api/v1/decomposition/${encodeURIComponent(String(decompositionId || ''))}/images/segments/${encodeURIComponent(String(validationLive.segmentId))}`}
+                        alt={`segment ${validationLive.segmentId}`}
+                        className="w-full h-auto rounded-md border border-border"
+                        loading="lazy"
+                      />
+                    ) : (
+                      <div className="text-xs text-text-muted">
+                        ממתין לנתוני סטרים מהשרת… אם זה נתקע, בדוק שהשרת פעיל ושאין שגיאות ברשת.
+                      </div>
+                    )}
+                  </div>
+
+                  {validationLive.door31 && (
+                    <div className="text-xs text-text-muted">
+                      דלת 3.1: {String(validationLive.door31.status || '')}{validationLive.door31.reason_not_checked ? ` (${String(validationLive.door31.reason_not_checked)})` : ''}
+                    </div>
+                  )}
+
+                  <div className="text-sm font-semibold text-text-primary">לוג בזמן אמת</div>
+                  <div className="rounded-lg border border-border bg-white p-3 max-h-56 overflow-auto">
+                    <pre className="text-[11px] leading-5 text-text-muted whitespace-pre-wrap wrap-break-word">
+                      {(validationLive.logs || []).map((l) => `${new Date(l.ts).toLocaleTimeString('he-IL')}  ${l.line}`).join('\n')}
+                    </pre>
+                  </div>
+                </div>
+              )}
             </Card>
           </div>
         )}
@@ -704,7 +926,7 @@ function App() {
         {stage === 'results' && validationResult && (
           <div className="max-w-7xl mx-auto space-y-10">
             {/* Success Header */}
-            <Card padding="lg" className="bg-gradient-to-r from-success/5 via-white to-primary/5 border-border shadow-sm">
+            <Card padding="lg" className="bg-linear-to-r from-success/5 via-white to-primary/5 border-border shadow-sm">
               <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-6">
                 <div className="flex items-center gap-5">
                   <div className="w-16 h-16 bg-success/10 rounded-2xl flex items-center justify-center border border-success/20">
@@ -716,7 +938,9 @@ function App() {
                   </div>
                 </div>
                 <div className="flex flex-wrap gap-3 items-center justify-end">
-                  <Badge variant="success">עברו {validationResult.passed || 0} בדיקות</Badge>
+                  <Badge variant={(validationResult.passed || 0) > 0 ? 'success' : 'neutral'}>
+                    עברו {validationResult.passed || 0} בדיקות
+                  </Badge>
                   <Badge variant="info">{validationResult.total_segments} סגמנטים נותחו</Badge>
                   <Badge variant="warning">{validationResult.warnings || 0} אזהרות</Badge>
 
@@ -769,11 +993,29 @@ function App() {
                         const analysis = segment.analysis_data || {};
                         const classification = analysis.classification || {};
                         const validation = segment.validation || {};
+
+                        const checkedReqs: string[] = Array.isArray(validation.checked_requirements)
+                          ? (validation.checked_requirements as string[])
+                          : [];
+                        const checksPerformed = Boolean((validation as any)?.checks_performed) || checkedReqs.length > 0;
+                        const checksAttempted =
+                          Boolean((validation as any)?.checks_attempted) ||
+                          Array.isArray((validation as any)?.requirement_evaluations);
                         
                         // Determine segment status
                         const hasRelevantRequirements = classification.relevant_requirements && classification.relevant_requirements.length > 0;
                         const isNotApplicable = segment.status === 'analyzed' && !hasRelevantRequirements;
-                        const isSuccess = segment.status === 'analyzed' && validation.passed && hasRelevantRequirements;
+                        const isNotChecked =
+                          segment.status === 'analyzed' &&
+                          !checksPerformed &&
+                          (validation.status === 'not_checked' || validation.status === 'skipped');
+                        const isSuccess =
+                          segment.status === 'analyzed' &&
+                          checksPerformed &&
+                          validation.status === 'passed';
+                        const isFailed =
+                          segment.status === 'analyzed' &&
+                          (validation.status === 'failed' || (Array.isArray(validation.violations) && validation.violations.length > 0));
                         const isError = segment.status === 'error';
                         
                         return (
@@ -819,6 +1061,17 @@ function App() {
                                       <span className="mr-1">עבר</span>
                                     </Badge>
                                   )}
+                                  {isFailed && (
+                                    <Badge variant="error">
+                                      <AlertCircle className="w-4 h-4" />
+                                      <span className="mr-1">נכשל</span>
+                                    </Badge>
+                                  )}
+                                  {isNotChecked && (
+                                    <Badge variant="neutral">
+                                      <span className="mr-1">לא נבדק</span>
+                                    </Badge>
+                                  )}
                                   {isNotApplicable && (
                                     <Badge variant="neutral">
                                       <span className="mr-1">לא רלוונטי</span>
@@ -830,7 +1083,7 @@ function App() {
                                       <span className="mr-1">שגיאה</span>
                                     </Badge>
                                   )}
-                                  {!isSuccess && !isError && !isNotApplicable && (
+                                  {!isSuccess && !isFailed && !isError && !isNotApplicable && !isNotChecked && (
                                     <Badge variant="warning">בדיקה</Badge>
                                   )}
                                 </div>
@@ -962,6 +1215,87 @@ function App() {
                                   </div>
                                 );
                               })()}
+
+                              {/* Why not checked (evidence-first) */}
+                              {(() => {
+                                const reqEvals: any[] = Array.isArray((validation as any)?.requirement_evaluations)
+                                  ? ((validation as any).requirement_evaluations as any[])
+                                  : [];
+
+                                const isNotCheckedState =
+                                  segment.status === 'analyzed' &&
+                                  !checksPerformed &&
+                                  (validation.status === 'not_checked' || validation.status === 'skipped' || !validation.status);
+
+                                if (!isNotCheckedState) return null;
+
+                                // If we have no structured evaluations, still show a helpful hint.
+                                if (!reqEvals || reqEvals.length === 0) {
+                                  if (!checksAttempted) return null;
+                                  return (
+                                    <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                                      <div className="flex items-start gap-3">
+                                        <div className="w-5 h-5 bg-blue-100 rounded-full flex items-center justify-center shrink-0 mt-0.5">
+                                          <span className="text-blue-600 text-xs font-bold">ℹ</span>
+                                        </div>
+                                        <div>
+                                          <h5 className="text-sm font-semibold text-blue-900 mb-1">נוסו בדיקות אך לא הייתה הכרעה</h5>
+                                          <p className="text-xs text-blue-700">השרת ניסה להריץ ולידציה, אבל לא נוצרו ראיות מסודרות לדרישות (requirement_evaluations ריק).</p>
+                                        </div>
+                                      </div>
+                                    </div>
+                                  );
+                                }
+
+                                const byReq: Record<string, any[]> = {};
+                                for (const ev of reqEvals) {
+                                  if (!ev || typeof ev !== 'object') continue;
+                                  const rid = typeof ev.requirement_id === 'string' ? ev.requirement_id : null;
+                                  if (!rid) continue;
+                                  (byReq[rid] ||= []).push(ev);
+                                }
+                                const reqIds = Object.keys(byReq).sort();
+                                if (reqIds.length === 0) return null;
+
+                                return (
+                                  <div>
+                                    <h5 className="text-sm font-semibold text-text-primary mb-3">למה לא נבדק?</h5>
+                                    <div className="space-y-2">
+                                      {reqIds.map((rid) => {
+                                        const items = byReq[rid] || [];
+                                        const notCheckedItems = items.filter((x) => x?.status === 'not_checked');
+                                        const sample = (notCheckedItems[0] || items[0]) as any;
+
+                                        const reason = sample?.reason_not_checked ? String(sample.reason_not_checked) : '';
+                                        const notesHe = sample?.notes_he ? String(sample.notes_he) : '';
+
+                                        const evidenceTexts: string[] = [];
+                                        const evidence = Array.isArray(sample?.evidence) ? sample.evidence : [];
+                                        for (const e of evidence) {
+                                          if (e && typeof e === 'object' && e.evidence_type === 'text' && typeof e.text === 'string' && e.text.trim()) {
+                                            evidenceTexts.push(e.text.trim());
+                                          }
+                                        }
+
+                                        return (
+                                          <div key={rid} className="bg-blue-50 border border-blue-200 rounded-lg p-3">
+                                            <div className="flex items-start gap-2">
+                                              <Badge variant="neutral" size="sm">{rid}</Badge>
+                                              <div className="flex-1">
+                                                <div className="text-xs text-blue-800 font-semibold">סטטוס: לא נבדק{reason ? ` (${reason})` : ''}</div>
+                                                {notesHe && <div className="text-xs text-blue-700 mt-1">{notesHe}</div>}
+                                                {evidenceTexts.length > 0 && (
+                                                  <div className="text-xs text-blue-700 mt-1">ראיות/הקשר: {evidenceTexts.slice(0, 3).join(' • ')}</div>
+                                                )}
+                                              </div>
+                                            </div>
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                  </div>
+                                );
+                              })()}
                                 
                                 {/* Validation Results */}
                                 {validation.violations && validation.violations.length > 0 && (
@@ -997,75 +1331,139 @@ function App() {
                                 {/* Success Message with Details */}
                                 {validation.passed && (!validation.violations || validation.violations.length === 0) && (
                                   <div className="space-y-3">
-                                    {/* No relevant requirements case */}
-                                    {(!classification.relevant_requirements || classification.relevant_requirements.length === 0) ? (
-                                      <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-                                        <div className="flex items-start gap-3">
-                                          <div className="w-5 h-5 bg-blue-100 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5">
-                                            <span className="text-blue-600 text-xs font-bold">ℹ</span>
+                                    {(() => {
+                                      const checkedReqs: string[] = Array.isArray(validation?.checked_requirements)
+                                        ? (validation.checked_requirements as string[])
+                                        : [];
+
+                                      const reqEvals: any[] = Array.isArray(validation?.requirement_evaluations)
+                                        ? validation.requirement_evaluations
+                                        : [];
+
+                                      const debugPlannedReqs: string[] = Array.isArray(validation?.debug?.planned_requirements)
+                                        ? (validation.debug.planned_requirements as string[])
+                                        : [];
+
+                                      const relevantReqs: string[] = Array.isArray(classification?.relevant_requirements)
+                                        ? (classification.relevant_requirements as string[])
+                                        : [];
+
+                                      const attemptedReqs = Array.from(
+                                        new Set(
+                                          reqEvals
+                                            .filter((e: any) => e && typeof e.requirement_id === 'string')
+                                            .map((e: any) => e.requirement_id as string)
+                                        )
+                                      );
+
+                                      const failedReqs = reqEvals
+                                        .filter((e: any) => e && e.status === 'failed' && typeof e.requirement_id === 'string')
+                                        .map((e: any) => e.requirement_id as string);
+
+                                      // If nothing was actually checked, do not show a green success.
+                                      if (checkedReqs.length === 0 && failedReqs.length === 0) {
+                                        const showAttempted = attemptedReqs.length > 0;
+                                        const reqsToShow = (debugPlannedReqs.length > 0 ? debugPlannedReqs : attemptedReqs);
+
+                                        return (
+                                          <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                                            <div className="flex items-start gap-3">
+                                              <div className="w-5 h-5 bg-blue-100 rounded-full flex items-center justify-center shrink-0 mt-0.5">
+                                                <span className="text-blue-600 text-xs font-bold">ℹ</span>
+                                              </div>
+                                              <div>
+                                                <h5 className="text-sm font-semibold text-blue-900 mb-1">
+                                                  {showAttempted ? 'בוצעו ניסיונות בדיקה אך לא נמצאו ראיות מספיקות' : 'לא בוצעו בדיקות בפועל'}
+                                                </h5>
+                                                <p className="text-xs text-blue-700 mb-2">
+                                                  הסגמנט סווג כ-<span className="font-semibold">"{translateType(segment.type)}"</span>{' '}
+                                                  ({segment.description || translateType(segment.type)}),
+                                                  {showAttempted
+                                                    ? ' אך למרות זאת לא נמצאו ראיות מספיקות כדי לאמת אף דרישה בסגמנט הזה.'
+                                                    : ' אך המערכת לא מצאה ראיות מספיקות כדי לאמת אף דרישה בסגמנט הזה.'}
+                                                </p>
+                                                {reqsToShow.length > 0 && (
+                                                  <p className="text-xs text-blue-600">
+                                                    <span className="font-semibold">דרישות שנוסו (לא בוצעו בפועל עקב חוסר ראיות):</span>{' '}
+                                                    {reqsToShow.join(', ')}
+                                                  </p>
+                                                )}
+
+                                                {!showAttempted && relevantReqs.length > 0 && (
+                                                  <p className="text-xs text-blue-600 mt-1">
+                                                    <span className="font-semibold">דרישות שסווגו כרלוונטיות (לאו דווקא נבדקו):</span>{' '}
+                                                    {relevantReqs.join(', ')}
+                                                  </p>
+                                                )}
+                                              </div>
+                                            </div>
                                           </div>
-                                          <div>
-                                            <h5 className="text-sm font-semibold text-blue-900 mb-1">
-                                              סגמנט זה לא נבדק
-                                            </h5>
-                                            <p className="text-xs text-blue-700 mb-2">
-                                              סגמנט מסוג <span className="font-semibold">"{translateType(segment.type)}"</span>{' '}
-                                              ({segment.description || translateType(segment.type)}) 
-                                              אינו כולל דרישות בדיקה ספציפיות במערכת הנוכחית.
+                                        );
+                                      }
+
+                                      // If there are explicit failures (from evidence-first evaluations), show a failure summary.
+                                      if (failedReqs.length > 0) {
+                                        return (
+                                          <div className="bg-error/5 border border-error/20 rounded-lg p-4">
+                                            <div className="flex items-start gap-3">
+                                              <AlertCircle className="w-5 h-5 text-error shrink-0 mt-0.5" />
+                                              <div>
+                                                <h5 className="text-sm font-semibold text-error mb-1">
+                                                  נמצאו כשלים בדרישות שנבדקו
+                                                </h5>
+                                                <p className="text-xs text-text-muted">
+                                                  דרישות שנכשלו: {failedReqs.join(', ')}
+                                                </p>
+                                              </div>
+                                            </div>
+                                          </div>
+                                        );
+                                      }
+
+                                      // Success: checked requirements exist and none failed.
+                                      return (
+                                        <div className="bg-success/5 border border-success/20 rounded-lg p-4">
+                                          <div className="flex items-start gap-3 mb-3">
+                                            <CheckCircle2 className="w-5 h-5 text-success shrink-0 mt-0.5" />
+                                            <div>
+                                              <h5 className="text-sm font-semibold text-success mb-1">
+                                                כל הבדיקות שבוצעו עברו בהצלחה!
+                                              </h5>
+                                              <p className="text-xs text-text-muted">
+                                                בוצעו {checkedReqs.length} בדיקות בסגמנט זה
+                                              </p>
+                                            </div>
+                                          </div>
+
+                                          <div className="bg-white rounded-lg p-3 border border-success/10">
+                                            <p className="text-xs text-text-muted font-semibold mb-2">
+                                              ✓ הדרישות שנבדקו ועברו:
                                             </p>
-                                            <p className="text-xs text-blue-600">
-                                              <span className="font-semibold">הסבר:</span> פרטי חיזוק ופרטים טכניים הם מידע עזר לבונה 
-                                              ואינם חלק מדרישות האישור של ממ"ד. הבדיקה מתמקדת בסגמנטים כמו: תכנית קומה, חתך, 
-                                              חזית - שבהם נבדקות דרישות קירות, פתחים, מידות וכו'.
-                                            </p>
+                                            <div className="flex flex-wrap gap-2">
+                                              {checkedReqs.map((reqId: string) => {
+                                                const requirement = validationResult.coverage?.requirements?.[reqId];
+                                                return (
+                                                  <div
+                                                    key={reqId}
+                                                    className="flex items-start gap-2 text-xs bg-success/5 border border-success/20 rounded-md px-2 py-1"
+                                                    title={requirement?.description}
+                                                  >
+                                                    <Badge variant="success" size="sm" className="text-xs">
+                                                      {reqId}
+                                                    </Badge>
+                                                    {requirement && (
+                                                      <span className="text-text-muted max-w-xs truncate">
+                                                        {requirement.description}
+                                                      </span>
+                                                    )}
+                                                  </div>
+                                                );
+                                              })}
+                                            </div>
                                           </div>
                                         </div>
-                                      </div>
-                                    ) : (
-                                      /* Has relevant requirements - show success */
-                                      <div className="bg-success/5 border border-success/20 rounded-lg p-4">
-                                        <div className="flex items-start gap-3 mb-3">
-                                          <CheckCircle2 className="w-5 h-5 text-success flex-shrink-0 mt-0.5" />
-                                          <div>
-                                            <h5 className="text-sm font-semibold text-success mb-1">
-                                              כל הדרישות הרלוונטיות עברו בהצלחה!
-                                            </h5>
-                                            <p className="text-xs text-text-muted">
-                                              הסגמנט עמד בכל {classification.relevant_requirements.length} הדרישות שנבדקו עבור הקטגוריה שלו
-                                            </p>
-                                          </div>
-                                        </div>
-                                        
-                                        {/* Show what was checked */}
-                                        <div className="bg-white rounded-lg p-3 border border-success/10">
-                                          <p className="text-xs text-text-muted font-semibold mb-2">
-                                            ✓ הדרישות שנבדקו ועברו:
-                                          </p>
-                                          <div className="flex flex-wrap gap-2">
-                                            {classification.relevant_requirements.map((reqId: string) => {
-                                              // Get requirement description from coverage report
-                                              const requirement = validationResult.coverage?.requirements?.[reqId];
-                                              return (
-                                                <div 
-                                                  key={reqId}
-                                                  className="flex items-start gap-2 text-xs bg-success/5 border border-success/20 rounded-md px-2 py-1"
-                                                  title={requirement?.description}
-                                                >
-                                                  <Badge variant="success" size="sm" className="text-xs">
-                                                    {reqId}
-                                                  </Badge>
-                                                  {requirement && (
-                                                    <span className="text-text-muted max-w-xs truncate">
-                                                      {requirement.description}
-                                                    </span>
-                                                  )}
-                                                </div>
-                                              );
-                                            })}
-                                          </div>
-                                        </div>
-                                      </div>
-                                    )}
+                                      );
+                                    })()}
                                   </div>
                                 )}
                                 

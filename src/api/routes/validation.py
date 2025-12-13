@@ -16,7 +16,7 @@ router = APIRouter()
 
 @router.post("/validate", response_model=ValidationResponse)
 async def validate_plan(
-    file: UploadFile = File(..., description="Architectural plan file (PDF, DWG, DWF, DWFX, PNG, JPG)"),
+    file: UploadFile = File(..., description="Architectural plan file (PDF, PNG, JPG)"),
     project_id: str = Form(..., description="Project identifier"),
     plan_name: Optional[str] = Form(None, description="Optional plan name")
 ):
@@ -49,7 +49,7 @@ async def validate_plan(
         if not is_supported_format(file.filename):
             raise HTTPException(
                 status_code=400,
-                detail=f"Unsupported file format: {file.filename}. Supported: PDF, DWG, DWF, DWFX, PNG, JPG"
+                detail=f"Unsupported file format: {file.filename}. Supported: PDF, PNG, JPG"
             )
         
         # Generate unique validation ID
@@ -60,7 +60,7 @@ async def validate_plan(
         # Read file content
         file_content = await file.read()
         
-        # Convert DWF to image if needed
+        # Convert PDF to image if needed
         logger.info("Checking if file needs conversion", filename=file.filename)
         try:
             processed_bytes, processed_filename, was_converted = convert_to_image_if_needed(

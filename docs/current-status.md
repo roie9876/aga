@@ -29,10 +29,9 @@
   - `crop_and_create_thumbnail()`: Combined operation
   - Uses PIL/Pillow for processing
 
-#### 2. **DWF/DWFX Support**
-- ✅ File format support for DWF (binary) and DWFX (XML)
-- ✅ Auto-conversion to PNG using Aspose.CAD
-- ✅ Integrated with decomposition pipeline
+#### 2. **Supported Upload Formats**
+- ✅ File format support for **PDF** and **images** (PNG/JPG/JPEG)
+- ✅ PDF is auto-converted to PNG for analysis
 
 #### 3. **Azure Integration**
 - ✅ Blob Storage: Upload full plans and cropped segments
@@ -52,6 +51,11 @@
   - `checked_requirements`: אילו דרישות נבדקו בפועל בסגמנט
   - `decision_summary_he`: הסבר קצר בעברית למה הופעלו/לא הופעלו בדיקות
 
+#### 4.1 **יציבות אנליזה + Focused Extractors (13/12/2025)**
+- ✅ תיקון רגרסיה שחסמה את עליית השרת עקב שגיאות תחביר ב-`src/services/segment_analyzer.py`
+- ✅ החזרת פונקציות Focused Extraction שנקראות מ-`segment_validation.py` (דלתות/קירות/גובה/חלונות/חומרים/ברזל/הערות)
+- ✅ תמיכה אופציונלית ב-"זום-אאוט קונטקסט" עבור מרווחי דלת (3.1): אם יש `full_plan_blob_url` + `segment_bbox`, נוצרת חיתוך קונטקסט עם padding ונשלחות שתי תמונות למודל (קונטקסט + דיטייל)
+
 #### 5. **Requirements Catalog (66 דרישות) (NEW)**
 - ✅ `GET /api/v1/requirements` - קטלוג דרישות מלא מתוך requirements-mamad.md (סה"כ 66)
 - ✅ `GET /api/v1/requirements/summary` - ספירה לפי פרקים
@@ -61,11 +65,11 @@
 #### 1. **DecompositionUpload** (`frontend/src/components/DecompositionUpload.tsx`)
 - ✅ Drag & drop file upload
 - ✅ 4-step progress indicator:
-  1. Converting DWF to PNG
+  1. Converting PDF to PNG (if needed)
   2. GPT analysis
   3. Cropping segments
   4. Saving to database
-- ✅ File type validation (DWF, DWFX, PDF, PNG, JPG)
+- ✅ File type validation (PDF, PNG, JPG)
 - ✅ Simulated progress for UX
 
 #### 2. **DecompositionReview** (`frontend/src/components/DecompositionReview.tsx`)
@@ -100,6 +104,7 @@
 ### Integration Tasks
 - ⏳ Full plan viewer with bounding box overlays
 - ⏳ Visual heatmap showing which segments used in which checks
+- ⏳ הרחבת בדיקת מרווחי דלת למנגנון true multi-scale (קונטקסט → הצעות ROI → rerun על תקריבים)
 - ⏳ הרחבת כיסוי הבדיקות מעבר ל-16 דרישות ממוכנות (מיפוי קטגוריות/כללים נוספים)
 - ⏳ בדיקות end-to-end עם קבצים אמיתיים + כיול פרומפטים לפי תוצאות
 

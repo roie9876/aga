@@ -60,6 +60,45 @@ class RequirementsCoverageTracker:
             classification = segment.get("analysis_data", {}).get("classification", {})
             validation = segment.get("validation", {})
 
+            # Evidence-first path: if the validator provides explicit per-requirement evaluations,
+            # use them as the source of truth.
+            requirement_evaluations = validation.get("requirement_evaluations")
+            if isinstance(requirement_evaluations, list) and requirement_evaluations:
+                seg_id = segment.get("segment_id")
+                for ev in requirement_evaluations:
+                    if not isinstance(ev, dict):
+                        continue
+                    req_id = ev.get("requirement_id")
+                    status = ev.get("status")
+                    if req_id not in coverage:
+                        continue
+                    if status not in {"passed", "failed", "not_checked"}:
+                        continue
+
+                    # Track which segments contributed to this requirement.
+                    if seg_id and seg_id not in coverage[req_id]["segments_checked"]:
+                        coverage[req_id]["segments_checked"].append(seg_id)
+
+                    # Merge status: failed > passed > not_checked
+                    current = coverage[req_id]["status"]
+                    if current == "failed":
+                        continue
+                    if status == "failed":
+                        coverage[req_id]["status"] = "failed"
+                    elif status == "passed" and current == "not_checked":
+                        coverage[req_id]["status"] = "passed"
+
+                # Still record mapped violations for context, but do not use them to infer status
+                # (status is driven by requirement_evaluations).
+                violations = validation.get("violations", []) or []
+                for v in violations:
+                    req_id = self._map_rule_id_to_requirement_id(v.get("rule_id", ""))
+                    if req_id and req_id in coverage:
+                        coverage[req_id]["violations"].append(v)
+
+                # Done with this segment.
+                continue
+
             # Fallback mapping for older results where we didn't store checked_requirements.
             # This should stay aligned with src/services/mamad_validator.py.
             category_to_checked_requirements = {
@@ -73,16 +112,21 @@ class RequirementsCoverageTracker:
                 "SECTIONS": ["2.1", "2.2"],
             }
 
-            # Prefer deterministic list from validator; fall back to LLM classification field
-            checked_reqs = validation.get("checked_requirements")
-            if not checked_reqs:
+            # Prefer deterministic list from validator.
+            # IMPORTANT: An explicit empty list means the validator ran but could not
+            # actually check anything (no evidence) — do NOT fall back to category mapping
+            # because that would incorrectly mark requirements as passed.
+            checked_reqs = validation.get("checked_requirements", None)
+
+            # Fall back only for older results where the validator did not provide the field.
+            if checked_reqs is None:
                 checked_reqs = classification.get("relevant_requirements", [])
 
-            # If the LLM gave non-ID strings (or nothing), derive from primary_category
-            if not checked_reqs or not all(isinstance(x, str) and x in self.ALL_REQUIREMENTS for x in checked_reqs):
-                primary_category = classification.get("primary_category", "")
-                derived = category_to_checked_requirements.get(primary_category, [])
-                checked_reqs = derived.copy() if derived else []
+                # If the LLM gave non-ID strings (or nothing), derive from primary_category
+                if not checked_reqs or not all(isinstance(x, str) and x in self.ALL_REQUIREMENTS for x in checked_reqs):
+                    primary_category = classification.get("primary_category", "")
+                    derived = category_to_checked_requirements.get(primary_category, [])
+                    checked_reqs = derived.copy() if derived else []
 
             # Map violations to official requirement IDs
             violations = validation.get("violations", []) or []

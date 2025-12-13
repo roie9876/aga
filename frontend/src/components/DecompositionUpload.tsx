@@ -57,7 +57,7 @@ export const DecompositionUpload: React.FC<DecompositionUploadProps> = ({
       formData.append('project_id', projectId);
 
       setProgress(20);
-      setCurrentStep('ממיר DWF/DWFX (אם נדרש)...');
+      setCurrentStep('ממיר PDF (אם נדרש)...');
 
       // Simulate progress for user experience
       const progressInterval = setInterval(() => {
@@ -128,7 +128,7 @@ export const DecompositionUpload: React.FC<DecompositionUploadProps> = ({
 
           <div className="grid gap-3 text-sm">
             <div className={`rounded-lg px-4 py-3 border transition-colors duration-300 ${progress >= 20 ? 'border-success/20 bg-success/5 text-success font-medium' : 'border-border bg-card text-text-muted'}`}>
-              ✅ המרת DWF → PNG (ODA File Converter)
+              ✅ המרת PDF → PNG (אם נדרש)
             </div>
             <div className={`rounded-lg px-4 py-3 border transition-colors duration-300 ${progress >= 40 ? 'border-success/20 bg-success/5 text-success font-medium' : 'border-border bg-card text-text-muted'}`}>
               🔍 ניתוח חכם של התוכנית (GPT-5.1)
@@ -188,7 +188,7 @@ export const DecompositionUpload: React.FC<DecompositionUploadProps> = ({
           id="file-input"
           type="file"
           className="hidden"
-          accept=".dwf,.dwfx,.pdf,.png,.jpg,.jpeg"
+          accept=".pdf,.png,.jpg,.jpeg"
           onChange={handleFileSelect}
         />
 
@@ -201,7 +201,7 @@ export const DecompositionUpload: React.FC<DecompositionUploadProps> = ({
           </div>
           <div>
             <h3 className="text-lg font-semibold text-text-primary">גרור קובץ לכאן או לחץ לבחירה</h3>
-            <p className="text-sm text-text-muted mt-1">פורמטים: DWF, DWFX, PDF, PNG, JPG · עד 50MB</p>
+            <p className="text-sm text-text-muted mt-1">פורמטים: PDF, PNG, JPG · עד 50MB</p>
           </div>
           <div className="flex flex-wrap items-center justify-center gap-2 text-xs text-text-muted mt-2">
             <span className="px-2.5 py-1 rounded-full bg-background border border-border">המרה אוטומטית ל-PNG</span>
@@ -216,7 +216,7 @@ export const DecompositionUpload: React.FC<DecompositionUploadProps> = ({
           <div className="flex items-start gap-3">
             <FileImage className="w-5 h-5 text-primary flex-shrink-0 mt-0.5" />
             <div className="text-sm text-text-primary leading-relaxed">
-              <strong className="font-semibold">המרת DWF אוטומטית</strong> דרך ODA File Converter ללא סימני מים. אם ההמרה נכשלת, ניתן להמיר ידנית ולהעלות PNG.
+              <strong className="font-semibold">תמיכה בקבצים</strong>: המערכת מקבלת PDF או תמונה (PNG/JPG). קבצי CAD (כמו DWF/DWFX/DWG) אינם נתמכים.
             </div>
           </div>
         </div>

@@ -79,7 +79,17 @@ async def get_full_plan_image(decomposition_id: str):
         )
         raise HTTPException(status_code=500, detail="שגיאה בטעינת תמונת התוכנית המלאה")
 
-    return Response(content=img_bytes, media_type="image/png")
+    return Response(
+        content=img_bytes,
+        media_type="image/png",
+        headers={
+            # Prevent browsers/print-to-PDF flows from reusing stale cached images
+            # after manual ROI updates or re-runs.
+            "Cache-Control": "no-store, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 
 @router.get("/{decomposition_id}/images/segments/{segment_id}")
@@ -129,12 +139,22 @@ async def get_segment_image(
         )
         raise HTTPException(status_code=500, detail="שגיאה בטעינת תמונת הסגמנט")
 
-    return Response(content=img_bytes, media_type="image/png")
+    return Response(
+        content=img_bytes,
+        media_type="image/png",
+        headers={
+            # Prevent browsers/print-to-PDF flows from reusing stale cached images
+            # after manual ROI updates or re-runs.
+            "Cache-Control": "no-store, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 
 @router.post("/analyze", response_model=DecompositionResponse)
 async def decompose_plan(
-    file: UploadFile = File(..., description="Architectural plan file (DWF, DWFX, PNG, JPG, PDF)"),
+    file: UploadFile = File(..., description="Architectural plan file (PNG, JPG, PDF)"),
     project_id: str = Form(..., description="Project identifier"),
     validation_id: Optional[str] = Form(None, description="Optional validation ID"),
 ):

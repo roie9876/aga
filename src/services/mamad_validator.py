@@ -46,8 +46,168 @@ class MamadValidator:
     
     def __init__(self):
         self.violations: List[Violation] = []
+        self.requirement_evaluations: List[Dict[str, Any]] = []
+
+    def _add_requirement_evaluation(
+        self,
+        requirement_id: str,
+        status: str,
+        *,
+        reason_not_checked: Optional[str] = None,
+        evidence: Optional[List[Dict[str, Any]]] = None,
+        notes_he: Optional[str] = None,
+    ) -> None:
+        ev: Dict[str, Any] = {
+            "requirement_id": requirement_id,
+            "status": status,
+            "evidence": evidence or [],
+        }
+        if reason_not_checked:
+            ev["reason_not_checked"] = reason_not_checked
+        if notes_he:
+            ev["notes_he"] = notes_he
+        self.requirement_evaluations.append(ev)
+
+    def _evidence_dimension(
+        self,
+        *,
+        value: Optional[float],
+        unit: Optional[str],
+        element: Optional[str] = None,
+        location: Optional[str] = None,
+        text: Optional[str] = None,
+        raw: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        return {
+            "evidence_type": "dimension",
+            "value": value,
+            "unit": unit,
+            "element": element,
+            "location": location,
+            "text": text,
+            "raw": raw,
+        }
+
+    def _evidence_text(
+        self,
+        *,
+        text: str,
+        element: Optional[str] = None,
+        location: Optional[str] = None,
+        raw: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        return {
+            "evidence_type": "text",
+            "text": text,
+            "element": element,
+            "location": location,
+            "raw": raw,
+        }
+
+    def _sync_violations_from_requirement_evaluations(self) -> None:
+        """Create legacy Violation objects from evidence-first failed evaluations.
+
+        The UI and some flows still rely on `violations` to display failures.
+        We keep evidence-first as the source of truth, but mirror failed evaluations
+        into violations so that a `failed` requirement cannot appear as a green segment.
+        """
+
+        severity_by_req: Dict[str, ViolationSeverity] = {
+            "1.2": ViolationSeverity.CRITICAL,
+            "2.1": ViolationSeverity.CRITICAL,
+            "2.2": ViolationSeverity.WARNING,
+            "3.1": ViolationSeverity.WARNING,
+            "3.2": ViolationSeverity.WARNING,
+            "4.2": ViolationSeverity.WARNING,
+            "6.1": ViolationSeverity.WARNING,
+            "6.2": ViolationSeverity.CRITICAL,
+            "6.3": ViolationSeverity.CRITICAL,
+        }
+
+        category_by_req: Dict[str, str] = {
+            "1.2": "קירות",
+            "2.1": "גובה",
+            "2.2": "גובה",
+            "3.1": "דלת",
+            "3.2": "חלון",
+            "4.2": "אוורור",
+            "6.1": "בטון",
+            "6.2": "פלדה",
+            "6.3": "זיון",
+        }
+
+        requirement_text_by_req: Dict[str, str] = {
+            "1.2": "עובי קיר - 25-40 ס\"מ לפי מספר קירות חיצוניים",
+            "2.1": "גובה מינימלי 2.50 מטר",
+            "2.2": "גובה 2.20 מטר במרתף/תוספת בניה (עם נפח ≥22.5 מ\"ק)",
+            "3.1": "ריווח דלת - ≥90cm מבפנים, ≥75cm מבחוץ",
+            "3.2": "ריווח חלון - ≥20cm בין נישות, ≥100cm בין פתחי אור",
+            "4.2": 'הערת אוורור וסינון בהתאם לת"י 4570',
+            "6.1": "דרגת בטון ב-30 לפחות",
+            "6.2": "פלדה מעוגלת בחום או רתיך בלבד (לא משוכה בקור)",
+            "6.3": "פסיעת זיון: חיצוני ≤20 ס\"מ, פנימי ≤10 ס\"מ",
+        }
+
+        existing_rule_ids = {v.rule_id for v in self.violations}
+
+        def _summarize_evidence(ev_items: Any) -> str:
+            if not isinstance(ev_items, list) or not ev_items:
+                return "לא צוין"
+            parts: list[str] = []
+            for item in ev_items:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("value") is not None:
+                    try:
+                        unit = item.get("unit") or ""
+                        parts.append(f"{float(item.get('value')):.2f} {unit}".strip())
+                    except Exception:
+                        pass
+                elif item.get("text"):
+                    parts.append(str(item.get("text"))[:60])
+                if len(parts) >= 3:
+                    break
+            return ", ".join(parts) if parts else "לא צוין"
+
+        for ev in self.requirement_evaluations:
+            if not isinstance(ev, dict):
+                continue
+            if ev.get("status") != "failed":
+                continue
+            req_id = ev.get("requirement_id")
+            if not isinstance(req_id, str) or not req_id:
+                continue
+            rule_id = f"REQ_{req_id.replace('.', '_')}"
+            if rule_id in existing_rule_ids:
+                continue
+
+            notes_he = str(ev.get("notes_he") or "")
+            found = _summarize_evidence(ev.get("evidence"))
+            location = ""
+            if isinstance(ev.get("evidence"), list) and ev.get("evidence"):
+                first = ev.get("evidence")[0]
+                if isinstance(first, dict):
+                    location = str(first.get("location") or "")
+
+            self.violations.append(
+                Violation(
+                    rule_id=rule_id,
+                    severity=severity_by_req.get(req_id, ViolationSeverity.WARNING),
+                    category=category_by_req.get(req_id, "כללי"),
+                    description_he=notes_he or f"כשל בדרישה {req_id}",
+                    requirement=requirement_text_by_req.get(req_id, f"דרישה {req_id}"),
+                    found=found,
+                    location=location,
+                )
+            )
         
-    def validate_segment(self, analysis_data: Dict[str, Any], *, demo_mode: bool = False) -> Dict[str, Any]:
+    def validate_segment(
+        self,
+        analysis_data: Dict[str, Any],
+        *,
+        demo_mode: bool = False,
+        enabled_requirements: Optional[set[str]] = None,
+    ) -> Dict[str, Any]:
         """
         Validate a single segment's analysis data against MAMAD requirements.
         
@@ -61,6 +221,7 @@ class MamadValidator:
             Validation result with violations and status
         """
         self.violations = []  # Reset violations
+        self.requirement_evaluations = []
         
         # Get segment classification
         classification = analysis_data.get("classification", {})
@@ -92,7 +253,6 @@ class MamadValidator:
                    has_dimensions=bool(analysis_data.get("dimensions")),
                    has_elements=bool(analysis_data.get("structural_elements")),
                    demo_mode=demo_mode)
-        
         # Map categories to validation functions
         validation_map = {
             "WALL_SECTION": [self._validate_wall_thickness],
@@ -104,18 +264,18 @@ class MamadValidator:
             "GENERAL_NOTES": [self._validate_ventilation_note],
             "SECTIONS": [self._validate_room_height],
         }
-
-        # Which official requirement IDs this validator actually checks per category.
-        # This is used for coverage reporting (and UI) and should match the rules implemented below.
-        category_to_checked_requirements = {
-            "WALL_SECTION": ["1.2"],
-            "ROOM_LAYOUT": ["2.1", "2.2"],
-            "DOOR_DETAILS": ["3.1"],
-            "WINDOW_DETAILS": ["3.2"],
-            "REBAR_DETAILS": ["6.3"],
-            "MATERIALS_SPECS": ["6.1", "6.2"],
-            "GENERAL_NOTES": ["4.2"],
-            "SECTIONS": ["2.1", "2.2"],
+        # Which official requirement IDs each validator corresponds to.
+        # IMPORTANT: We only count a requirement as "checked" if the validator actually
+        # had enough evidence to evaluate it (or emitted a missing-info violation).
+        validator_to_requirements = {
+            self._validate_wall_thickness: ["1.2"],
+            self._validate_room_height: ["2.1", "2.2"],
+            self._validate_door_spacing: ["3.1"],
+            self._validate_window_spacing: ["3.2"],
+            self._validate_rebar_specifications: ["6.3"],
+            self._validate_concrete_grade: ["6.1"],
+            self._validate_steel_type: ["6.2"],
+            self._validate_ventilation_note: ["4.2"],
         }
 
         if demo_mode:
@@ -127,14 +287,53 @@ class MamadValidator:
         
         # Run validations based on ALL classified categories (primary + secondary)
         validations_to_run = []
-        checked_set = set()
+        planned_requirements: set[str] = set()
         for cat in categories:
             for fn in validation_map.get(cat, []):
+                # If user selected a subset of requirements, only allow validators that map
+                # to at least one enabled requirement.
+                if enabled_requirements is not None:
+                    mapped = set(validator_to_requirements.get(fn, []))
+                    if mapped and mapped.isdisjoint(enabled_requirements):
+                        continue
+
                 if fn not in validations_to_run:
                     validations_to_run.append(fn)
-            for req in category_to_checked_requirements.get(cat, []):
-                checked_set.add(req)
-        checked_requirements = sorted(checked_set)
+                for req in validator_to_requirements.get(fn, []):
+                    if enabled_requirements is None or req in enabled_requirements:
+                        planned_requirements.add(req)
+
+        # Manual ROI / unknown classification handling:
+        # If the user explicitly enabled requirement groups but the segment classification
+        # did not map to any validators (e.g., category OTHER or empty classification),
+        # run the validators that correspond to the enabled requirements anyway.
+        # This allows us to return explicit `not_checked` evaluations with reasons instead
+        # of claiming that no checks were performed.
+        ran_by_enabled_requirements = False
+        if enabled_requirements is not None and not validations_to_run:
+            for fn, reqs in validator_to_requirements.items():
+                mapped = set(reqs)
+                if mapped and not mapped.isdisjoint(enabled_requirements):
+                    validations_to_run.append(fn)
+                    ran_by_enabled_requirements = True
+                    for req in mapped:
+                        if req in enabled_requirements:
+                            planned_requirements.add(req)
+
+        # If the user explicitly enabled requirements that have no validator implementation,
+        # emit explicit not_checked evaluations so the UI doesn't show a silent "nothing happened".
+        if enabled_requirements is not None:
+            unsupported = set(enabled_requirements) - planned_requirements
+            for req in sorted(unsupported):
+                self._add_requirement_evaluation(
+                    req,
+                    "not_checked",
+                    reason_not_checked="validator_not_implemented",
+                    notes_he="המערכת עדיין לא מממשת בדיקה דטרמיניסטית לדרישה זו בסגמנטים; לא בוצעה בדיקה.",
+                )
+
+        checked_requirements: List[str] = []
+        skipped_requirements: List[str] = []
         
         decision_summary_he = ""
 
@@ -153,8 +352,25 @@ class MamadValidator:
                     "המערכת מפעילה בדיקות רק עבור קטגוריות מוגדרות (כמו ROOM_LAYOUT/SECTIONS/WALL_SECTION וכו')."
                 )
         else:
+            checked_set: set[str] = set()
             for validation_func in validations_to_run:
-                validation_func(analysis_data)
+                did_check = validation_func(analysis_data)
+                # Safety: if a validator didn't explicitly confirm it checked evidence,
+                # we treat it as NOT checked (prevents false "passed" without evidence).
+                if did_check is None:
+                    did_check = False
+
+            # Compute checked requirements from explicit evaluations (evidence-first).
+            for ev in self.requirement_evaluations:
+                if not isinstance(ev, dict):
+                    continue
+                req_id = ev.get("requirement_id")
+                status = ev.get("status")
+                if req_id and status in {"passed", "failed"}:
+                    checked_set.add(req_id)
+
+            checked_requirements = sorted(checked_set)
+            skipped_requirements = sorted(planned_requirements - checked_set)
 
             if demo_mode:
                 decision_summary_he = (
@@ -168,22 +384,50 @@ class MamadValidator:
                     f"דרישות שנבדקו בסגמנט זה: {', '.join(checked_requirements) if checked_requirements else 'אין'}. "
                     "דרישות אחרות לא נבדקו כי הן ממופות לקטגוריות אחרות או דורשות סגמנטים מסוג אחר (למשל פרט/חתך)."
                 )
+
+            if ran_by_enabled_requirements and not checked_requirements:
+                decision_summary_he = (
+                    f"הופעלו בדיקות לפי בחירת המשתמש (check_groups) למרות שהסיווג לא היה חד-משמעי. "
+                    f"לא נמצאו ראיות מספיקות כדי לאמת אף דרישה בסגמנט זה. "
+                    f"דרישות שנוסו: {', '.join(sorted(planned_requirements)) if planned_requirements else 'אין'}."
+                )
+
+        # Mirror evidence-first failures into legacy violations for UI/back-compat.
+        self._sync_violations_from_requirement_evaluations()
         
         # Categorize violations
         critical = [v for v in self.violations if v.severity == ViolationSeverity.CRITICAL]
         errors = [v for v in self.violations if v.severity == ViolationSeverity.ERROR]
         warnings = [v for v in self.violations if v.severity == ViolationSeverity.WARNING]
-        
-        passed = len(critical) == 0 and len(errors) == 0
+
+        # IMPORTANT:
+        # A segment must never be marked as "passed" if we didn't actually check any requirements.
+        # "No checks" is an explicit status (used heavily for manual ROI flows).
+        checks_performed = bool(checked_requirements)
+        # Non-breaking signal for UI/stream: validators may have run but still end in not_checked.
+        checks_attempted = bool(validations_to_run) or bool(self.requirement_evaluations)
+        has_failures = len(critical) > 0 or len(errors) > 0
+
+        if has_failures:
+            status = "failed"
+            passed = False
+        elif checks_performed:
+            status = "passed"
+            passed = True
+        else:
+            status = "not_checked"
+            passed = False
         
         logger.info("Validation complete",
+                   status=status,
                    passed=passed,
+                   checks_performed=checks_performed,
                    critical=len(critical),
                    errors=len(errors),
                    warnings=len(warnings))
         
         return {
-            "status": "passed" if passed else "failed",
+            "status": status,
             "passed": passed,
             "total_violations": len(self.violations),
             "critical_count": len(critical),
@@ -191,6 +435,7 @@ class MamadValidator:
             "warning_count": len(warnings),
             "violations": [self._violation_to_dict(v) for v in self.violations],
             "checked_requirements": checked_requirements,
+            "requirement_evaluations": self.requirement_evaluations,
             "decision_summary_he": decision_summary_he,
             "debug": {
                 "categories_used": categories,
@@ -198,7 +443,12 @@ class MamadValidator:
                 "primary_category": primary_category,
                 "relevant_requirements": relevant_requirements,
                 "demo_mode": demo_mode,
+                "planned_requirements": sorted(planned_requirements),
+                "skipped_requirements": skipped_requirements,
+                "ran_by_enabled_requirements": ran_by_enabled_requirements,
             },
+            "checks_performed": checks_performed,
+            "checks_attempted": checks_attempted,
         }
     
     def _violation_to_dict(self, v: Violation) -> Dict[str, Any]:
@@ -226,24 +476,33 @@ class MamadValidator:
         - 4 external walls: 40cm
         """
         elements = data.get("structural_elements", [])
+        if not elements:
+            self._add_requirement_evaluation(
+                "1.2",
+                "not_checked",
+                reason_not_checked="no_structural_elements",
+                notes_he="לא נמצאו אלמנטים מבניים בסגמנט ולכן לא ניתן לבדוק עובי קירות.",
+            )
+            return False
+
         walls = [e for e in elements if e.get("type") in ["wall", "קיר", "קיר חיצוני"]]
-        
         if not walls:
-            self.violations.append(Violation(
-                rule_id="WALL_001",
-                severity=ViolationSeverity.WARNING,
-                category="קירות",
-                description_he="לא זוהו קירות בתוכנית",
-                requirement="חובה לזהות קירות חיצוניים",
-                found="0 קירות"
-            ))
-            return
+            # Not enough information to evaluate thickness.
+            self._add_requirement_evaluation(
+                "1.2",
+                "not_checked",
+                reason_not_checked="no_walls_detected",
+                notes_he="לא זוהו קירות בסגמנט ולכן לא ניתן לבדוק עובי קיר.",
+            )
+            return False
         
         # Count external walls (simplified - would need more context)
         external_walls = walls  # TODO: Distinguish external vs internal
         num_external = len(external_walls)
         
         # Check each wall thickness
+        evidence: List[Dict[str, Any]] = []
+        parsed_thicknesses: List[float] = []
         for wall in walls:
             thickness_str = wall.get("thickness", "")
             
@@ -251,83 +510,271 @@ class MamadValidator:
             thickness_cm = self._extract_dimension_value(thickness_str, "cm")
             
             if thickness_cm is None:
-                self.violations.append(Violation(
-                    rule_id="WALL_002",
-                    severity=ViolationSeverity.WARNING,
-                    category="קירות",
-                    description_he=f"עובי קיר לא ברור: {wall.get('location', 'לא צוין')}",
-                    requirement="עובי קיר חייב להיות מצוין בס\"מ",
-                    found=thickness_str or "לא צוין",
-                    location=wall.get("location", "")
-                ))
                 continue
-            
-            # Determine required thickness based on number of external walls
-            required_thickness = self._get_required_wall_thickness(num_external, has_window=False)
-            
-            if thickness_cm < required_thickness:
-                self.violations.append(Violation(
-                    rule_id="WALL_003",
-                    severity=ViolationSeverity.CRITICAL,
-                    category="קירות",
-                    description_he=f"קיר דק מדי - {wall.get('location', 'לא צוין')}",
-                    requirement=f"עובי מינימלי: {required_thickness} ס\"מ ({num_external} קירות חיצוניים)",
-                    found=f"{thickness_cm} ס\"מ",
-                    location=wall.get("location", "")
-                ))
+
+            parsed_thicknesses.append(thickness_cm)
+            evidence.append(
+                self._evidence_dimension(
+                    value=thickness_cm,
+                    unit="cm",
+                    element="wall_thickness",
+                    location=wall.get("location", ""),
+                    text=thickness_str,
+                    raw=wall,
+                )
+            )
+
+        if not parsed_thicknesses:
+            self._add_requirement_evaluation(
+                "1.2",
+                "not_checked",
+                reason_not_checked="no_parseable_wall_thickness",
+                evidence=evidence,
+                notes_he="זוהו קירות אך לא נמצאו ערכי עובי שניתנים לפענוח.",
+            )
+            return False
+
+        required_thickness = self._get_required_wall_thickness(num_external, has_window=False)
+        min_thickness = min(parsed_thicknesses)
+        if min_thickness < required_thickness:
+            self._add_requirement_evaluation(
+                "1.2",
+                "failed",
+                evidence=(
+                    evidence
+                    + [
+                        self._evidence_dimension(
+                            value=required_thickness,
+                            unit="cm",
+                            element="required_min_wall_thickness",
+                            location=f"external_walls={num_external}",
+                        )
+                    ]
+                ),
+                notes_he=f"נמצא עובי קיר {min_thickness:.0f} ס\"מ קטן מהמינימום {required_thickness} ס\"מ.",
+            )
+        else:
+            self._add_requirement_evaluation(
+                "1.2",
+                "passed",
+                evidence=(
+                    evidence
+                    + [
+                        self._evidence_dimension(
+                            value=required_thickness,
+                            unit="cm",
+                            element="required_min_wall_thickness",
+                            location=f"external_walls={num_external}",
+                        )
+                    ]
+                ),
+                notes_he=f"כל עוביי הקירות שפוענחו עומדים במינימום {required_thickness} ס\"מ (בהנחת {num_external} קירות חיצוניים בסגמנט).",
+            )
+
+        return True
     
-    def _validate_room_height(self, data: Dict[str, Any]):
+    def _validate_room_height(self, data: Dict[str, Any]) -> bool:
         """
         Rule 2.1-2.2: Room height requirements
         - Standard minimum: 2.50m
         - Exception: 2.20m if basement/addition AND volume ≥ 22.5 m³
         """
         dimensions = data.get("dimensions", [])
+
+        # Determine whether this segment is likely to contain a ROOM height (not an opening height).
+        # IMPORTANT: use PRIMARY category only (secondary labels are often noisy on mixed crops).
+        classification = data.get("classification", {})
+        primary_category_raw = classification.get("primary_category", "")
+        primary_category = ""
+        if isinstance(primary_category_raw, str) and primary_category_raw.strip():
+            primary_category = re.split(r"[|,]", primary_category_raw.strip())[0].strip().upper()
+        elif isinstance(primary_category_raw, list) and primary_category_raw:
+            primary_category = str(primary_category_raw[0]).strip().upper()
+
+        text_items = data.get("text_items", [])
+        annotations = data.get("annotations", [])
+        all_text_lower = " ".join(
+            [str(t.get("text", "")) for t in (text_items + annotations)]
+        ).lower()
+
+        height_markers_present = any(k in all_text_lower for k in ["h=", "גובה", "height"])
+        segment_is_section_like = (primary_category == "SECTIONS") or height_markers_present
         
-        # Find height dimension
-        height_dims = [d for d in dimensions if "גובה" in d.get("element", "").lower() 
-                      or "height" in d.get("element", "").lower()]
+        def _is_opening_height_dimension(d: Dict[str, Any]) -> bool:
+            element = str(d.get("element", "")).lower()
+            location = str(d.get("location", "")).lower()
+            # If it's explicitly tied to openings, it is NOT a room height.
+            opening_markers = [
+                "door", "window", "opening", "jamb",
+                "דלת", "חלון", "פתח", "משקוף",
+            ]
+            if any(m in element for m in opening_markers):
+                return True
+            if any(m in location for m in opening_markers):
+                return True
+            return False
+
+        # Find *room* height dimensions (avoid door/window heights like 80/200)
+        raw_height_dims = [
+            d for d in dimensions
+            if ("גובה" in str(d.get("element", "")).lower())
+            or ("height" in str(d.get("element", "")).lower())
+        ]
+        height_dims = [d for d in raw_height_dims if not _is_opening_height_dimension(d)]
+
+        def _height_dim_score(d: Dict[str, Any]) -> int:
+            element = str(d.get("element", "")).lower()
+            location = str(d.get("location", "")).lower()
+            score = 0
+            if "חדר" in element or "room" in element:
+                score += 5
+            if "תקרה" in element or "ceiling" in element:
+                score += 4
+            if "גובה" in element or "height" in element:
+                score += 1
+            if "חתך" in location or "section" in location:
+                score += 1
+            return score
+
+        if height_dims:
+            height_dims.sort(key=_height_dim_score, reverse=True)
         
         if not height_dims:
-            self.violations.append(Violation(
-                rule_id="HEIGHT_001",
-                severity=ViolationSeverity.ERROR,
-                category="גובה",
-                description_he="גובה החדר לא צוין בתוכנית",
-                requirement="גובה מינימלי: 2.50 מ'",
-                found="לא צוין"
-            ))
-            return
+            # If the segment is not primarily a section and does not explicitly include height markers,
+            # don't penalize it for missing room height.
+            if not segment_is_section_like:
+                self._add_requirement_evaluation(
+                    "2.1",
+                    "not_checked",
+                    reason_not_checked="segment_not_section_like",
+                    notes_he="הסגמנט לא נראה כמו חתך/גובה חדר ולכן לא נבדקה דרישת גובה.",
+                )
+                self._add_requirement_evaluation(
+                    "2.2",
+                    "not_checked",
+                    reason_not_checked="segment_not_section_like",
+                    notes_he="הסגמנט לא נראה כמו חתך/גובה חדר ולכן לא נבדקה דרישת החריג (2.2).",
+                )
+                return False
+
+            # Evidence-first: missing room height is not treated as a failure unless we have
+            # strong evidence that this segment should contain it. Mark as not_checked.
+            self._add_requirement_evaluation(
+                "2.1",
+                "not_checked",
+                reason_not_checked="room_height_not_found",
+                evidence=[self._evidence_text(text="לא נמצא מימד גובה חדר בסגמנט", element="room_height")],
+                notes_he="לא נמצא מימד שמזוהה בבירור כגובה חדר.",
+            )
+            self._add_requirement_evaluation(
+                "2.2",
+                "not_checked",
+                reason_not_checked="room_height_not_found",
+                evidence=[self._evidence_text(text="לא נמצא מימד גובה חדר בסגמנט", element="room_height")],
+                notes_he="לא נמצא מימד שמזוהה בבירור כגובה חדר.",
+            )
+            return False
         
         # Get height value
         height_m = self._extract_dimension_value(height_dims[0].get("value", ""), "m")
         
         if height_m is None:
-            return
+            # We attempted to evaluate height but couldn't parse it reliably.
+            self._add_requirement_evaluation(
+                "2.1",
+                "not_checked",
+                reason_not_checked="unparseable_room_height",
+                evidence=[
+                    self._evidence_dimension(
+                        value=None,
+                        unit=str(height_dims[0].get("unit") or ""),
+                        element=str(height_dims[0].get("element") or "room_height"),
+                        location=str(height_dims[0].get("location") or ""),
+                        text=str(height_dims[0].get("value") or ""),
+                        raw=height_dims[0],
+                    )
+                ],
+                notes_he="נמצא מימד גובה אך לא ניתן היה לפענח את הערך בצורה אמינה.",
+            )
+            self._add_requirement_evaluation(
+                "2.2",
+                "not_checked",
+                reason_not_checked="unparseable_room_height",
+                evidence=[
+                    self._evidence_dimension(
+                        value=None,
+                        unit=str(height_dims[0].get("unit") or ""),
+                        element=str(height_dims[0].get("element") or "room_height"),
+                        location=str(height_dims[0].get("location") or ""),
+                        text=str(height_dims[0].get("value") or ""),
+                        raw=height_dims[0],
+                    )
+                ],
+                notes_he="נמצא מימד גובה אך לא ניתן היה לפענח את הערך בצורה אמינה.",
+            )
+            return False
+
+        height_evidence = [
+            self._evidence_dimension(
+                value=height_m,
+                unit="m",
+                element=str(height_dims[0].get("element") or "room_height"),
+                location=str(height_dims[0].get("location") or ""),
+                text=str(height_dims[0].get("value") or ""),
+                raw=height_dims[0],
+            )
+        ]
         
-        # Check minimum height
+        # Evidence-first evaluation for 2.1 and 2.2.
+        if height_m >= 2.50:
+            self._add_requirement_evaluation(
+                "2.1",
+                "passed",
+                evidence=height_evidence + [self._evidence_dimension(value=2.50, unit="m", element="required_min_height")],
+                notes_he="גובה החדר עומד בדרישה המינימלית (2.50 מ').",
+            )
+            self._add_requirement_evaluation(
+                "2.2",
+                "not_checked",
+                reason_not_checked="not_applicable_height_meets_standard",
+                evidence=height_evidence,
+                notes_he="החריג (2.2) לא נדרש כי הגובה עומד ב-2.50 מ'.",
+            )
+            return True
+
         if height_m < 2.20:
-            self.violations.append(Violation(
-                rule_id="HEIGHT_002",
-                severity=ViolationSeverity.CRITICAL,
-                category="גובה",
-                description_he="גובה החדר נמוך מדי",
-                requirement="גובה מינימלי: 2.20 מ' (במרתף/תוספת אם נפח ≥ 22.5 מ\"ק)",
-                found=f"{height_m} מ'",
-                location=height_dims[0].get("location", "")
-            ))
-        elif height_m < 2.50:
-            self.violations.append(Violation(
-                rule_id="HEIGHT_003",
-                severity=ViolationSeverity.WARNING,
-                category="גובה",
-                description_he="גובה החדר נמוך מהסטנדרט",
-                requirement="גובה מינימלי סטנדרטי: 2.50 מ'",
-                found=f"{height_m} מ' (מותר רק במרתף/תוספת אם נפח ≥ 22.5 מ\"ק)",
-                location=height_dims[0].get("location", "")
-            ))
+            # Fails both the standard and the exception minimum.
+            self._add_requirement_evaluation(
+                "2.1",
+                "failed",
+                evidence=height_evidence + [self._evidence_dimension(value=2.50, unit="m", element="required_min_height")],
+                notes_he="גובה החדר נמוך מהמינימום הסטנדרטי 2.50 מ'.",
+            )
+            self._add_requirement_evaluation(
+                "2.2",
+                "failed",
+                evidence=height_evidence + [self._evidence_dimension(value=2.20, unit="m", element="required_exception_min_height")],
+                notes_he="גובה החדר נמוך גם מהמינימום לחריג 2.20 מ'.",
+            )
+            return True
+
+        # 2.20 <= height < 2.50: standard fails; exception depends on basement/addition + volume.
+        self._add_requirement_evaluation(
+            "2.1",
+            "failed",
+            evidence=height_evidence + [self._evidence_dimension(value=2.50, unit="m", element="required_min_height")],
+            notes_he="גובה החדר נמוך מ-2.50 מ' ולכן אינו עומד בדרישה הסטנדרטית.",
+        )
+        self._add_requirement_evaluation(
+            "2.2",
+            "not_checked",
+            reason_not_checked="missing_exception_context_or_volume",
+            evidence=height_evidence + [self._evidence_dimension(value=22.5, unit="m3", element="required_min_volume")],
+            notes_he="כדי לאשר חריג 2.20 מ' נדרשות ראיות למרתף/תוספת בניה ונפח ≥ 22.5 מ\"ק.",
+        )
+        return True
     
-    def _validate_door_spacing(self, data: Dict[str, Any]):
+    def _validate_door_spacing(self, data: Dict[str, Any]) -> bool:
         """
         Rule 3.1: Door spacing requirements
         - Distance from door frame to perpendicular wall inside: ≥ 90cm
@@ -338,26 +785,69 @@ class MamadValidator:
         
         if not doors:
             # Not necessarily an error - segment might not show door
-            return
+            self._add_requirement_evaluation(
+                "3.1",
+                "not_checked",
+                reason_not_checked="no_doors_detected",
+                notes_he="לא זוהו דלתות בסגמנט ולכן לא נבדקה דרישת ריווח דלת.",
+            )
+            return False
+
+        checked_any = False
+        evidence: List[Dict[str, Any]] = []
         
         # Check door spacing (simplified - would need spatial analysis)
         for door in doors:
             dimensions_str = door.get("dimensions", "")
+
+            classification = data.get("classification", {})
+            primary_category_raw = classification.get("primary_category", "")
+            primary_category = ""
+            if isinstance(primary_category_raw, str) and primary_category_raw.strip():
+                primary_category = re.split(r"[|,]", primary_category_raw.strip())[0].strip().upper()
+            elif isinstance(primary_category_raw, list) and primary_category_raw:
+                primary_category = str(primary_category_raw[0]).strip().upper()
             
             # Look for spacing annotations in text_items
             text_items = data.get("text_items", [])
-            spacing_texts = [t for t in text_items if "מרחק" in t.get("text", "") 
-                           or "ס\"מ" in t.get("text", "")]
+            door_markers = [
+                "door", "jamb", "frame", 
+                "דלת", "משקוף",
+            ]
+
+            def _mentions_door(s: str) -> bool:
+                s = (s or "").lower()
+                return any(m in s for m in door_markers)
+
+            spacing_texts = [
+                t for t in text_items
+                if (
+                    ("מרחק" in (t.get("text", "") or ""))
+                    or ("ס\"מ" in (t.get("text", "") or ""))
+                    or ("cm" in (t.get("text", "") or "").lower())
+                )
+                and _mentions_door(str(t.get("text", "")))
+            ]
 
             # Also look for spacing in extracted dimensions/door fields (more reliable than raw text)
             extracted_dims = data.get("dimensions", [])
-            spacing_dims = [
-                d for d in extracted_dims
-                if any(k in str(d.get("element", "")).lower() for k in ["door", "jamb", "spacing", "clearance", "distance", "מרחק"])
-            ]
+            spacing_dims = []
+            for d in extracted_dims:
+                element = str(d.get("element", ""))
+                location = str(d.get("location", ""))
+                joined = f"{element} {location}"
+
+                # Accept generic "distance/מרחק" only if the dimension is explicitly tied to a door/frame/opening.
+                if not _mentions_door(joined):
+                    continue
+
+                el_lower = element.lower()
+                if any(k in el_lower for k in ["door", "jamb", "spacing", "clearance", "distance", "מרחק"]):
+                    spacing_dims.append(d)
 
             door_internal = door.get("spacing_internal_cm") or door.get("door_spacing_internal_cm")
             door_external = door.get("spacing_external_cm") or door.get("door_spacing_external_cm")
+            door_confidence = door.get("spacing_confidence") or door.get("door_spacing_confidence")
 
             def _as_number(v: Any) -> Optional[float]:
                 try:
@@ -369,6 +859,7 @@ class MamadValidator:
 
             internal_cm = _as_number(door_internal)
             external_cm = _as_number(door_external)
+            confidence = _as_number(door_confidence)
 
             def _as_cm(value: Any, unit: Any) -> Optional[float]:
                 num = _as_number(value)
@@ -384,38 +875,101 @@ class MamadValidator:
 
             # If the model provided explicit internal/external values, evaluate them.
             if internal_cm is not None or external_cm is not None:
-                ok_internal = (internal_cm is None) or (internal_cm >= 90.0)
-                ok_external = (external_cm is None) or (external_cm >= 75.0)
-                if ok_internal and ok_external:
+                # If the focused extractor provided a low confidence, prefer not_checked over
+                # a potentially false pass/fail.
+                if confidence is not None and confidence < 0.60:
+                    self._add_requirement_evaluation(
+                        "3.1",
+                        "not_checked",
+                        reason_not_checked="low_confidence_door_spacing_extraction",
+                        evidence=[
+                            self._evidence_dimension(
+                                value=internal_cm,
+                                unit="cm",
+                                element="door_spacing_internal",
+                                location=str(door.get("location") or ""),
+                                raw=door,
+                            ),
+                            self._evidence_dimension(
+                                value=external_cm,
+                                unit="cm",
+                                element="door_spacing_external",
+                                location=str(door.get("location") or ""),
+                                raw=door,
+                            ),
+                        ],
+                        notes_he="זוהו ערכי ריווח דלת אך רמת הוודאות נמוכה; לא בוצעה הכרעה כדי למנוע טעות.",
+                    )
                     continue
 
-                found_parts: list[str] = []
+                checked_any = True
                 if internal_cm is not None:
-                    found_parts.append(f"פנימי: {internal_cm:.0f} ס\"מ")
+                    evidence.append(self._evidence_dimension(value=internal_cm, unit="cm", element="door_spacing_internal", location=door.get("location", ""), raw=door))
                 if external_cm is not None:
-                    found_parts.append(f"חיצוני: {external_cm:.0f} ס\"מ")
+                    evidence.append(self._evidence_dimension(value=external_cm, unit="cm", element="door_spacing_external", location=door.get("location", ""), raw=door))
 
-                self.violations.append(Violation(
-                    rule_id="DOOR_001",
-                    severity=ViolationSeverity.WARNING,
-                    category="דלת",
-                    description_he="מרחקי דלת אינם עומדים בדרישה",
-                    requirement="מרחק מדלת לקיר ניצב: ≥ 90 ס\"מ פנימי, ≥ 75 ס\"מ חיצוני",
-                    found=", ".join(found_parts) if found_parts else "לא צוין",
-                    location=door.get("location", "")
-                ))
+                # For a reliable PASS we require BOTH internal and external clearances.
+                if internal_cm is None or external_cm is None:
+                    self._add_requirement_evaluation(
+                        "3.1",
+                        "not_checked",
+                        reason_not_checked="missing_internal_or_external_clearance",
+                        evidence=evidence,
+                        notes_he="נמצאה מידה חלקית לריווח דלת אך חסר פנימי/חיצוני; לא ניתן לקבוע עמידה מלאה בדרישה.",
+                    )
+                    continue
+
+                ok_internal = internal_cm >= 90.0
+                ok_external = external_cm >= 75.0
+
+                if ok_internal and ok_external:
+                    self._add_requirement_evaluation(
+                        "3.1",
+                        "passed",
+                        evidence=evidence + [
+                            self._evidence_dimension(value=90.0, unit="cm", element="required_internal_min"),
+                            self._evidence_dimension(value=75.0, unit="cm", element="required_external_min"),
+                        ],
+                        notes_he="ריווחי הדלת עומדים בדרישות (≥90 ס\"מ פנימי, ≥75 ס\"מ חיצוני).",
+                    )
+                else:
+                    self._add_requirement_evaluation(
+                        "3.1",
+                        "failed",
+                        evidence=evidence + [
+                            self._evidence_dimension(value=90.0, unit="cm", element="required_internal_min"),
+                            self._evidence_dimension(value=75.0, unit="cm", element="required_external_min"),
+                        ],
+                        notes_he="נמצאו ריווחי דלת שאינם עומדים בדרישות.",
+                    )
                 continue
 
             # If we found spacing-like dimensions near the door, use them as evidence.
             # For demo/real-world plans, we prefer to avoid false negatives when the drawing
             # provides dimensions but doesn't label them as "internal/external" explicitly.
-            if spacing_dims:
+            if spacing_dims: 
                 spacing_values_cm: list[float] = []
                 found_preview: list[str] = []
                 for d in spacing_dims:
                     v_cm = _as_cm(d.get("value"), d.get("unit"))
                     if v_cm is not None:
-                        spacing_values_cm.append(v_cm)
+                        # Filter out very small "offset" values (e.g., 20/25/40/45) that are commonly
+                        # wall thicknesses or local offsets near the door, not the required clearances.
+                        # We only evaluate plausible clearance candidates.
+                        if v_cm >= 60.0:
+                            spacing_values_cm.append(v_cm)
+
+                    if v_cm is not None:
+                        evidence.append(
+                            self._evidence_dimension(
+                                value=v_cm,
+                                unit="cm",
+                                element=str(d.get("element") or "door_spacing"),
+                                location=str(d.get("location") or door.get("location", "")),
+                                text=str(d.get("value") or ""),
+                                raw=d,
+                            )
+                        )
 
                     # Build a short preview for logs only
                     if len(found_preview) < 4:
@@ -435,50 +989,89 @@ class MamadValidator:
                     # Heuristic:
                     # - If all observed door-adjacent spacings are >= 75cm and at least one is >= 90cm,
                     #   treat as compliant (likely covers external>=75 and internal>=90).
-                    if min_cm >= 75.0 and max_cm >= 90.0:
+                    if min_cm >= 75.0 and max_cm >= 90.0: 
+                        checked_any = True
+                        self._add_requirement_evaluation(
+                            "3.1",
+                            "passed",
+                            evidence=evidence + [
+                                self._evidence_dimension(value=90.0, unit="cm", element="required_internal_min"),
+                                self._evidence_dimension(value=75.0, unit="cm", element="required_external_min"),
+                            ],
+                            notes_he="נמצאו מידות סמוכות לדלת שמספיקות כדי לעמוד בספי 75/90 ס\"מ.",
+                        )
                         continue
 
-                    # If all observed values are clearly below 75cm, flag as non-compliant.
-                    if max_cm < 75.0:
-                        self.violations.append(Violation(
-                            rule_id="DOOR_001",
-                            severity=ViolationSeverity.WARNING,
-                            category="דלת",
-                            description_he="מרחקי דלת אינם עומדים בדרישה",
-                            requirement="מרחק מדלת לקיר ניצב: ≥ 90 ס\"מ פנימי, ≥ 75 ס\"מ חיצוני",
-                            found="; ".join(found_preview) if found_preview else f"max={max_cm:.0f} cm",
-                            location=door.get("location", "")
-                        ))
-                        continue
-
-                    # Otherwise: evidence exists but mapping is ambiguous. Don't emit a violation.
+                    # Otherwise: evidence exists but mapping is ambiguous. Don't mark as checked
+                    # (prevents false green "passed" when we can't truly validate).
                     logger.info(
                         "Door spacing evidence found but ambiguous; not emitting violation",
                         found_preview=found_preview,
                         location=door.get("location", "")
                     )
+                    self._add_requirement_evaluation(
+                        "3.1",
+                        "not_checked",
+                        reason_not_checked="ambiguous_spacing_evidence",
+                        evidence=evidence,
+                        notes_he="נמצאו מידות סמוכות לדלת אך לא ניתן למפות בבירור ל'פנימי/חיצוני' ולכן לא בוצעה בדיקה.",
+                    )
                     continue
 
-                # spacing_dims exist but without numeric values; treat as evidence and avoid false "missing".
+                # spacing_dims exist but without numeric values; not enough to validate.
                 logger.info(
                     "Door spacing evidence found (non-numeric); not emitting violation",
                     location=door.get("location", "")
+                )
+                self._add_requirement_evaluation(
+                    "3.1",
+                    "not_checked",
+                    reason_not_checked="non_numeric_spacing_evidence",
+                    evidence=evidence,
+                    notes_he="נמצאו סימני ריווח ליד הדלת אך ללא ערך מספרי שניתן לפענוח.",
                 )
                 continue
             
             # If no spacing info found, warn
             if not spacing_texts:
-                self.violations.append(Violation(
-                    rule_id="DOOR_001",
-                    severity=ViolationSeverity.WARNING,
-                    category="דלת",
-                    description_he="מרחקי דלת לא מצוינים בתוכנית",
-                    requirement="מרחק מדלת לקיר ניצב: ≥ 90 ס\"מ פנימי, ≥ 75 ס\"מ חיצוני",
-                    found="לא צוין",
-                    location=door.get("location", "")
-                ))
+                # If this is not primarily a door-detail segment, don't penalize for missing
+                # door spacing values (they are often absent from general room layout crops).
+                if primary_category and primary_category != "DOOR_DETAILS":
+                    logger.info(
+                        "Skipping DOOR_001 missing-spacing warning for non-door-detail segment",
+                        primary_category=primary_category,
+                        location=door.get("location", "")
+                    )
+                    # Still emit an explicit not_checked evaluation for transparency.
+                    self._add_requirement_evaluation(
+                        "3.1",
+                        "not_checked",
+                        reason_not_checked="missing_clearance_dimensions",
+                        evidence=[
+                            self._evidence_text(
+                                text="לא נמצאו מידות ריווח דלת לקיר ניצב (פנימי/חיצוני) שנדרשות ל-3.1",
+                                element="door_spacing",
+                                location=str(door.get("location") or ""),
+                                raw=door,
+                            )
+                        ],
+                        notes_he="כדי לבדוק 3.1 נדרשות מידות ריווח מהמשקוף/מסגרת הדלת אל הקיר הניצב (פנימי וחיצוני). בסגמנט זה זוהתה דלת, אך לא נמצאו מידות ריווח כאלה באופן חד-משמעי.",
+                    )
+                    continue
+
+                # Evidence-first: absence of spacing annotations is not treated as a failure.
+                self._add_requirement_evaluation(
+                    "3.1",
+                    "not_checked",
+                    reason_not_checked="no_spacing_evidence",
+                    evidence=[self._evidence_text(text="לא נמצאו מידות ריווח דלת (90/75 ס\"מ)", element="door_spacing")],
+                    notes_he="לא נמצאו ראיות מספקות לריווח דלת בסגמנט.",
+                )
+                checked_any = False
+
+        return checked_any
     
-    def _validate_window_spacing(self, data: Dict[str, Any]):
+    def _validate_window_spacing(self, data: Dict[str, Any]) -> bool:
         """
         Rule 3.2: Window spacing requirements
         - Distance between sliding niches: ≥ 20cm
@@ -489,159 +1082,365 @@ class MamadValidator:
         windows = [e for e in elements if e.get("type") in ["window", "חלון", "חלון הדף"]]
         
         if not windows:
-            return  # Not all segments have windows
+            self._add_requirement_evaluation(
+                "3.2",
+                "not_checked",
+                reason_not_checked="no_windows_detected",
+                notes_he="לא זוהו חלונות בסגמנט ולכן לא נבדקה דרישת ריווח חלון.",
+            )
+            return False  # Not all segments have windows
         
+        checked_any = False
+
         # Check spacing (simplified)
         for window in windows:
+            window_evidence: List[Dict[str, Any]] = [
+                self._evidence_text(
+                    text="חלון זוהה בסגמנט",
+                    element="window",
+                    location=str(window.get("location") or ""),
+                    raw=window,
+                )
+            ]
             # Look for spacing annotations
             text_items = data.get("text_items", [])
-            spacing_found = any("20" in t.get("text", "") or "100" in t.get("text", "") 
-                              for t in text_items)
+            spacing_found = False
+            for t in text_items:
+                txt = str(t.get("text", "") or "")
+                if not txt:
+                    continue
+                txt_lower = txt.lower()
+                # Require explicit mention of window/opening context
+                if ("חלון" not in txt) and ("window" not in txt_lower):
+                    continue
+                # Require explicit unit to avoid matching substrings like "200" -> "20"
+                if re.search(r"(?<!\d)20(?:\.0)?\s*(?:cm|ס\"מ)\b", txt, flags=re.IGNORECASE):
+                    spacing_found = True
+                    window_evidence.append(self._evidence_text(text=txt, element="window_spacing", raw=t))
+                    break
+                if re.search(r"(?<!\d)100(?:\.0)?\s*(?:cm|ס\"מ)\b", txt, flags=re.IGNORECASE):
+                    spacing_found = True
+                    window_evidence.append(self._evidence_text(text=txt, element="window_spacing", raw=t))
+                    break
             
-            if not spacing_found:
-                self.violations.append(Violation(
-                    rule_id="WINDOW_001",
-                    severity=ViolationSeverity.WARNING,
-                    category="חלון",
-                    description_he="מרחקי חלון לא מצוינים",
-                    requirement="מרחק בין נישות: ≥ 20 ס\"מ, בין פתחי אור: ≥ 100 ס\"מ",
-                    found="לא צוין",
-                    location=window.get("location", "")
-                ))
+            if spacing_found:
+                checked_any = True
+                self._add_requirement_evaluation(
+                    "3.2",
+                    "passed",
+                    evidence=window_evidence,
+                    notes_he="נמצאה ראיית ריווח חלון עם יחידות מפורשות (ס\"מ/CM).",
+                )
+            else:
+                # Evidence-first: do not fail on absence; mark not_checked.
+                self._add_requirement_evaluation(
+                    "3.2",
+                    "not_checked",
+                    reason_not_checked="no_window_spacing_annotation",
+                    evidence=window_evidence,
+                    notes_he="לא נמצאו מידות ריווח חלון מפורשות בסגמנט (עם יחידות והקשר לחלון).",
+                )
+
+        return checked_any
     
-    def _validate_rebar_specifications(self, data: Dict[str, Any]):
+    def _validate_rebar_specifications(self, data: Dict[str, Any]) -> bool:
         """
         Rule 6.3: Rebar specifications
         - External rebar: spacing ≤ 20cm
         - Internal rebar: spacing ≤ 10cm
         """
         rebar_details = data.get("rebar_details", [])
-        
         if not rebar_details:
-            self.violations.append(Violation(
-                rule_id="REBAR_001",
-                severity=ViolationSeverity.ERROR,
-                category="זיון",
-                description_he="פרטי זיון לא מצוינים בתוכנית",
-                requirement="זיון חיצוני: פסיעה ≤ 20 ס\"מ, זיון פנימי: ≤ 10 ס\"מ",
-                found="לא צוין"
-            ))
-            return
-        
+            self._add_requirement_evaluation(
+                "6.3",
+                "not_checked",
+                reason_not_checked="no_rebar_details",
+                notes_he="לא נמצאו פרטי זיון בסגמנט ולכן לא ניתן לבדוק פסיעת זיון.",
+            )
+            return False
+
+        evidence: List[Dict[str, Any]] = []
+        has_any_numeric = False
+        has_external = False
+        has_internal = False
+        external_ok = True
+        internal_ok = True
+        external_values: List[float] = []
+        internal_values: List[float] = []
+
         for rebar in rebar_details:
+            if not isinstance(rebar, dict):
+                continue
             spacing_str = rebar.get("spacing", "")
-            spacing_cm = self._extract_dimension_value(spacing_str, "cm")
-            
+            spacing_cm = self._extract_dimension_value(str(spacing_str or ""), "cm")
+            location = str(rebar.get("location", "") or "")
+            location_lower = location.lower()
+
             if spacing_cm is None:
                 continue
-            
-            # Check external rebar spacing
-            if "חיצוני" in rebar.get("location", "") or "external" in rebar.get("location", "").lower():
-                if spacing_cm > 20:
-                    self.violations.append(Violation(
-                        rule_id="REBAR_002",
-                        severity=ViolationSeverity.CRITICAL,
-                        category="זיון",
-                        description_he="פסיעת זיון חיצוני גדולה מדי",
-                        requirement="פסיעה מקסימלית: 20 ס\"מ",
-                        found=f"{spacing_cm} ס\"מ",
-                        location=rebar.get("location", "")
-                    ))
-            
-            # Check internal rebar spacing
-            if "פנימי" in rebar.get("location", "") or "internal" in rebar.get("location", "").lower():
-                if spacing_cm > 10:
-                    self.violations.append(Violation(
-                        rule_id="REBAR_003",
-                        severity=ViolationSeverity.CRITICAL,
-                        category="זיון",
-                        description_he="פסיעת זיון פנימי גדולה מדי",
-                        requirement="פסיעה מקסימלית: 10 ס\"מ",
-                        found=f"{spacing_cm} ס\"מ",
-                        location=rebar.get("location", "")
-                    ))
+
+            has_any_numeric = True
+            evidence.append(
+                self._evidence_dimension(
+                    value=spacing_cm,
+                    unit="cm",
+                    element="rebar_spacing",
+                    location=location,
+                    text=str(spacing_str or ""),
+                    raw=rebar,
+                )
+            )
+
+            is_external = ("חיצוני" in location) or ("external" in location_lower)
+            is_internal = ("פנימי" in location) or ("internal" in location_lower)
+
+            if is_external:
+                has_external = True
+                external_values.append(spacing_cm)
+                if spacing_cm > 20.0:
+                    external_ok = False
+            if is_internal:
+                has_internal = True
+                internal_values.append(spacing_cm)
+                if spacing_cm > 10.0:
+                    internal_ok = False
+
+        if not has_any_numeric:
+            self._add_requirement_evaluation(
+                "6.3",
+                "not_checked",
+                reason_not_checked="no_parseable_rebar_spacing",
+                evidence=evidence,
+                notes_he="נמצאו פרטי זיון אך ללא פסיעות שניתנות לפענוח.",
+            )
+            return False
+
+        # Fail fast if any parsed evidence violates.
+        if (has_external and not external_ok) or (has_internal and not internal_ok):
+            self._add_requirement_evaluation(
+                "6.3",
+                "failed",
+                evidence=evidence
+                + [
+                    self._evidence_dimension(value=20.0, unit="cm", element="required_external_max"),
+                    self._evidence_dimension(value=10.0, unit="cm", element="required_internal_max"),
+                ],
+                notes_he="נמצאה פסיעת זיון שעולה על הערכים המותרים (חיצוני≤20, פנימי≤10 ס\"מ).",
+            )
+            return True
+
+        # For a reliable PASS we prefer to have evidence for both external+internal.
+        if has_external and has_internal and external_ok and internal_ok:
+            self._add_requirement_evaluation(
+                "6.3",
+                "passed",
+                evidence=evidence
+                + [
+                    self._evidence_dimension(value=20.0, unit="cm", element="required_external_max"),
+                    self._evidence_dimension(value=10.0, unit="cm", element="required_internal_max"),
+                ],
+                notes_he="פסיעות הזיון שנמצאו עומדות בדרישות (חיצוני≤20, פנימי≤10 ס\"מ).",
+            )
+            return True
+
+        self._add_requirement_evaluation(
+            "6.3",
+            "not_checked",
+            reason_not_checked="partial_rebar_context",
+            evidence=evidence
+            + [
+                self._evidence_dimension(value=20.0, unit="cm", element="required_external_max"),
+                self._evidence_dimension(value=10.0, unit="cm", element="required_internal_max"),
+            ],
+            notes_he="נמצאו פסיעות זיון אך חסר הקשר ברור האם מדובר גם בזיון פנימי וגם בזיון חיצוני; לא בוצעה הכרעה מלאה.",
+        )
+        return False
     
-    def _validate_concrete_grade(self, data: Dict[str, Any]):
+    def _validate_concrete_grade(self, data: Dict[str, Any]) -> bool:
         """
         Rule 6.1: Concrete grade must be B-30 or higher
         """
         materials = data.get("materials", [])
-        concrete_materials = [m for m in materials if "בטון" in m.get("type", "").lower() 
-                             or "concrete" in m.get("type", "").lower()]
-        
+        if not materials:
+            self._add_requirement_evaluation(
+                "6.1",
+                "not_checked",
+                reason_not_checked="no_materials",
+                notes_he="לא נמצאו מפרטי חומרים בסגמנט ולכן לא ניתן לבדוק דרגת בטון.",
+            )
+            return False
+
+        concrete_materials = [
+            m
+            for m in materials
+            if isinstance(m, dict)
+            and (
+                "בטון" in str(m.get("type", "")).lower()
+                or "concrete" in str(m.get("type", "")).lower()
+            )
+        ]
         if not concrete_materials:
-            self.violations.append(Violation(
-                rule_id="CONCRETE_001",
-                severity=ViolationSeverity.ERROR,
-                category="בטון",
-                description_he="סוג בטון לא מצוין בתוכנית",
-                requirement="בטון ב-30 לפחות",
-                found="לא צוין"
-            ))
-            return
-        
+            self._add_requirement_evaluation(
+                "6.1",
+                "not_checked",
+                reason_not_checked="no_concrete_materials",
+                notes_he="לא נמצאה התייחסות לבטון/דרגת בטון בסגמנט.",
+            )
+            return False
+
+        evidence: List[Dict[str, Any]] = []
+        parsed_grades: List[int] = []
         for concrete in concrete_materials:
-            grade = concrete.get("grade", "")
-            
-            # Check if grade contains B-30 or higher
-            if "ב-30" not in grade and "b-30" not in grade.lower() and "b30" not in grade.lower():
-                # Try to extract numeric grade
-                if "ב-" in grade or "b-" in grade.lower():
-                    self.violations.append(Violation(
-                        rule_id="CONCRETE_002",
-                        severity=ViolationSeverity.WARNING,
-                        category="בטון",
-                        description_he="דרגת בטון לא ברורה",
-                        requirement="בטון ב-30 לפחות",
-                        found=grade,
-                        location=concrete.get("notes", "")
-                    ))
+            grade_raw = str(concrete.get("grade", "") or "")
+            notes = str(concrete.get("notes", "") or "")
+            combined = f"{grade_raw} {notes}".strip()
+            evidence.append(self._evidence_text(text=combined or "בטון", element="concrete_grade", raw=concrete))
+
+            m = re.search(r"(?:b|ב)\s*[-]?\s*(\d+)", combined, flags=re.IGNORECASE)
+            if m:
+                try:
+                    parsed_grades.append(int(m.group(1)))
+                except Exception:
+                    pass
+
+        if not parsed_grades:
+            self._add_requirement_evaluation(
+                "6.1",
+                "not_checked",
+                reason_not_checked="concrete_grade_not_parseable",
+                evidence=evidence,
+                notes_he="נמצא בטון אך דרגת הבטון לא ניתנת לפענוח בבירור.",
+            )
+            return False
+
+        min_grade = min(parsed_grades)
+        if min_grade < 30:
+            self._add_requirement_evaluation(
+                "6.1",
+                "failed",
+                evidence=evidence + [self._evidence_text(text="נדרש B-30 לפחות", element="required_concrete_grade")],
+                notes_he=f"נמצאה דרגת בטון B-{min_grade} נמוכה מהמינימום B-30.",
+            )
+            return True
+
+        self._add_requirement_evaluation(
+            "6.1",
+            "passed",
+            evidence=evidence + [self._evidence_text(text="נדרש B-30 לפחות", element="required_concrete_grade")],
+            notes_he=f"דרגת הבטון שפוענחה (מינימום B-{min_grade}) עומדת בדרישה B-30 לפחות.",
+        )
+        return True
     
-    def _validate_steel_type(self, data: Dict[str, Any]):
+    def _validate_steel_type(self, data: Dict[str, Any]) -> bool:
         """
         Rule 6.2: Steel must be hot-rolled or welded, NOT cold-drawn
         """
         materials = data.get("materials", [])
-        steel_materials = [m for m in materials if "פלדה" in m.get("type", "").lower() 
-                          or "steel" in m.get("type", "").lower()]
-        
+        if not materials:
+            self._add_requirement_evaluation(
+                "6.2",
+                "not_checked",
+                reason_not_checked="no_materials",
+                notes_he="לא נמצאו מפרטי חומרים בסגמנט ולכן לא ניתן לבדוק סוג פלדה.",
+            )
+            return False
+
+        steel_materials = [
+            m
+            for m in materials
+            if isinstance(m, dict)
+            and (
+                "פלדה" in str(m.get("type", "")).lower()
+                or "steel" in str(m.get("type", "")).lower()
+            )
+        ]
+
         if not steel_materials:
-            return  # Not all segments specify steel type
-        
+            self._add_requirement_evaluation(
+                "6.2",
+                "not_checked",
+                reason_not_checked="no_steel_materials",
+                notes_he="לא נמצאה התייחסות לפלדה/סוג פלדה בסגמנט.",
+            )
+            return False
+
+        evidence: List[Dict[str, Any]] = []
+        found_cold_drawn = False
+        found_allowed = False
+
         for steel in steel_materials:
-            spec = steel.get("grade", "") + " " + steel.get("notes", "")
-            
-            # Check for forbidden cold-drawn steel
-            if "משוכה בקור" in spec or "cold-drawn" in spec.lower():
-                self.violations.append(Violation(
-                    rule_id="STEEL_001",
-                    severity=ViolationSeverity.CRITICAL,
-                    category="פלדה",
-                    description_he="שימוש אסור בפלדה משוכה בקור",
-                    requirement="פלדה מעוגלת בחום או רתיך בלבד",
-                    found=spec,
-                    location=steel.get("notes", "")
-                ))
+            grade = str(steel.get("grade", "") or "")
+            notes = str(steel.get("notes", "") or "")
+            spec = f"{grade} {notes}".strip()
+            evidence.append(self._evidence_text(text=spec or "פלדה", element="steel_spec", raw=steel))
+
+            spec_lower = spec.lower()
+            if ("משוכה בקור" in spec) or ("cold-drawn" in spec_lower) or ("cold drawn" in spec_lower):
+                found_cold_drawn = True
+            if ("מעוגלת בחום" in spec) or ("רתיך" in spec) or ("hot-rolled" in spec_lower) or ("hot rolled" in spec_lower) or ("welded" in spec_lower):
+                found_allowed = True
+
+        if found_cold_drawn:
+            self._add_requirement_evaluation(
+                "6.2",
+                "failed",
+                evidence=evidence,
+                notes_he="נמצאה אינדיקציה לפלדה משוכה בקור (אסור לפי דרישה 6.2).",
+            )
+            return True
+
+        if found_allowed:
+            self._add_requirement_evaluation(
+                "6.2",
+                "passed",
+                evidence=evidence,
+                notes_he="נמצאה אינדיקציה לפלדה מותרת (מעוגלת בחום/רתיך) ללא אזכור משוכה בקור.",
+            )
+            return True
+
+        self._add_requirement_evaluation(
+            "6.2",
+            "not_checked",
+            reason_not_checked="steel_type_ambiguous",
+            evidence=evidence,
+            notes_he="נמצאה התייחסות לפלדה אך ללא אינדיקציה ברורה האם היא מעוגלת בחום/רתיך או משוכה בקור.",
+        )
+        return False
     
-    def _validate_ventilation_note(self, data: Dict[str, Any]):
+    def _validate_ventilation_note(self, data: Dict[str, Any]) -> bool:
         """
         Rule 4.2: Must include note about TI 4570 ventilation standard
         """
         text_items = data.get("text_items", [])
         annotations = data.get("annotations", [])
-        
-        all_text = " ".join([t.get("text", "") for t in text_items + annotations])
-        
+        all_text = " ".join([str(t.get("text", "") or "") for t in (text_items + annotations) if isinstance(t, dict)])
+
+        if not all_text.strip():
+            self._add_requirement_evaluation(
+                "4.2",
+                "not_checked",
+                reason_not_checked="no_text",
+                notes_he="לא נמצאה טקסט/הערות בסגמנט ולכן לא ניתן לבדוק הערת אוורור (ת\"י 4570).",
+            )
+            return False
+
         # Check for TI 4570 reference
-        if "4570" not in all_text and "ת\"י 4570" not in all_text:
-            self.violations.append(Violation(
-                rule_id="VENT_001",
-                severity=ViolationSeverity.WARNING,
-                category="אוורור",
-                description_he="חסרה הערה על תקן אוורור וסינון",
-                requirement='חובה לכתוב: "מערכות האוורור והסינון יותקנו בהתאם לת״י 4570"',
-                found="לא נמצא"
-            ))
+        if ("4570" in all_text) or ("ת\"י 4570" in all_text) or ("ת״י 4570" in all_text):
+            self._add_requirement_evaluation(
+                "4.2",
+                "passed",
+                evidence=[self._evidence_text(text="נמצא אזכור לת\"י 4570", element="ti_4570")],
+                notes_he="נמצאה התייחסות לת\"י 4570 בהערות הסגמנט.",
+            )
+            return True
+
+        self._add_requirement_evaluation(
+            "4.2",
+            "failed",
+            evidence=[self._evidence_text(text="לא נמצא אזכור לת\"י 4570", element="ti_4570")],
+            notes_he='חסרה הערה על תקן אוורור וסינון בהתאם לת\"י 4570.',
+        )
+        return True
     
     # =========================================================================
     # Helper Methods

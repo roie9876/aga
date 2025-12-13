@@ -164,7 +164,7 @@ client = CosmosClient(
    - **Format**: Diagrams + detailed component descriptions
 
 3. **`docs/{feature-name}.md`** - Feature-specific deep dives
-   - **When to create**: Major new features (e.g., decomposition-feature.md, dwf-support.md)
+  - **When to create**: Major new features (e.g., decomposition-feature.md, pdf-support.md)
    - **What to include**: Feature overview, architecture, API details, examples
    - **Format**: Tutorial-style with code samples
 

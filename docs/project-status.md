@@ -1,6 +1,6 @@
 # Project Status - Mamad Validation App
 
-**Last Updated**: December 12, 2025  
+**Last Updated**: December 13, 2025  
 **Current Phase**: End-to-End Validation + Coverage Transparency (Testing Phase)  
 **Target Release**: Q1 2026
 
@@ -206,6 +206,20 @@ Building a FastAPI application that validates Israeli Home Front Command shelter
 - [x] **Explainability Fields (Per Segment)**
   - [x] Add deterministic `checked_requirements` and `decision_summary_he` in segment validation payloads
   - [x] Backfill these fields on read for older stored validations
+
+  #### Phase 3.9: Focused Extractors Stability + Multi-Scale Door Context - IN PROGRESS (December 13, 2025)
+  - [x] Restore `src/services/segment_analyzer.py` to a valid, importable state after a syntax-corruption regression
+  - [x] Re-add focused extractors used by segment validation:
+    - [x] `extract_door_spacing` (Requirement 3.1)
+    - [x] `extract_wall_thickness` (Requirements 1.1/1.2)
+    - [x] `extract_room_height` (Requirements 2.1/2.2)
+    - [x] `extract_window_spacing` (Requirement 3.2)
+    - [x] `extract_materials_specs` (Requirements 6.1/6.2)
+    - [x] `extract_rebar_specs` (Requirement 6.3)
+    - [x] `extract_general_notes` (Requirement 4.2)
+  - [x] Add optional “zoom-out context” support for door spacing:
+    - [x] When `full_plan_blob_url` + `segment_bbox` are available, generate a padded context crop and pass BOTH images to the model
+  - [ ] Expand door spacing to true multi-scale ROI selection (context → ROI proposals → re-extract per ROI)
 
 #### Phase 4: Modern UI/UX Design System - COMPLETED ✨
 - [x] **Design System Foundation**

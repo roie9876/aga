@@ -1,8 +1,10 @@
 """Service for analyzing individual plan segments using GPT-5.1."""
 import base64
 import json
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from io import BytesIO
+
+from PIL import Image
 
 from src.azure import get_openai_client, get_blob_client
 from src.config import settings
@@ -73,6 +75,437 @@ class SegmentAnalyzer:
                 "status": "error",
                 "error": str(e)
             }
+
+    def _crop_image_bytes_by_bbox_with_padding(
+        self,
+        *,
+        image_bytes: bytes,
+        bbox: Dict[str, Any],
+        pad_ratio: float,
+    ) -> bytes:
+        """Crop image bytes by bbox (pixels or percentages) with padding.
+
+        `bbox` may be in percent (0-100) or pixels; we treat values >100 as pixels.
+        """
+        x_val = float(bbox.get("x", 0.0))
+        y_val = float(bbox.get("y", 0.0))
+        w_val = float(bbox.get("width", 100.0))
+        h_val = float(bbox.get("height", 100.0))
+
+        use_pixels = any(v > 100.0 for v in [x_val, y_val, w_val, h_val])
+
+        with Image.open(BytesIO(image_bytes)) as img:
+            img_width, img_height = img.size
+            if use_pixels:
+                left = x_val
+                top = y_val
+                right = x_val + w_val
+                bottom = y_val + h_val
+            else:
+                left = (x_val / 100.0) * img_width
+                top = (y_val / 100.0) * img_height
+                right = ((x_val + w_val) / 100.0) * img_width
+                bottom = ((y_val + h_val) / 100.0) * img_height
+
+            pad_x = (right - left) * max(0.0, pad_ratio)
+            pad_y = (bottom - top) * max(0.0, pad_ratio)
+
+            left_i = int(max(0, left - pad_x))
+            top_i = int(max(0, top - pad_y))
+            right_i = int(min(img_width, right + pad_x))
+            bottom_i = int(min(img_height, bottom + pad_y))
+
+            right_i = max(left_i + 1, right_i)
+            bottom_i = max(top_i + 1, bottom_i)
+
+            cropped = img.crop((left_i, top_i, right_i, bottom_i))
+            buf = BytesIO()
+            cropped.save(buf, format="PNG")
+            return buf.getvalue()
+
+    def _build_user_message_with_images(
+        self,
+        *,
+        prompt_text: str,
+        image_bytes_list: List[bytes],
+    ) -> List[Dict[str, Any]]:
+        content: List[Dict[str, Any]] = [{"type": "text", "text": prompt_text}]
+        for img_bytes in image_bytes_list:
+            img_b64 = base64.b64encode(img_bytes).decode("utf-8")
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{img_b64}"},
+                }
+            )
+        return content
+
+    async def _run_focused_extraction(
+        self,
+        *,
+        image_bytes_list: List[bytes],
+        prompt_text: str,
+    ) -> Dict[str, Any]:
+        """Run a focused GPT pass and parse JSON response."""
+        response = self.openai_client.chat_completions_create(
+            model=settings.azure_openai_deployment_name,
+            messages=[
+                {
+                    "role": "user",
+                    "content": self._build_user_message_with_images(
+                        prompt_text=prompt_text,
+                        image_bytes_list=image_bytes_list,
+                    ),
+                }
+            ],
+        )
+        content = response.choices[0].message.content
+        extracted = self._parse_gpt_response(content)
+        if response.usage:
+            extracted["tokens_used"] = response.usage.total_tokens
+        return extracted
+
+    async def extract_door_spacing(
+        self,
+        *,
+        segment_id: str,
+        segment_blob_url: str,
+        segment_type: str,
+        segment_description: str,
+        full_plan_blob_url: Optional[str] = None,
+        segment_bbox: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Focused extractor for Requirement 3.1 (door clearances)."""
+        logger.info("Running focused door-spacing extraction", segment_id=segment_id)
+
+        detail_bytes = await self._download_segment_image(segment_blob_url)
+
+        image_bytes_list: List[bytes] = [detail_bytes]
+        if full_plan_blob_url and isinstance(segment_bbox, dict) and segment_bbox:
+            try:
+                full_plan_bytes = await self._download_segment_image(full_plan_blob_url)
+                context_crop_bytes = self._crop_image_bytes_by_bbox_with_padding(
+                    image_bytes=full_plan_bytes,
+                    bbox=segment_bbox,
+                    pad_ratio=1.0,
+                )
+                image_bytes_list = [context_crop_bytes, detail_bytes]
+            except Exception as e:
+                logger.info(
+                    "Failed to build door-spacing context crop; continuing without context",
+                    segment_id=segment_id,
+                    error=str(e),
+                )
+
+        prompt_text = f"""You are a strict extractor for Israeli ממ"ד requirements.
+Return ONLY valid JSON. No markdown. No explanations.
+
+Task: Extract door-to-perpendicular-wall clearances for Requirement 3.1.
+
+Input:
+- Segment Type: {segment_type}
+- Description: {segment_description}
+
+If TWO images are provided:
+- Image #1 is a zoomed-out CONTEXT crop (helps infer inside/outside of the ממ"ד).
+- Image #2 is the zoomed-in DETAIL crop (use this to read dimensions precisely).
+If only ONE image is provided, it is the DETAIL.
+
+Return JSON with this shape:
+{{
+  "door_spacing_focus": {{
+    "doors": [
+      {{
+        "internal_clearance_cm": 0.0,
+        "external_clearance_cm": 0.0,
+        "confidence": 0.0,
+        "location": "short description",
+        "evidence": ["short evidence strings of what you saw (dimension text / arrows / labels)"]
+      }}
+    ],
+    "door_inside_outside_hint": "optional hebrew hint"
+  }},
+  "door_roi": {{"x": 0.0, "y": 0.0, "width": 0.0, "height": 0.0, "confidence": 0.0, "notes": "brief"}}
+}}
+
+Rules:
+- Units: if not specified in the drawing, assume centimeters (cm).
+- If you cannot find clearances, still return one door object with null values and confidence < 0.5 and explain in evidence.
+- ROI coords are PERCENT (0-100) relative to the DETAIL image."""
+
+        extracted = await self._run_focused_extraction(
+            image_bytes_list=image_bytes_list,
+            prompt_text=prompt_text,
+        )
+        if not isinstance(extracted, dict):
+            return {"door_spacing_focus": {"doors": []}}
+
+        return {
+            "door_spacing_focus": extracted.get("door_spacing_focus"),
+            "door_roi": extracted.get("door_roi"),
+        }
+
+    async def extract_wall_thickness(
+        self,
+        *,
+        segment_id: str,
+        segment_blob_url: str,
+        segment_type: str,
+        segment_description: str,
+    ) -> Dict[str, Any]:
+        """Focused extractor for wall thickness (Requirement 1.2)."""
+        logger.info("Running focused wall-thickness extraction", segment_id=segment_id)
+        image_bytes = await self._download_segment_image(segment_blob_url)
+
+        prompt_text = f"""Return ONLY valid JSON.
+
+Extract wall thickness measurements from this segment.
+
+Segment Type: {segment_type}
+Description: {segment_description}
+
+Return JSON:
+{{
+  "wall_thickness_focus": {{
+    "walls": [
+      {{
+        "thickness_cm": 0.0,
+        "confidence": 0.0,
+        "location": "short description",
+        "evidence": ["evidence strings"]
+      }}
+    ]
+  }},
+  "wall_roi": {{"x": 0.0, "y": 0.0, "width": 0.0, "height": 0.0, "confidence": 0.0, "notes": "brief"}}
+}}
+
+Rules:
+- If units are absent, assume cm.
+- If unsure, include best candidates with confidence < 0.7."""
+
+        extracted = await self._run_focused_extraction(
+            image_bytes_list=[image_bytes],
+            prompt_text=prompt_text,
+        )
+        if not isinstance(extracted, dict):
+            return {"wall_thickness_focus": {"walls": []}}
+        return {
+            "wall_thickness_focus": extracted.get("wall_thickness_focus"),
+            "wall_roi": extracted.get("wall_roi"),
+        }
+
+    async def extract_room_height(
+        self,
+        *,
+        segment_id: str,
+        segment_blob_url: str,
+        segment_type: str,
+        segment_description: str,
+    ) -> Dict[str, Any]:
+        """Focused extractor for room height (Requirements 2.1/2.2)."""
+        logger.info("Running focused room-height extraction", segment_id=segment_id)
+        image_bytes = await self._download_segment_image(segment_blob_url)
+
+        prompt_text = f"""Return ONLY valid JSON.
+
+Extract room/ceiling height measurements relevant to a ממ"ד.
+
+Segment Type: {segment_type}
+Description: {segment_description}
+
+Return JSON:
+{{
+  "room_height_focus": {{
+    "heights": [
+      {{
+        "height_m": 0.0,
+        "confidence": 0.0,
+        "location": "short description",
+        "evidence": ["evidence strings"]
+      }}
+    ]
+  }},
+  "height_roi": {{"x": 0.0, "y": 0.0, "width": 0.0, "height": 0.0, "confidence": 0.0, "notes": "brief"}}
+}}
+
+Rules:
+- Convert cm to meters if needed.
+- If uncertain, include best candidates with lower confidence."""
+
+        extracted = await self._run_focused_extraction(
+            image_bytes_list=[image_bytes],
+            prompt_text=prompt_text,
+        )
+        if not isinstance(extracted, dict):
+            return {"room_height_focus": {"heights": []}}
+        return {
+            "room_height_focus": extracted.get("room_height_focus"),
+            "height_roi": extracted.get("height_roi"),
+        }
+
+    async def extract_window_spacing(
+        self,
+        *,
+        segment_id: str,
+        segment_blob_url: str,
+        segment_type: str,
+        segment_description: str,
+    ) -> Dict[str, Any]:
+        """Focused extractor for window spacing (Requirement 3.2)."""
+        logger.info("Running focused window-spacing extraction", segment_id=segment_id)
+        image_bytes = await self._download_segment_image(segment_blob_url)
+
+        prompt_text = f"""Return ONLY valid JSON.
+
+Extract evidence about window spacing / setbacks relevant to Requirement 3.2.
+If exact numeric values are unclear, extract the best evidence strings.
+
+Segment Type: {segment_type}
+Description: {segment_description}
+
+Return JSON:
+{{
+  "window_spacing_focus": {{
+    "evidence_texts": ["..."],
+    "confidence": 0.0,
+    "notes": "brief"
+  }},
+  "window_roi": {{"x": 0.0, "y": 0.0, "width": 0.0, "height": 0.0, "confidence": 0.0, "notes": "brief"}}
+}}"""
+
+        extracted = await self._run_focused_extraction(
+            image_bytes_list=[image_bytes],
+            prompt_text=prompt_text,
+        )
+        if not isinstance(extracted, dict):
+            return {"window_spacing_focus": {"evidence_texts": []}}
+        return {
+            "window_spacing_focus": extracted.get("window_spacing_focus"),
+            "window_roi": extracted.get("window_roi"),
+        }
+
+    async def extract_materials_specs(
+        self,
+        *,
+        segment_id: str,
+        segment_blob_url: str,
+        segment_type: str,
+        segment_description: str,
+    ) -> Dict[str, Any]:
+        """Focused extractor for materials specs (Requirements 6.1/6.2)."""
+        logger.info("Running focused materials extraction", segment_id=segment_id)
+        image_bytes = await self._download_segment_image(segment_blob_url)
+
+        prompt_text = f"""Return ONLY valid JSON.
+
+Extract materials specifications relevant to a ממ"ד (e.g., concrete grade, steel grade, notes).
+
+Segment Type: {segment_type}
+Description: {segment_description}
+
+Return JSON:
+{{
+  "materials_focus": {{
+    "materials": [
+      {{"type": "concrete|steel|other", "grade": "...", "notes": "...", "confidence": 0.0, "evidence": ["..."]}}
+    ]
+  }},
+  "materials_roi": {{"x": 0.0, "y": 0.0, "width": 0.0, "height": 0.0, "confidence": 0.0, "notes": "brief"}}
+}}"""
+
+        extracted = await self._run_focused_extraction(
+            image_bytes_list=[image_bytes],
+            prompt_text=prompt_text,
+        )
+        if not isinstance(extracted, dict):
+            return {"materials_focus": {"materials": []}}
+        return {
+            "materials_focus": extracted.get("materials_focus"),
+            "materials_roi": extracted.get("materials_roi"),
+        }
+
+    async def extract_rebar_specs(
+        self,
+        *,
+        segment_id: str,
+        segment_blob_url: str,
+        segment_type: str,
+        segment_description: str,
+    ) -> Dict[str, Any]:
+        """Focused extractor for rebar specs (Requirement 6.3)."""
+        logger.info("Running focused rebar extraction", segment_id=segment_id)
+        image_bytes = await self._download_segment_image(segment_blob_url)
+
+        prompt_text = f"""Return ONLY valid JSON.
+
+Extract rebar / reinforcement spacing details relevant to a ממ"ד.
+
+Segment Type: {segment_type}
+Description: {segment_description}
+
+Return JSON:
+{{
+  "rebar_focus": {{
+    "rebars": [
+      {{"spacing_cm": 0.0, "location": "...", "confidence": 0.0, "evidence": ["..."]}}
+    ]
+  }},
+  "rebar_roi": {{"x": 0.0, "y": 0.0, "width": 0.0, "height": 0.0, "confidence": 0.0, "notes": "brief"}}
+}}"""
+
+        extracted = await self._run_focused_extraction(
+            image_bytes_list=[image_bytes],
+            prompt_text=prompt_text,
+        )
+        if not isinstance(extracted, dict):
+            return {"rebar_focus": {"rebars": []}}
+        return {
+            "rebar_focus": extracted.get("rebar_focus"),
+            "rebar_roi": extracted.get("rebar_roi"),
+        }
+
+    async def extract_general_notes(
+        self,
+        *,
+        segment_id: str,
+        segment_blob_url: str,
+        segment_type: str,
+        segment_description: str,
+    ) -> Dict[str, Any]:
+        """Focused extractor for general notes (e.g., Requirement 4.2).
+
+        This is intentionally shallow: it extracts key evidence strings.
+        """
+        logger.info("Running focused notes extraction", segment_id=segment_id)
+        image_bytes = await self._download_segment_image(segment_blob_url)
+
+        prompt_text = f"""Return ONLY valid JSON.
+
+Extract general notes / annotations that might be relevant to ממ"ד compliance.
+
+Segment Type: {segment_type}
+Description: {segment_description}
+
+Return JSON:
+{{
+  "notes_focus": {{
+    "evidence_texts": ["..."],
+    "confidence": 0.0,
+    "notes": "brief"
+  }},
+  "notes_roi": {{"x": 0.0, "y": 0.0, "width": 0.0, "height": 0.0, "confidence": 0.0, "notes": "brief"}}
+}}"""
+
+        extracted = await self._run_focused_extraction(
+            image_bytes_list=[image_bytes],
+            prompt_text=prompt_text,
+        )
+        if not isinstance(extracted, dict):
+            return {"notes_focus": {"evidence_texts": []}}
+        return {
+            "notes_focus": extracted.get("notes_focus"),
+            "notes_roi": extracted.get("notes_roi"),
+        }
     
     async def _download_segment_image(self, blob_url: str) -> bytes:
         """Download segment image from blob storage.

@@ -25,6 +25,14 @@ from src.models.decomposition import (
     ApprovalRequest,
 )
 
+from src.models.evidence import (
+    EvidenceType,
+    EvidenceBoundingBox,
+    EvidenceItem,
+    RequirementEvaluationStatus,
+    RequirementEvaluation,
+)
+
 __all__ = [
     "ValidationSeverity",
     "ValidationStatus",
@@ -48,4 +56,11 @@ __all__ = [
     "DecompositionResponse",
     "SegmentUpdateRequest",
     "ApprovalRequest",
+
+    # Evidence-first models (segment validation)
+    "EvidenceType",
+    "EvidenceBoundingBox",
+    "EvidenceItem",
+    "RequirementEvaluationStatus",
+    "RequirementEvaluation",
 ]
