@@ -4,6 +4,8 @@ import tempfile
 import os
 from datetime import datetime
 from pathlib import Path
+from io import BytesIO
+import anyio
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 from typing import Optional
 
@@ -11,14 +13,18 @@ from src.models.decomposition import (
     PlanDecomposition,
     DecompositionResponse,
     DecompositionStatus,
+    ProcessingStats,
+    ProjectMetadata,
     SegmentUpdateRequest,
     ApprovalRequest,
     AddManualSegmentsRequest,
+    AnalyzeSegmentsRequest,
     PlanSegment,
     SegmentType,
     BoundingBox,
     ManualRoi,
 )
+from src.services.segment_analyzer import SegmentAnalyzer
 from src.services.plan_decomposition import get_decomposition_service
 from src.azure import get_cosmos_client
 from src.azure.blob_client import get_blob_client
@@ -107,28 +113,41 @@ async def decompose_plan(
         
         logger.info("Temp file created", path=temp_image_path)
         
-        # Decompose plan
-        decomposition_service = get_decomposition_service()
-        decomposition = decomposition_service.decompose_plan(
+        # Manual-only mode: do NOT run automatic segmentation.
+        # We only upload the full plan and let the user define ROIs manually.
+        from PIL import Image
+
+        with Image.open(BytesIO(plan_image_bytes)) as img:
+            actual_width, actual_height = img.size
+
+        decomp_id = f"decomp-{uuid.uuid4()}"
+        decomposition = PlanDecomposition(
+            id=decomp_id,
             validation_id=validation_id,
             project_id=project_id,
-            plan_image_bytes=plan_image_bytes,
-            file_size_mb=file_size_mb
+            status=DecompositionStatus.REVIEW_NEEDED,
+            full_plan_url=f"https://placeholder.blob.core.windows.net/{validation_id}/full_plan.png",
+            full_plan_width=actual_width,
+            full_plan_height=actual_height,
+            file_size_mb=file_size_mb,
+            metadata=ProjectMetadata(),
+            segments=[],
+            processing_stats=ProcessingStats(
+                total_segments=0,
+                processing_time_seconds=0.0,
+                llm_tokens_used=0,
+            ),
         )
-
-        # If the service returned a FAILED decomposition, surface it as an HTTP error
-        if decomposition.error_message or decomposition.status == DecompositionStatus.FAILED:
-            raise HTTPException(
-                status_code=500,
-                detail=f"שגיאה בפירוק התוכנית: {decomposition.error_message or 'Unknown error'}",
-            )
         
-        # Crop and upload segments
-        logger.info("Cropping and uploading segments",
-                   decomposition_id=decomposition.id)
+        # Upload full plan (no segments to crop)
+        decomposition_service = get_decomposition_service()
+        logger.info(
+            "Uploading full plan (manual ROI mode)",
+            decomposition_id=decomposition.id,
+        )
         decomposition = await decomposition_service.crop_and_upload_segments(
             decomposition=decomposition,
-            plan_image_path=temp_image_path
+            plan_image_path=temp_image_path,
         )
         
         # Cleanup temp file
@@ -150,15 +169,17 @@ async def decompose_plan(
         
         await cosmos_client.create_item(decomp_dict)
         
-        logger.info("Decomposition saved successfully",
-                   decomposition_id=decomposition.id,
-                   segments_count=len(decomposition.segments))
+        logger.info(
+            "Decomposition saved successfully (manual ROI mode)",
+            decomposition_id=decomposition.id,
+            segments_count=len(decomposition.segments),
+        )
         
         return DecompositionResponse(
             decomposition_id=decomposition.id,
             status=decomposition.status,
             estimated_time_seconds=60,
-            message=f"פירוק התוכנית הושלם בהצלחה. זוהו {len(decomposition.segments)} סגמנטים."
+            message="התוכנית נטענה בהצלחה. בחר אזורים ידנית על גבי התוכנית כדי ליצור סגמנטים לבדיקה."
         )
 
     except HTTPException:
@@ -230,6 +251,96 @@ async def get_decomposition(decomposition_id: str):
         raise HTTPException(
             status_code=500,
             detail=f"שגיאה בטעינת הפירוק: {str(e)}"
+        )
+
+
+@router.post("/{decomposition_id}/segments/analyze", response_model=PlanDecomposition)
+async def analyze_decomposition_segments(
+    decomposition_id: str,
+    request: AnalyzeSegmentsRequest,
+):
+    """Analyze/classify selected segments right after decomposition.
+
+    This runs GPT analysis per segment (classification + extraction) and stores the
+    resulting payload on each segment under `analysis_data` for UI transparency.
+
+    Note: This does NOT run compliance validation.
+    """
+
+    logger.info(
+        "Analyzing decomposition segments",
+        decomposition_id=decomposition_id,
+        segment_count=len(request.segment_ids),
+    )
+
+    try:
+        cosmos_client = get_cosmos_client()
+
+        query = """
+            SELECT * FROM c
+            WHERE c.id = @decomposition_id
+            AND c.type = 'decomposition'
+        """
+
+        items = await cosmos_client.query_items(
+            query=query,
+            parameters=[{"name": "@decomposition_id", "value": decomposition_id}],
+        )
+
+        if not items:
+            raise HTTPException(status_code=404, detail="פירוק לא נמצא")
+
+        decomp_data = items[0]
+        analyzer = SegmentAnalyzer()
+        segment_ids = set(request.segment_ids)
+
+        updated = 0
+        for seg_doc in decomp_data.get("segments", []):
+            seg_id = seg_doc.get("segment_id")
+            if not seg_id or seg_id not in segment_ids:
+                continue
+
+            result = await analyzer.analyze_segment(
+                segment_id=seg_id,
+                segment_blob_url=seg_doc.get("blob_url", ""),
+                segment_type=str(seg_doc.get("type", "unknown")),
+                segment_description=seg_doc.get("description", ""),
+            )
+
+            if result.get("status") == "analyzed" and result.get("analysis_data"):
+                seg_doc["analysis_data"] = result.get("analysis_data")
+                updated += 1
+            else:
+                seg_doc["analysis_data"] = {
+                    "status": "error",
+                    "error": result.get("error") or "Analysis failed",
+                }
+
+        decomp_data["updated_at"] = datetime.utcnow().isoformat()
+        if updated > 0:
+            decomp_data["status"] = DecompositionStatus.REVIEW_NEEDED.value
+
+        await cosmos_client.upsert_item(decomp_data)
+
+        logger.info(
+            "Segment analysis stored",
+            decomposition_id=decomposition_id,
+            updated_segments=updated,
+        )
+
+        return decomp_data
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(
+            "Failed to analyze decomposition segments",
+            decomposition_id=decomposition_id,
+            error=str(e),
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"שגיאה בניתוח סגמנטים: {str(e)}",
         )
 
 
@@ -413,7 +524,8 @@ async def add_manual_segments(
         blob_client = get_blob_client()
         full_plan_blob_name = f"{validation_id}/full_plan.png"
         try:
-            full_plan_bytes = await blob_client.download_blob(full_plan_blob_name)
+            with anyio.fail_after(60):
+                full_plan_bytes = await blob_client.download_blob(full_plan_blob_name)
         except Exception as e:
             logger.error(
                 "Failed to download full plan for manual cropping",
@@ -429,26 +541,45 @@ async def add_manual_segments(
             f.write(full_plan_bytes)
 
         try:
-            decomposition_service = get_decomposition_service()
+            # Lightweight crop/upload for manual ROIs: no OpenCV refinement and no full-plan re-upload.
+            cropper = get_image_cropper()
 
-            manual_decomposition = PlanDecomposition(
-                id=decomposition.id,
-                validation_id=decomposition.validation_id,
-                project_id=decomposition.project_id,
-                status=decomposition.status,
-                full_plan_url=decomposition.full_plan_url,
-                full_plan_width=decomposition.full_plan_width,
-                full_plan_height=decomposition.full_plan_height,
-                file_size_mb=decomposition.file_size_mb,
-                metadata=decomposition.metadata,
-                segments=new_segments,
-                processing_stats=decomposition.processing_stats,
-            )
+            for seg in new_segments:
+                bbox = seg.bounding_box
+                w = float(bbox.width)
+                h = float(bbox.height)
 
-            manual_decomposition = await decomposition_service.crop_and_upload_segments(
-                decomposition=manual_decomposition,
-                plan_image_path=temp_image_path,
-            )
+                pad = float(max(4.0, min(40.0, min(w, h) * 0.02)))
+                crop_bbox = {
+                    "x": max(0.0, float(bbox.x) - pad),
+                    "y": max(0.0, float(bbox.y) - pad),
+                    "width": min(float(decomposition.full_plan_width) - max(0.0, float(bbox.x) - pad), w + 2 * pad),
+                    "height": min(float(decomposition.full_plan_height) - max(0.0, float(bbox.y) - pad), h + 2 * pad),
+                }
+
+                cropped_buffer, thumb_buffer = cropper.crop_and_create_thumbnail(
+                    image_path=temp_image_path,
+                    bounding_box=crop_bbox,
+                )
+
+                segment_blob = f"{validation_id}/segments/{seg.segment_id}.png"
+                with anyio.fail_after(60):
+                    segment_url = await blob_client.upload_blob(
+                        blob_name=segment_blob,
+                        data=cropped_buffer,
+                        overwrite=True,
+                    )
+
+                thumb_blob = f"{validation_id}/segments/{seg.segment_id}_thumb.png"
+                with anyio.fail_after(60):
+                    thumb_url = await blob_client.upload_blob(
+                        blob_name=thumb_blob,
+                        data=thumb_buffer,
+                        overwrite=True,
+                    )
+
+                seg.blob_url = segment_url
+                seg.thumbnail_url = thumb_url
         finally:
             try:
                 os.remove(temp_image_path)
@@ -457,10 +588,9 @@ async def add_manual_segments(
                 pass
 
         # Append new segments to existing decomposition document
-        decomp_data["full_plan_url"] = manual_decomposition.full_plan_url
 
         appended = 0
-        for seg in manual_decomposition.segments:
+        for seg in new_segments:
             decomp_data.setdefault("segments", []).append(seg.model_dump(mode="json"))
             appended += 1
 
@@ -573,7 +703,8 @@ async def update_segment_bbox(
         blob_client = get_blob_client()
         full_plan_blob_name = f"{validation_id}/full_plan.png"
         try:
-            full_plan_bytes = await blob_client.download_blob(full_plan_blob_name)
+            with anyio.fail_after(60):
+                full_plan_bytes = await blob_client.download_blob(full_plan_blob_name)
         except Exception as e:
             logger.error(
                 "Failed to download full plan for bbox update",
@@ -607,18 +738,20 @@ async def update_segment_bbox(
 
             # Overwrite blob + thumb
             segment_blob = f"{validation_id}/segments/{segment_id}.png"
-            segment_url = await blob_client.upload_blob(
-                blob_name=segment_blob,
-                data=cropped_buffer,
-                overwrite=True,
-            )
+            with anyio.fail_after(60):
+                segment_url = await blob_client.upload_blob(
+                    blob_name=segment_blob,
+                    data=cropped_buffer,
+                    overwrite=True,
+                )
 
             thumb_blob = f"{validation_id}/segments/{segment_id}_thumb.png"
-            thumb_url = await blob_client.upload_blob(
-                blob_name=thumb_blob,
-                data=thumb_buffer,
-                overwrite=True,
-            )
+            with anyio.fail_after(60):
+                thumb_url = await blob_client.upload_blob(
+                    blob_name=thumb_blob,
+                    data=thumb_buffer,
+                    overwrite=True,
+                )
         finally:
             try:
                 os.remove(temp_image_path)

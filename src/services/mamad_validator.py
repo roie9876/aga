@@ -170,6 +170,12 @@ class MamadValidator:
             "violations": [self._violation_to_dict(v) for v in self.violations],
             "checked_requirements": checked_requirements,
             "decision_summary_he": decision_summary_he,
+            "debug": {
+                "categories_used": categories,
+                "validators_run": [fn.__name__ for fn in validations_to_run],
+                "primary_category": primary_category,
+                "relevant_requirements": relevant_requirements,
+            },
         }
     
     def _violation_to_dict(self, v: Violation) -> Dict[str, Any]:

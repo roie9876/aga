@@ -1,6 +1,7 @@
 """Azure Blob Storage client wrapper with Entra ID authentication."""
 from typing import Optional, BinaryIO
 from datetime import datetime, timedelta
+import anyio
 from azure.identity import DefaultAzureCredential
 from azure.storage.blob import BlobServiceClient, BlobClient, generate_blob_sas, BlobSasPermissions
 from azure.core.exceptions import ResourceNotFoundError, AzureError
@@ -69,11 +70,13 @@ class BlobStorageClient:
                 container=container,
                 blob=blob_name
             )
-            
-            blob_client.upload_blob(data, overwrite=overwrite)
-            
-            # Generate SAS URL for read access (24 hours)
-            blob_url = self.generate_sas_url(blob_name, container_name=container, expiry_hours=24)
+
+            def _upload_and_generate_url() -> str:
+                blob_client.upload_blob(data, overwrite=overwrite)
+                return self.generate_sas_url(blob_name, container_name=container, expiry_hours=24)
+
+            # Azure SDK is sync; run it off the event loop.
+            blob_url = await anyio.to_thread.run_sync(_upload_and_generate_url)
             logger.info("Blob uploaded successfully", blob_url=blob_url[:100] + "...")
             
             return blob_url
@@ -109,8 +112,12 @@ class BlobStorageClient:
                 container=container,
                 blob=blob_name
             )
-            
-            blob_data = blob_client.download_blob().readall()
+
+            def _download_all() -> bytes:
+                return blob_client.download_blob().readall()
+
+            # Azure SDK is sync; run it off the event loop.
+            blob_data = await anyio.to_thread.run_sync(_download_all)
             
             logger.info("Blob downloaded successfully", blob_name=blob_name, 
                        size_bytes=len(blob_data))
@@ -147,8 +154,12 @@ class BlobStorageClient:
                 container=container,
                 blob=blob_name
             )
-            
-            blob_client.delete_blob()
+
+            def _delete() -> None:
+                blob_client.delete_blob()
+
+            # Azure SDK is sync; run it off the event loop.
+            await anyio.to_thread.run_sync(_delete)
             
             logger.info("Blob deleted successfully", blob_name=blob_name)
             return True

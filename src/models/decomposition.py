@@ -47,6 +47,10 @@ class PlanSegment(BaseModel):
     thumbnail_url: str = Field(..., description="Azure Blob URL for thumbnail")
     confidence: float = Field(..., ge=0, le=1, description="GPT confidence score")
     llm_reasoning: Optional[str] = Field(None, description="GPT's reasoning for classification")
+    analysis_data: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Optional analysis payload produced by segment classification/extraction (stored for UI transparency)",
+    )
     approved_by_user: bool = Field(False, description="User approved this segment")
     used_in_checks: List[str] = Field(default_factory=list, description="Validation checks that used this segment")
     created_at: datetime = Field(default_factory=datetime.utcnow)
@@ -185,3 +189,9 @@ class AddManualSegmentsRequest(BaseModel):
     """Request to append manual ROI segments to an existing decomposition."""
 
     rois: List[ManualRoi] = Field(..., min_length=1, description="List of ROIs to append")
+
+
+class AnalyzeSegmentsRequest(BaseModel):
+    """Request to analyze/classify one or more segments (no validation yet)."""
+
+    segment_ids: List[str] = Field(..., min_length=1, description="Segment IDs to analyze")

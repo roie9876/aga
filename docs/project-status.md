@@ -567,6 +567,7 @@ Coverage Report (NEW - Tracks 16 implemented checks)
 | **2025-12-11** | Redesigned App.tsx with professional SaaS aesthetic | System |
 | **2025-12-11** | Enhanced CSS with animations, shadows, and utilities | System |
 | **2025-12-11** | **Production-ready UI matching Linear/Vercel quality** | System |
+| **2025-12-13** | Disabled automatic segmentation (manual ROI workflow) + moved Blob SDK calls off event loop to prevent ROI-save hangs | Copilot |
 
 
 

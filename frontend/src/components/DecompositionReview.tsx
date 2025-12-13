@@ -27,23 +27,134 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
   const [expandedSegments, setExpandedSegments] = useState<Set<string>>(new Set());
 
   const planImgRef = useRef<HTMLImageElement | null>(null);
+  const roiInFlightRef = useRef(false);
   const [isDrawing, setIsDrawing] = useState(false);
   const [drawStart, setDrawStart] = useState<{ x: number; y: number } | null>(null);
   const [drawCurrent, setDrawCurrent] = useState<{ x: number; y: number } | null>(null);
   const [savingManual, setSavingManual] = useState(false);
   const [editingSegmentId, setEditingSegmentId] = useState<string | null>(null);
+  const [roiQueue, setRoiQueue] = useState<
+    Array<{
+      kind: 'add' | 'update';
+      segmentId?: string;
+      roi: { x: number; y: number; width: number; height: number };
+    }>
+  >([]);
+  const [analyzingSegments, setAnalyzingSegments] = useState(false);
+
+  const fetchWithTimeout = async (
+    url: string,
+    options: RequestInit,
+    timeoutMs: number
+  ): Promise<Response> => {
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetch(url, { ...options, signal: controller.signal });
+    } finally {
+      window.clearTimeout(timeoutId);
+    }
+  };
+
+  const refreshDecompositionSilently = async () => {
+    try {
+      const response = await fetchWithTimeout(
+        `/api/v1/decomposition/${decompositionId}`,
+        { method: 'GET' },
+        30_000
+      );
+      if (!response.ok) return;
+      const data: PlanDecomposition = await response.json();
+      setDecomposition(data);
+    } catch {
+      // best-effort refresh
+    }
+  };
 
   useEffect(() => {
     loadDecomposition();
   }, [decompositionId]);
 
+  // Process manual ROI operations sequentially (so drawing is not blocked by network latency)
+  useEffect(() => {
+    if (roiInFlightRef.current) return;
+    if (roiQueue.length === 0) return;
+
+    const next = roiQueue[0];
+    let isCancelled = false;
+
+    const run = async () => {
+      try {
+        roiInFlightRef.current = true;
+        setSavingManual(true);
+        setError(null);
+
+        const url =
+          next.kind === 'add'
+            ? `/api/v1/decomposition/${decompositionId}/manual-segments`
+            : `/api/v1/decomposition/${decompositionId}/segments/${next.segmentId}/bbox`;
+
+        const body =
+          next.kind === 'add'
+            ? JSON.stringify({ rois: [next.roi] })
+            : JSON.stringify(next.roi);
+
+        const response = await fetchWithTimeout(
+          url,
+          {
+            method: next.kind === 'add' ? 'POST' : 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body,
+          },
+          90_000
+        );
+
+        if (!response.ok) {
+          const details = await response.text().catch(() => '');
+          const prefix = next.kind === 'add' ? 'Failed to add manual segment' : 'Failed to update manual segment';
+          throw new Error(details ? `${prefix}: ${details}` : prefix);
+        }
+
+        const data: PlanDecomposition = await response.json();
+        if (!isCancelled) setDecomposition(data);
+
+        // Ensure UI reflects persisted state (and not a stale response cache)
+        if (!isCancelled) {
+          void refreshDecompositionSilently();
+        }
+      } catch (err) {
+        if (!isCancelled) {
+          const message = err instanceof Error ? err.message : 'שגיאה בבחירה ידנית';
+          setError(message);
+        }
+      } finally {
+        roiInFlightRef.current = false;
+        if (!isCancelled) setSavingManual(false);
+        // Always advance the queue; otherwise a single failing ROI blocks all subsequent ROIs.
+        setRoiQueue((q) => q.slice(1));
+      }
+    };
+
+    run();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [roiQueue, decompositionId]);
+
   const loadDecomposition = async () => {
     try {
       setLoading(true);
-      const response = await fetch(`/api/v1/decomposition/${decompositionId}`);
+      setError(null);
+      const response = await fetchWithTimeout(
+        `/api/v1/decomposition/${decompositionId}`,
+        { method: 'GET' },
+        30_000
+      );
       
       if (!response.ok) {
-        throw new Error('Failed to load decomposition');
+        const details = await response.text().catch(() => '');
+        throw new Error(details ? `Failed to load decomposition: ${details}` : 'Failed to load decomposition');
       }
 
       const data: PlanDecomposition = await response.json();
@@ -51,9 +162,14 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
       
       // Auto-approve segments with high confidence
       const highConfidenceSegments = data.segments.filter(s => s.confidence >= 0.85);
-      highConfidenceSegments.forEach(s => {
-        updateSegmentApproval(s.segment_id, true);
-      });
+      if (highConfidenceSegments.length > 0) {
+        setDecomposition({
+          ...data,
+          segments: data.segments.map((s) =>
+            s.confidence >= 0.85 ? { ...s, approved_by_user: true } : s
+          ),
+        });
+      }
       
     } catch (err) {
       setError(err instanceof Error ? err.message : 'שגיאה בטעינת הפירוק');
@@ -164,54 +280,16 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
     };
   };
 
-  const addManualRoi = async (roi: { x: number; y: number; width: number; height: number }) => {
-    try {
-      setSavingManual(true);
-      const response = await fetch(`/api/v1/decomposition/${decompositionId}/manual-segments`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ rois: [roi] }),
-      });
-
-      if (!response.ok) {
-        throw new Error('Failed to add manual segment');
-      }
-
-      const data: PlanDecomposition = await response.json();
-      setDecomposition(data);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'שגיאה בהוספת אזור ידני');
-    } finally {
-      setSavingManual(false);
-    }
+  const enqueueManualRoiAdd = (roi: { x: number; y: number; width: number; height: number }) => {
+    setRoiQueue((q) => [...q, { kind: 'add', roi }]);
   };
 
-  const updateManualRoi = async (segmentId: string, roi: { x: number; y: number; width: number; height: number }) => {
-    try {
-      setSavingManual(true);
-      const response = await fetch(`/api/v1/decomposition/${decompositionId}/segments/${segmentId}/bbox`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(roi),
-      });
-
-      if (!response.ok) {
-        throw new Error('Failed to update manual segment');
-      }
-
-      const data: PlanDecomposition = await response.json();
-      setDecomposition(data);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'שגיאה בעדכון אזור ידני');
-    } finally {
-      setSavingManual(false);
-      setEditingSegmentId(null);
-    }
+  const enqueueManualRoiUpdate = (segmentId: string, roi: { x: number; y: number; width: number; height: number }) => {
+    setRoiQueue((q) => [...q, { kind: 'update', segmentId, roi }]);
   };
 
   const handlePlanPointerDown = (e: React.PointerEvent) => {
     if (validationMode !== 'segments') return;
-    if (savingManual) return;
     const p = getRelativePoint(e);
     if (!p) return;
     e.preventDefault();
@@ -246,14 +324,53 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
     setDrawCurrent(null);
 
     // Ignore tiny drags
-    if (w < 0.01 || h < 0.01) return;
-
-    if (editingSegmentId) {
-      await updateManualRoi(editingSegmentId, { x: x1, y: y1, width: w, height: h });
+    if (w < 0.003 || h < 0.003) {
+      setError('הבחירה קטנה מדי — נסה לבחור אזור גדול יותר');
       return;
     }
 
-    await addManualRoi({ x: x1, y: y1, width: w, height: h });
+    if (editingSegmentId) {
+      enqueueManualRoiUpdate(editingSegmentId, { x: x1, y: y1, width: w, height: h });
+      setEditingSegmentId(null);
+      return;
+    }
+
+    enqueueManualRoiAdd({ x: x1, y: y1, width: w, height: h });
+  };
+
+  const analyzeSelectedSegments = async () => {
+    if (!decomposition) return;
+    const segmentIds = decomposition.segments.filter(s => s.approved_by_user).map(s => s.segment_id);
+    if (segmentIds.length === 0) {
+      setError('אנא בחר לפחות סגמנט אחד לסיווג');
+      return;
+    }
+
+    try {
+      setAnalyzingSegments(true);
+      setError(null);
+      const response = await fetchWithTimeout(
+        `/api/v1/decomposition/${decompositionId}/segments/analyze`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ segment_ids: segmentIds }),
+        },
+        120_000
+      );
+
+      if (!response.ok) {
+        const details = await response.text().catch(() => '');
+        throw new Error(details ? `Failed to analyze segments: ${details}` : 'Failed to analyze segments');
+      }
+
+      const data: PlanDecomposition = await response.json();
+      setDecomposition(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'שגיאה בסיווג סגמנטים');
+    } finally {
+      setAnalyzingSegments(false);
+    }
   };
 
   if (loading) {
@@ -265,7 +382,7 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
     );
   }
 
-  if (error || !decomposition) {
+  if (!decomposition) {
     return (
       <div className="max-w-2xl mx-auto">
         <div className="bg-error/5 border border-error/20 rounded-xl p-8 text-center">
@@ -288,15 +405,23 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
 
   return (
     <div className="space-y-6 animate-in fade-in duration-500">
+      {error && (
+        <div className="p-4 bg-error/5 border border-error/20 rounded-xl flex items-center gap-3 text-sm">
+          <AlertTriangle className="w-5 h-5 text-error shrink-0" />
+          <span className="text-error font-medium">{error}</span>
+        </div>
+      )}
       {/* Header Stats */}
       <Card className="p-6">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6">
           <div>
             <h1 className="text-2xl font-bold text-text-primary flex items-center gap-2">
               <Check className="w-6 h-6 text-success" />
-              אישור סגמנטים
+              בחירת אזורים לבדיקה
             </h1>
-            <p className="text-text-muted mt-1">אנא וודא שהסגמנטים זוהו כראוי לפני המעבר לשלב הבדיקה</p>
+            <p className="text-text-muted mt-1">
+              בחר אזורים ידנית על גבי התוכנית (גרור מלבן) כדי ליצור סגמנטים לבדיקה.
+            </p>
           </div>
           
           <div className="flex gap-3">
@@ -317,7 +442,7 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
           </div>
         </div>
 
-        {lowConfidenceCount > 0 && (
+        {decomposition.segments.length > 0 && lowConfidenceCount > 0 && (
           <div className="p-4 bg-warning/5 border border-warning/20 rounded-xl flex items-center gap-3 text-sm">
             <AlertTriangle className="w-5 h-5 text-warning shrink-0" />
             <span className="text-warning-dark font-medium">
@@ -392,6 +517,16 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
               </Button>
             </div>
 
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={analyzeSelectedSegments}
+              disabled={validationMode === 'full_plan' || analyzingSegments}
+              title="מריץ סיווג וחילוץ מידע לכל הסגמנטים המסומנים (ללא ולידציה)"
+            >
+              {analyzingSegments ? 'מסווג…' : 'סווג סגמנטים'}
+            </Button>
+
             <div className="h-6 w-px bg-border mx-2" />
 
             <div className="flex items-center gap-2 bg-background rounded-lg border border-border p-1">
@@ -419,9 +554,10 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
                   : 'גרור על התוכנית כדי לסמן אזור לבדיקה (אפשר כמה פעמים). האזור יתווסף כסגמנט חדש.'}
                 {' '}כדי להתקדם לשלב הבא לחץ למטה על “אשר והמשך”.
               </div>
-              {savingManual && (
-                <div className="text-text-muted whitespace-nowrap">שומר…</div>
-              )}
+              <div className="text-text-muted whitespace-nowrap flex items-center gap-2">
+                {roiQueue.length > 0 && <span>תור: {roiQueue.length}</span>}
+                {savingManual && <span>שומר…</span>}
+              </div>
             </div>
           )}
           <div 
@@ -546,6 +682,11 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
                       >
                         {(segment.confidence * 100).toFixed(0)}% דיוק
                       </Badge>
+                      {segment.analysis_data?.classification?.primary_category && (
+                        <Badge variant="info" className="text-xs">
+                          {String(segment.analysis_data.classification.primary_category)}
+                        </Badge>
+                      )}
                     </div>
                     <p className="text-sm text-text-muted line-clamp-2" title={segment.description}>
                       {segment.description}
@@ -622,6 +763,58 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
                           <strong className="text-text-primary block mb-1">ניתוח AI:</strong>
                           <div className="text-xs text-text-muted leading-relaxed bg-background p-2 rounded border border-border">
                             {segment.llm_reasoning}
+                          </div>
+                        </div>
+                      )}
+
+                      {segment.analysis_data?.classification && (
+                        <div className="md:col-span-2">
+                          <strong className="text-text-primary block mb-1">סיווג וחילוץ (שקיפות):</strong>
+                          <div className="text-xs text-text-muted leading-relaxed bg-background p-2 rounded border border-border space-y-2">
+                            <div>
+                              <span className="font-semibold">Primary:</span>{' '}
+                              {String(segment.analysis_data.classification.primary_category || '—')}
+                              {Array.isArray(segment.analysis_data.classification.secondary_categories) && segment.analysis_data.classification.secondary_categories.length > 0 ? (
+                                <>
+                                  {' '}<span className="font-semibold">Secondary:</span>{' '}
+                                  {segment.analysis_data.classification.secondary_categories.join(', ')}
+                                </>
+                              ) : null}
+                              {typeof segment.analysis_data.classification.confidence === 'number' ? (
+                                <>
+                                  {' '}<span className="font-semibold">Confidence:</span>{' '}
+                                  {(segment.analysis_data.classification.confidence * 100).toFixed(0)}%
+                                </>
+                              ) : null}
+                            </div>
+
+                            {segment.analysis_data.classification.explanation_he && (
+                              <div>
+                                <span className="font-semibold">הסבר:</span>{' '}
+                                {segment.analysis_data.classification.explanation_he}
+                              </div>
+                            )}
+
+                            {Array.isArray(segment.analysis_data.classification.evidence) && segment.analysis_data.classification.evidence.length > 0 && (
+                              <div>
+                                <span className="font-semibold">ראיות:</span>{' '}
+                                {segment.analysis_data.classification.evidence.join(' • ')}
+                              </div>
+                            )}
+
+                            {Array.isArray(segment.analysis_data.classification.missing_information) && segment.analysis_data.classification.missing_information.length > 0 && (
+                              <div>
+                                <span className="font-semibold">חסר:</span>{' '}
+                                {segment.analysis_data.classification.missing_information.join(' • ')}
+                              </div>
+                            )}
+
+                            <div>
+                              <span className="font-semibold">כמות פריטים שחולצו:</span>{' '}
+                              טקסט: {Array.isArray(segment.analysis_data.text_items) ? segment.analysis_data.text_items.length : 0},{' '}
+                              מידות: {Array.isArray(segment.analysis_data.dimensions) ? segment.analysis_data.dimensions.length : 0},{' '}
+                              אלמנטים: {Array.isArray(segment.analysis_data.structural_elements) ? segment.analysis_data.structural_elements.length : 0}
+                            </div>
                           </div>
                         </div>
                       )}

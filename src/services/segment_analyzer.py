@@ -144,6 +144,10 @@ What does this segment primarily show? Choose ONE or MORE categories:
 
 **STEP 2: EXTRACT ALL RELEVANT INFORMATION:**
 
+**IMPORTANT (SAFETY):**
+- Do NOT reveal private chain-of-thought or step-by-step hidden reasoning.
+- You MAY provide a short, user-facing explanation summary (in Hebrew) of what you saw and why you classified it.
+
 **CRITICAL: Return ONLY valid JSON. NO comments (//) allowed in JSON!**
 
 1. **Text Content:**
@@ -189,8 +193,12 @@ What does this segment primarily show? Choose ONE or MORE categories:
   "classification": {{
     "primary_category": "WALL_SECTION|ROOM_LAYOUT|DOOR_DETAILS|etc.",
     "secondary_categories": ["...", "..."],
-    "description": "Brief description of what this segment shows",
-    "relevant_requirements": ["1.2", "6.3"]
+        "description": "Brief description of what this segment shows (HEBREW)",
+        "confidence": 0.0,
+        "explanation_he": "Short user-facing explanation (HEBREW) of why this classification fits",
+        "evidence": ["Short pointers to visible cues used (e.g., labels, dimensions, symbols)"],
+        "missing_information": ["What is missing in THIS segment for validation"],
+        "relevant_requirements": ["1.2", "6.3"]
   }},
   "text_items": [
     {{"text": "...", "language": "hebrew|english", "type": "title|label|note|dimension"}},

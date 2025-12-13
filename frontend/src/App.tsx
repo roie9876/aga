@@ -578,6 +578,52 @@ function App() {
                             
                             {/* Analysis Details */}
                             <div className="p-5 space-y-4">
+                              {/* Classification Transparency */}
+                              {(() => {
+                                const explanation = (classification as any)?.explanation_he;
+                                const evidence = (classification as any)?.evidence as string[] | undefined;
+                                const missing = (classification as any)?.missing_information as string[] | undefined;
+                                const confidence = (classification as any)?.confidence as number | undefined;
+
+                                if (!explanation && (!evidence || evidence.length === 0) && (!missing || missing.length === 0) && typeof confidence !== 'number') {
+                                  return null;
+                                }
+
+                                return (
+                                  <div>
+                                    <h5 className="text-sm font-semibold text-text-primary mb-3">
+                                      סיווג וחילוץ (שקיפות):
+                                    </h5>
+                                    <div className="bg-background/50 border border-border rounded-lg p-3 text-sm space-y-2">
+                                      {typeof confidence === 'number' && (
+                                        <div className="text-xs text-text-muted">
+                                          <span className="font-semibold">Confidence:</span>{' '}
+                                          {(confidence * 100).toFixed(0)}%
+                                        </div>
+                                      )}
+                                      {explanation && (
+                                        <div>
+                                          <span className="font-semibold">הסבר:</span>{' '}
+                                          <span className="text-text-muted">{explanation}</span>
+                                        </div>
+                                      )}
+                                      {Array.isArray(evidence) && evidence.length > 0 && (
+                                        <div>
+                                          <span className="font-semibold">ראיות:</span>{' '}
+                                          <span className="text-text-muted">{evidence.join(' • ')}</span>
+                                        </div>
+                                      )}
+                                      {Array.isArray(missing) && missing.length > 0 && (
+                                        <div>
+                                          <span className="font-semibold">חסר לולידציה:</span>{' '}
+                                          <span className="text-text-muted">{missing.join(' • ')}</span>
+                                        </div>
+                                      )}
+                                    </div>
+                                  </div>
+                                );
+                              })()}
+
                               {/* Requirements Checked */}
                               {(() => {
                                 const checkedReqs: string[] =
@@ -599,6 +645,39 @@ function App() {
                                           {reqId}
                                         </Badge>
                                       ))}
+                                    </div>
+                                  </div>
+                                );
+                              })()}
+
+                              {/* Validation Debug */}
+                              {(() => {
+                                const debug = (validation as any)?.debug;
+                                const categoriesUsed = debug?.categories_used as string[] | undefined;
+                                const validatorsRun = debug?.validators_run as string[] | undefined;
+
+                                if ((!categoriesUsed || categoriesUsed.length === 0) && (!validatorsRun || validatorsRun.length === 0)) {
+                                  return null;
+                                }
+
+                                return (
+                                  <div>
+                                    <h5 className="text-sm font-semibold text-text-primary mb-3">
+                                      מה בוצע בולידציה:
+                                    </h5>
+                                    <div className="bg-background/50 border border-border rounded-lg p-3 text-sm space-y-2">
+                                      {Array.isArray(categoriesUsed) && categoriesUsed.length > 0 && (
+                                        <div>
+                                          <span className="font-semibold">קטגוריות ששימשו:</span>{' '}
+                                          <span className="text-text-muted">{categoriesUsed.join(', ')}</span>
+                                        </div>
+                                      )}
+                                      {Array.isArray(validatorsRun) && validatorsRun.length > 0 && (
+                                        <div>
+                                          <span className="font-semibold">פונקציות בדיקה שרצו:</span>{' '}
+                                          <span className="text-text-muted">{validatorsRun.join(', ')}</span>
+                                        </div>
+                                      )}
                                     </div>
                                   </div>
                                 );

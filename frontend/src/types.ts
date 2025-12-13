@@ -31,6 +31,7 @@ export interface PlanSegment {
   thumbnail_url: string;
   confidence: number;
   llm_reasoning?: string;
+  analysis_data?: any;
   approved_by_user: boolean;
   used_in_checks: string[];
   created_at: string;
