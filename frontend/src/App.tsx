@@ -5,6 +5,7 @@ import {
   Loader2, 
   History, 
   FileText,
+  Download,
   AlertCircle,
   TrendingUp,
   Shield,
@@ -101,6 +102,8 @@ function App() {
   const [stage, setStage] = useState<WorkflowStage>('upload');
   const [decompositionId, setDecompositionId] = useState<string | null>(null);
   const [projectId] = useState<string>('demo-project-001');
+  const [lastApprovedSegmentIds, setLastApprovedSegmentIds] = useState<string[]>([]);
+  const [decompositionSnapshot, setDecompositionSnapshot] = useState<any | null>(null);
   const [validationProgress, setValidationProgress] = useState<{
     total: number;
     current: number;
@@ -119,6 +122,7 @@ function App() {
   
   const handleApprovalComplete = async (params: { mode: 'segments' | 'full_plan'; approvedSegments: string[] }) => {
     setStage('validation');
+    setLastApprovedSegmentIds(params.approvedSegments || []);
 
     const totalToValidate = params.mode === 'full_plan' ? 1 : params.approvedSegments.length;
     setValidationProgress({
@@ -146,6 +150,7 @@ function App() {
       const decompResponse = await fetch(`/api/v1/decomposition/${decompositionId}`);
       if (!decompResponse.ok) throw new Error('Failed to fetch decomposition data');
       const decompData = await decompResponse.json();
+      setDecompositionSnapshot(decompData);
       
       const enrichedResult = {
         ...result,
@@ -171,6 +176,243 @@ function App() {
       alert('שגיאה בבדיקת הסגמנטים');
       setStage('decomposition_review');
     }
+  };
+
+  const downloadJsonReport = () => {
+    if (!validationResult) return;
+
+    const report = {
+      exported_at: new Date().toISOString(),
+      demo_mode: Boolean(validationResult.demo_mode),
+      demo_focus: validationResult.demo_focus || null,
+      decomposition_id: decompositionId,
+      selected_segment_ids: lastApprovedSegmentIds,
+      decomposition: decompositionSnapshot,
+      validation_result: validationResult,
+    };
+
+    const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const safeId = (validationResult.validation_id || decompositionId || 'report')
+      .toString()
+      .replace(/[^a-zA-Z0-9-_]/g, '_');
+    a.href = url;
+    a.download = `mamad-report-${safeId}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const openPrintableReport = () => {
+    if (!validationResult) return;
+
+    const selectedIds = Array.isArray(lastApprovedSegmentIds) ? lastApprovedSegmentIds : [];
+    const allSegments: any[] = Array.isArray(decompositionSnapshot?.segments) ? decompositionSnapshot.segments : [];
+    const selectedSegments = selectedIds
+      .map((id) => allSegments.find((s) => s.segment_id === id))
+      .filter(Boolean);
+
+    const analyzedSegments: any[] = Array.isArray(validationResult.segments)
+      ? validationResult.segments
+      : (Array.isArray(validationResult.analyzed_segments) ? validationResult.analyzed_segments : []);
+
+    const esc = (v: any) => String(v ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
+
+    const prettyJson = (obj: any) => esc(JSON.stringify(obj, null, 2));
+
+    const coverage = validationResult.coverage || null;
+
+    const fullPlanUrl = (decompositionSnapshot as any)?.full_plan_url || null;
+    const getSegmentImageUrl = (segmentId: string) => {
+      const fromAnalysis = analyzedSegments.find((s: any) => s?.segment_id === segmentId);
+      if (fromAnalysis?.blob_url) return fromAnalysis.blob_url;
+      const fromDecomp = allSegments.find((s: any) => s?.segment_id === segmentId);
+      return fromDecomp?.blob_url || fromDecomp?.thumbnail_url || null;
+    };
+
+    const html = `<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>דוח בדיקת ממ\"ד</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 24px; color: #111827; }
+    h1 { margin: 0 0 6px; font-size: 22px; }
+    .muted { color: #6b7280; font-size: 12px; }
+    .card { border: 1px solid #e5e7eb; border-radius: 12px; padding: 14px; margin: 12px 0; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; }
+    .pill { display: inline-block; padding: 6px 10px; border-radius: 999px; border: 1px solid #e5e7eb; background: #f9fafb; font-size: 12px; }
+    .img { max-width: 100%; height: auto; border: 1px solid #e5e7eb; border-radius: 10px; background: #fff; }
+    .imgWrap { margin-top: 10px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+    th, td { border: 1px solid #e5e7eb; padding: 8px; vertical-align: top; font-size: 12px; }
+    th { background: #f9fafb; text-align: right; }
+    pre { white-space: pre-wrap; word-break: break-word; background: #f9fafb; border: 1px solid #e5e7eb; padding: 10px; border-radius: 10px; font-size: 11px; }
+    .segment { page-break-inside: avoid; }
+    @media print { body { margin: 12mm; } }
+  </style>
+</head>
+<body>
+  <h1>דוח בדיקת ממ\"ד</h1>
+  <div class="muted">נוצר: ${esc(new Date().toLocaleString('he-IL'))}</div>
+
+  <div class="card">
+    <div class="row">
+      <span class="pill">מזהה בדיקה: ${esc(validationResult.validation_id || '')}</span>
+      <span class="pill">מזהה פירוק: ${esc(decompositionId || '')}</span>
+      <span class="pill">סגמנטים שנותחו: ${esc(validationResult.total_segments ?? analyzedSegments.length ?? '')}</span>
+      <span class="pill">עברו: ${esc(validationResult.passed || 0)}</span>
+      <span class="pill">אזהרות: ${esc(validationResult.warnings || 0)}</span>
+    </div>
+    ${validationResult.demo_mode ? `<div class="muted" style="margin-top:8px;"><strong>מצב דמו:</strong> מתמקדים בדרישות 1–3 (קירות, גובה/נפח, פתחים). ${esc(validationResult.demo_focus || '')}</div>` : ''}
+  </div>
+
+  <div class="card">
+    <h2 style="margin:0 0 6px; font-size:16px;">תכנית מלאה</h2>
+    ${fullPlanUrl ? `
+      <div class="muted">תמונה באיכות מקורית (כפי שנשמרה במערכת). <a href="${esc(fullPlanUrl)}" target="_blank" rel="noopener">פתיחה בחלון חדש</a></div>
+      <div class="imgWrap"><img class="img" src="${esc(fullPlanUrl)}" alt="תכנית מלאה" loading="lazy" /></div>
+    ` : `<div class="muted">אין קישור לתכנית מלאה.</div>`}
+  </div>
+
+  <div class="card">
+    <h2 style="margin:0 0 6px; font-size:16px;">סגמנטים שנבחרו לבדיקה</h2>
+    ${selectedSegments.length === 0 ? `<div class="muted">לא נמצאו פרטי סגמנטים (ייתכן שנפתח דוח מהיסטוריה).</div>` : ''}
+    <table>
+      <thead>
+        <tr>
+          <th>segment_id</th>
+          <th>שם/כותרת</th>
+          <th>סוג</th>
+          <th>תיאור</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${selectedSegments.map((s: any) => `
+          <tr>
+            <td>${esc(s.segment_id)}</td>
+            <td>${esc(s.title || s.segment_id)}</td>
+            <td>${esc(s.type || '')}</td>
+            <td>${esc(s.description || '')}</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+    ${selectedIds.length ? `<div class="muted" style="margin-top:8px;">Selected IDs: ${esc(selectedIds.join(', '))}</div>` : ''}
+  </div>
+
+  <div class="card">
+    <h2 style="margin:0 0 6px; font-size:16px;">תוצאות לפי סגמנט</h2>
+    ${analyzedSegments.map((seg: any, idx: number) => {
+      const analysis = seg.analysis_data || {};
+      const classification = analysis.classification || {};
+      const validation = seg.validation || {};
+      const debug = validation.debug || {};
+      const violations = Array.isArray(validation.violations) ? validation.violations : [];
+
+      const segImgUrl = getSegmentImageUrl(seg.segment_id);
+
+      return `
+        <div class="card segment">
+          <div class="row">
+            <span class="pill">#${idx + 1}</span>
+            <span class="pill">segment_id: ${esc(seg.segment_id)}</span>
+            <span class="pill">סטטוס: ${esc(seg.status || '')}</span>
+            <span class="pill">passed: ${esc(Boolean(validation.passed))}</span>
+          </div>
+
+          <h3 style="margin:10px 0 6px; font-size:14px;">תמונה שנבדקה</h3>
+          ${segImgUrl ? `
+            <div class="muted">תמונה מלאה (לא thumbnail). <a href="${esc(segImgUrl)}" target="_blank" rel="noopener">פתיחה בחלון חדש</a></div>
+            <div class="imgWrap"><img class="img" src="${esc(segImgUrl)}" alt="segment ${esc(seg.segment_id)}" loading="lazy" /></div>
+          ` : `<div class="muted">אין קישור לתמונת הסגמנט.</div>`}
+
+          <h3 style="margin:10px 0 6px; font-size:14px;">מידע שחולץ</h3>
+          <pre>${prettyJson(analysis)}</pre>
+
+          <h3 style="margin:10px 0 6px; font-size:14px;">בדיקות שהורצו</h3>
+          <table>
+            <tbody>
+              <tr><th>primary_category</th><td>${esc(classification.primary_category || debug.primary_category || '')}</td></tr>
+              <tr><th>categories_used</th><td>${esc(Array.isArray(debug.categories_used) ? debug.categories_used.join(', ') : '')}</td></tr>
+              <tr><th>validators_run</th><td>${esc(Array.isArray(debug.validators_run) ? debug.validators_run.join(', ') : '')}</td></tr>
+              <tr><th>checked_requirements</th><td>${esc(Array.isArray(validation.checked_requirements) ? validation.checked_requirements.join(', ') : '')}</td></tr>
+              <tr><th>decision_summary</th><td>${esc(validation.decision_summary_he || '')}</td></tr>
+            </tbody>
+          </table>
+
+          <h3 style="margin:10px 0 6px; font-size:14px;">הפרות</h3>
+          ${violations.length === 0 ? `<div class="muted">אין הפרות.</div>` : `
+            <table>
+              <thead>
+                <tr>
+                  <th>rule_id</th>
+                  <th>severity</th>
+                  <th>קטגוריה</th>
+                  <th>תיאור</th>
+                  <th>דרישה</th>
+                  <th>נמצא</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${violations.map((v: any) => `
+                  <tr>
+                    <td>${esc(v.rule_id)}</td>
+                    <td>${esc(v.severity)}</td>
+                    <td>${esc(v.category)}</td>
+                    <td>${esc(v.description)}</td>
+                    <td>${esc(v.requirement)}</td>
+                    <td>${esc(v.found)}</td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          `}
+        </div>
+      `;
+    }).join('')}
+  </div>
+
+  <div class="card">
+    <h2 style="margin:0 0 6px; font-size:16px;">כיסוי דרישות</h2>
+    ${coverage ? `<pre>${prettyJson(coverage)}</pre>` : `<div class="muted">אין מידע כיסוי זמין.</div>`}
+  </div>
+
+  <div class="card">
+    <h2 style="margin:0 0 6px; font-size:16px;">Raw JSON (לשיתוף ולמידה)</h2>
+    <pre>${prettyJson({
+      exported_at: new Date().toISOString(),
+      decomposition_id: decompositionId,
+      selected_segment_ids: selectedIds,
+      decomposition: decompositionSnapshot,
+      validation_result: validationResult,
+    })}</pre>
+  </div>
+</body>
+</html>`;
+
+    const w = window.open('', '_blank');
+    if (!w) return;
+    w.document.open();
+    w.document.write(html);
+    w.document.close();
+
+    window.setTimeout(() => {
+      try {
+        w.focus();
+        w.print();
+      } catch {
+        // ignore
+      }
+    }, 250);
   };
   
   const loadHistory = async () => {
@@ -206,6 +448,8 @@ function App() {
         const decompResponse = await fetch(`/api/v1/decomposition/${result.decomposition_id}`);
         if (decompResponse.ok) {
           const decompData = await decompResponse.json();
+          setDecompositionSnapshot(decompData);
+          setLastApprovedSegmentIds([]);
           
           const enrichedResult = {
             ...result,
@@ -469,10 +713,31 @@ function App() {
                     <p className="text-text-muted">ניתוח GPT-5.1 הושלם בהצלחה</p>
                   </div>
                 </div>
-                <div className="flex flex-wrap gap-3">
+                <div className="flex flex-wrap gap-3 items-center justify-end">
                   <Badge variant="success">עברו {validationResult.passed || 0} בדיקות</Badge>
                   <Badge variant="info">{validationResult.total_segments} סגמנטים נותחו</Badge>
                   <Badge variant="warning">{validationResult.warnings || 0} אזהרות</Badge>
+
+                  <div className="h-6 w-px bg-border mx-1 hidden sm:block" />
+
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    icon={<FileText className="w-4 h-4" />}
+                    onClick={openPrintableReport}
+                    title="פותח חלון הדפסה (שמור כ-PDF)"
+                  >
+                    ייצוא PDF
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    icon={<Download className="w-4 h-4" />}
+                    onClick={downloadJsonReport}
+                    title="מוריד JSON מלא לשיתוף/למידה"
+                  >
+                    ייצוא JSON
+                  </Button>
                 </div>
               </div>
             </Card>
