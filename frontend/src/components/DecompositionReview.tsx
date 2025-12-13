@@ -2,7 +2,7 @@ import React, { useRef, useState, useEffect } from 'react';
 import { 
   Check, X, AlertTriangle, ZoomIn, ZoomOut, 
   RefreshCw, ChevronDown, ChevronUp,
-  Maximize2, LayoutGrid, List
+  LayoutGrid, List
 } from 'lucide-react';
 import type { PlanDecomposition } from '../types';
 import { Button, Card, Badge } from './ui';
@@ -21,12 +21,12 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
   const [decomposition, setDecomposition] = useState<PlanDecomposition | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [viewMode, setViewMode] = useState<'full' | 'segments'>('full');
-  const [validationMode, setValidationMode] = useState<'segments' | 'full_plan'>('segments');
-  const [zoom, setZoom] = useState(100);
+  const [zoom, setZoom] = useState(20);
   const [expandedSegments, setExpandedSegments] = useState<Set<string>>(new Set());
 
   const planImgRef = useRef<HTMLImageElement | null>(null);
+  const planContainerRef = useRef<HTMLDivElement | null>(null);
+  const didAutoFitZoomRef = useRef(false);
   const roiInFlightRef = useRef(false);
   const [isDrawing, setIsDrawing] = useState(false);
   const [drawStart, setDrawStart] = useState<{ x: number; y: number } | null>(null);
@@ -71,8 +71,38 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
     }
   };
 
+  const autoFitZoomIfNeeded = () => {
+    if (didAutoFitZoomRef.current) return;
+    const img = planImgRef.current;
+    const container = planContainerRef.current;
+
+    if (!img || !container) {
+      setZoom(20);
+      didAutoFitZoomRef.current = true;
+      return;
+    }
+
+    const naturalW = img.naturalWidth;
+    const naturalH = img.naturalHeight;
+    const containerW = container.clientWidth;
+    const containerH = container.clientHeight;
+
+    if (!naturalW || !naturalH || !containerW || !containerH) {
+      setZoom(20);
+      didAutoFitZoomRef.current = true;
+      return;
+    }
+
+    const fitW = (containerW / naturalW) * 100;
+    const fitH = (containerH / naturalH) * 100;
+    const fit = Math.floor(Math.min(fitW, fitH, 100));
+    setZoom(Math.max(10, Math.min(200, fit || 20)));
+    didAutoFitZoomRef.current = true;
+  };
+
   useEffect(() => {
     loadDecomposition();
+    didAutoFitZoomRef.current = false;
   }, [decompositionId]);
 
   // Process manual ROI operations sequentially (so drawing is not blocked by network latency)
@@ -159,18 +189,7 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
 
       const data: PlanDecomposition = await response.json();
       setDecomposition(data);
-      
-      // Auto-approve segments with high confidence
-      const highConfidenceSegments = data.segments.filter(s => s.confidence >= 0.85);
-      if (highConfidenceSegments.length > 0) {
-        setDecomposition({
-          ...data,
-          segments: data.segments.map((s) =>
-            s.confidence >= 0.85 ? { ...s, approved_by_user: true } : s
-          ),
-        });
-      }
-      
+
     } catch (err) {
       setError(err instanceof Error ? err.message : 'שגיאה בטעינת הפירוק');
     } finally {
@@ -203,11 +222,6 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
 
   const handleApprove = () => {
     if (!decomposition) return;
-
-    if (validationMode === 'full_plan') {
-      onApprove({ mode: 'full_plan', approvedSegments: [] });
-      return;
-    }
 
     const approved = decomposition.segments
       .filter(s => s.approved_by_user)
@@ -289,10 +303,17 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
   };
 
   const handlePlanPointerDown = (e: React.PointerEvent) => {
-    if (validationMode !== 'segments') return;
     const p = getRelativePoint(e);
     if (!p) return;
     e.preventDefault();
+
+     try {
+      (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    } catch {
+      // best-effort
+    }
+
+    setError(null);
     setIsDrawing(true);
     setDrawStart(p);
     setDrawCurrent(p);
@@ -326,16 +347,34 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
     // Ignore tiny drags
     if (w < 0.003 || h < 0.003) {
       setError('הבחירה קטנה מדי — נסה לבחור אזור גדול יותר');
+
+      try {
+        (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+      } catch {
+        // best-effort
+      }
       return;
     }
 
     if (editingSegmentId) {
       enqueueManualRoiUpdate(editingSegmentId, { x: x1, y: y1, width: w, height: h });
       setEditingSegmentId(null);
+
+      try {
+        (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+      } catch {
+        // best-effort
+      }
       return;
     }
 
     enqueueManualRoiAdd({ x: x1, y: y1, width: w, height: h });
+
+    try {
+      (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+    } catch {
+      // best-effort
+    }
   };
 
   const analyzeSelectedSegments = async () => {
@@ -455,64 +494,12 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
       {/* Controls */}
       <Card className="p-4 sticky top-20 z-30 shadow-md backdrop-blur-xl bg-card/95">
         <div className="flex flex-wrap items-center justify-between gap-4">
-          <div className="flex gap-2 bg-background p-1 rounded-lg border border-border">
-            <button
-              onClick={() => setViewMode('full')}
-              className={`px-3 py-1.5 rounded-md text-sm font-medium transition-all flex items-center gap-2 ${
-                viewMode === 'full' 
-                  ? 'bg-white shadow-sm text-primary' 
-                  : 'text-text-muted hover:text-text-primary'
-              }`}
-            >
-              <Maximize2 className="w-4 h-4" />
-              תוכנית מלאה
-            </button>
-            <button
-              onClick={() => setViewMode('segments')}
-              className={`px-3 py-1.5 rounded-md text-sm font-medium transition-all flex items-center gap-2 ${
-                viewMode === 'segments' 
-                  ? 'bg-white shadow-sm text-primary' 
-                  : 'text-text-muted hover:text-text-primary'
-              }`}
-            >
-              <LayoutGrid className="w-4 h-4" />
-              רשימת סגמנטים
-            </button>
-          </div>
-
-          <div className="flex gap-2 bg-background p-1 rounded-lg border border-border">
-            <button
-              onClick={() => setValidationMode('segments')}
-              className={`px-3 py-1.5 rounded-md text-sm font-medium transition-all flex items-center gap-2 ${
-                validationMode === 'segments'
-                  ? 'bg-white shadow-sm text-primary'
-                  : 'text-text-muted hover:text-text-primary'
-              }`}
-              title="בדיקה לפי הסגמנטים שנבחרו"
-            >
-              <List className="w-4 h-4" />
-              בדיקה לפי סגמנטים
-            </button>
-            <button
-              onClick={() => setValidationMode('full_plan')}
-              className={`px-3 py-1.5 rounded-md text-sm font-medium transition-all flex items-center gap-2 ${
-                validationMode === 'full_plan'
-                  ? 'bg-white shadow-sm text-primary'
-                  : 'text-text-muted hover:text-text-primary'
-              }`}
-              title="ניסוי: שליחת התוכנית המלאה ל-GPT ללא חיתוך"
-            >
-              <Maximize2 className="w-4 h-4" />
-              בדיקה תוכנית מלאה
-            </button>
-          </div>
-
           <div className="flex items-center gap-4">
             <div className="flex gap-2">
-              <Button size="sm" variant="outline" onClick={handleSelectAll} disabled={validationMode === 'full_plan'}>
+              <Button size="sm" variant="outline" onClick={handleSelectAll}>
                 סמן הכל
               </Button>
-              <Button size="sm" variant="ghost" onClick={handleDeselectAll} disabled={validationMode === 'full_plan'}>
+              <Button size="sm" variant="ghost" onClick={handleDeselectAll}>
                 בטל הכל
               </Button>
             </div>
@@ -521,7 +508,7 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
               size="sm"
               variant="outline"
               onClick={analyzeSelectedSegments}
-              disabled={validationMode === 'full_plan' || analyzingSegments}
+              disabled={analyzingSegments}
               title="מריץ סיווג וחילוץ מידע לכל הסגמנטים המסומנים (ללא ולידציה)"
             >
               {analyzingSegments ? 'מסווג…' : 'סווג סגמנטים'}
@@ -543,51 +530,58 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
       </Card>
 
       {/* Full Plan View */}
-      {viewMode === 'full' && decomposition.full_plan_url && (
+      {decomposition.full_plan_url && (
         <Card className="p-6 overflow-hidden">
-          {validationMode === 'segments' && (
-            <div className="mb-4 p-3 bg-primary/5 border border-primary/10 rounded-xl text-sm text-text-primary flex items-center justify-between gap-3">
-              <div>
-                <strong className="font-semibold">בחירה ידנית:</strong>{' '}
-                {editingSegmentId
-                  ? 'עריכת אזור: גרור מחדש על התוכנית כדי להגדיר את האזור.'
-                  : 'גרור על התוכנית כדי לסמן אזור לבדיקה (אפשר כמה פעמים). האזור יתווסף כסגמנט חדש.'}
-                {' '}כדי להתקדם לשלב הבא לחץ למטה על “אשר והמשך”.
-              </div>
-              <div className="text-text-muted whitespace-nowrap flex items-center gap-2">
-                {roiQueue.length > 0 && <span>תור: {roiQueue.length}</span>}
-                {savingManual && <span>שומר…</span>}
-              </div>
+          <div className="mb-4 p-3 bg-primary/5 border border-primary/10 rounded-xl text-sm text-text-primary flex items-center justify-between gap-3">
+            <div>
+              <strong className="font-semibold">בחירה ידנית:</strong>{' '}
+              {editingSegmentId
+                ? 'עריכת אזור: גרור מחדש על התוכנית כדי להגדיר את האזור.'
+                : 'גרור על התוכנית כדי לסמן אזור לבדיקה (אפשר כמה פעמים). האזור יתווסף כסגמנט חדש.'}
+              {' '}כדי להתקדם לשלב הבא לחץ למטה על “אשר והמשך”.
             </div>
-          )}
+            <div className="text-text-muted whitespace-nowrap flex items-center gap-2">
+              {roiQueue.length > 0 && <span>תור: {roiQueue.length}</span>}
+              {savingManual && <span>שומר…</span>}
+            </div>
+          </div>
           <div 
             className="border border-border rounded-xl overflow-auto bg-background/50 relative min-h-[500px]"
             style={{ maxHeight: '70vh' }}
+            ref={planContainerRef}
           >
-            <div className="relative inline-block origin-top-right transition-transform duration-200" style={{ transform: `scale(${zoom / 100})` }}>
+            <div
+              className="relative inline-block origin-top-right transition-transform duration-200"
+              style={{ transform: `scale(${zoom / 100})` }}
+            >
               <img
                 src={decomposition.full_plan_url}
                 alt="תוכנית מלאה"
                 className="max-w-none"
                 style={{ direction: 'ltr' }}
                 ref={planImgRef}
+                onLoad={autoFitZoomIfNeeded}
               />
 
               {/* Drawing overlay (manual ROI selection) */}
-              {validationMode === 'segments' && (
-                <div
-                  className="absolute inset-0 cursor-crosshair z-30"
-                  style={{ touchAction: 'none' }}
-                  onPointerDown={handlePlanPointerDown}
-                  onPointerMove={handlePlanPointerMove}
-                  onPointerUp={handlePlanPointerUp}
-                  onPointerCancel={() => {
-                    setIsDrawing(false);
-                    setDrawStart(null);
-                    setDrawCurrent(null);
-                  }}
-                />
-              )}
+              <div
+                className="absolute inset-0 cursor-crosshair z-30"
+                style={{ touchAction: 'none' }}
+                onPointerDown={handlePlanPointerDown}
+                onPointerMove={handlePlanPointerMove}
+                onPointerUp={handlePlanPointerUp}
+                onPointerCancel={(e) => {
+                  setIsDrawing(false);
+                  setDrawStart(null);
+                  setDrawCurrent(null);
+
+                  try {
+                    (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+                  } catch {
+                    // best-effort
+                  }
+                }}
+              />
 
               {decomposition.segments.map((segment) => (
                 (() => {
@@ -605,8 +599,12 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
                     top: `${b.y}%`,
                     width: `${b.width}%`,
                     height: `${b.height}%`,
+                    pointerEvents: editingSegmentId ? 'none' : 'auto',
                   }}
-                  onClick={() => updateSegmentApproval(segment.segment_id, !segment.approved_by_user)}
+                  onClick={() => {
+                    if (editingSegmentId) return;
+                    updateSegmentApproval(segment.segment_id, !segment.approved_by_user);
+                  }}
                 >
                   <div className="absolute -top-8 right-0 opacity-0 group-hover:opacity-100 transition-opacity z-10">
                     <div className="bg-popover text-popover-foreground text-xs px-2 py-1 rounded shadow-lg border border-border whitespace-nowrap font-medium">
@@ -713,13 +711,11 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
                       />
                     </label>
 
-                    {segment.llm_reasoning === 'MANUAL_ROI' && validationMode === 'segments' && (
+                    {segment.llm_reasoning === 'MANUAL_ROI' && (
                       <Button
                         size="sm"
                         variant="outline"
                         onClick={() => {
-                          setValidationMode('segments');
-                          setViewMode('full');
                           setEditingSegmentId(segment.segment_id);
                         }}
                       >
@@ -888,13 +884,11 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
 
               <Button
                 onClick={handleApprove}
-                disabled={validationMode === 'segments' && approvedCount === 0}
+                disabled={approvedCount === 0}
                 className="min-w-[200px] shadow-lg shadow-primary/20"
               >
                 <Check className="w-4 h-4 ml-2" />
-                {validationMode === 'full_plan'
-                  ? 'בדוק תוכנית מלאה (ניסוי)'
-                  : `אשר ${approvedCount} סגמנטים והמשך`}
+                {`אשר ${approvedCount} סגמנטים והמשך`}
               </Button>
             </div>
           </div>

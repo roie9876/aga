@@ -97,6 +97,7 @@ const calculateCoverageStatistics = (validationResult: any) => {
 };
 
 function App() {
+  const DEMO_MODE = true;
   const [stage, setStage] = useState<WorkflowStage>('upload');
   const [decompositionId, setDecompositionId] = useState<string | null>(null);
   const [projectId] = useState<string>('demo-project-001');
@@ -134,6 +135,7 @@ function App() {
           decomposition_id: decompositionId,
           approved_segment_ids: params.approvedSegments,
           mode: params.mode,
+          demo_mode: DEMO_MODE,
         }),
       });
       
@@ -248,15 +250,15 @@ function App() {
 
   const steps = [
     { number: 1, title: 'העלאה', description: 'העלאת קובץ התכנית' },
-    { number: 2, title: 'סגמנטציה', description: 'זיהוי חלקי התכנית' },
-    { number: 3, title: 'אישור', description: 'בחירת סגמנטים' },
-    { number: 4, title: 'בדיקה', description: 'וולידציה מול תקנים' },
+    { number: 2, title: 'בחירה', description: 'בחירת אזורים בתכנית' },
+    { number: 3, title: 'בדיקה', description: 'וולידציה מול תקנים' },
+    { number: 4, title: 'תוצאות', description: 'דוח סופי' },
   ];
 
   const currentStepNumber = 
     stage === 'upload' ? 1 :
-    stage === 'decomposition_review' ? 3 :
-    stage === 'validation' ? 4 :
+    stage === 'decomposition_review' ? 2 :
+    stage === 'validation' ? 3 :
     stage === 'results' ? 4 : 1;
 
   return (
@@ -314,7 +316,7 @@ function App() {
                     <p className="font-semibold text-text-primary">העלאה → אישור → בדיקה → תוצאות</p>
                   </div>
                   <div className="text-sm text-text-muted leading-relaxed max-w-xl">
-                    שמור על סדר עבודה: העלה קובץ, אשר סגמנטים, הרץ בדיקות וקבל דוח מפורט עם כיסוי תקנים.
+                    שמור על סדר עבודה: העלה קובץ, בחר אזורים לבדיקה, הרץ בדיקות וקבל דוח מפורט עם כיסוי תקנים.
                   </div>
                 </div>
               </Card>
@@ -396,10 +398,10 @@ function App() {
           <div className="max-w-6xl mx-auto">
             <div className="text-center mb-10">
               <h2 className="text-3xl font-bold text-text-primary mb-3 tracking-tight">
-                בחר סגמנטים לבדיקה
+                בחר אזורים לבדיקה
               </h2>
               <p className="text-text-muted text-lg max-w-2xl mx-auto">
-                המערכת זיהתה את החלקים הבאים בתכנית. אשר את הסגמנטים שברצונך לבדוק
+                גרור מלבנים על גבי התכנית כדי ליצור אזורים לבדיקה, אשר את האזורים הרצויים והמשך.
               </p>
             </div>
             
@@ -474,6 +476,17 @@ function App() {
                 </div>
               </div>
             </Card>
+
+            {validationResult.demo_mode && (
+              <Card padding="md" className="bg-primary/5 border border-primary/10">
+                <div className="text-sm text-text-primary font-medium">
+                  מצב דמו: מתמקדים בדרישות 1–3 (קירות, גובה/נפח, פתחים) כדי לקצר זמן ריצה.
+                </div>
+                {validationResult.demo_focus && (
+                  <div className="text-xs text-text-muted mt-1">{String(validationResult.demo_focus)}</div>
+                )}
+              </Card>
+            )}
 
             <div className="grid gap-8 lg:grid-cols-3">
               <div className="lg:col-span-2 space-y-6">

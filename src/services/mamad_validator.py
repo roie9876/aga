@@ -47,7 +47,7 @@ class MamadValidator:
     def __init__(self):
         self.violations: List[Violation] = []
         
-    def validate_segment(self, analysis_data: Dict[str, Any]) -> Dict[str, Any]:
+    def validate_segment(self, analysis_data: Dict[str, Any], *, demo_mode: bool = False) -> Dict[str, Any]:
         """
         Validate a single segment's analysis data against MAMAD requirements.
         
@@ -55,6 +55,7 @@ class MamadValidator:
         
         Args:
             analysis_data: Extracted data from GPT analysis (includes classification)
+            demo_mode: If True, run a reduced subset of checks for demo purposes.
             
         Returns:
             Validation result with violations and status
@@ -89,7 +90,8 @@ class MamadValidator:
                    category=primary_category,
                    relevant_requirements=relevant_requirements,
                    has_dimensions=bool(analysis_data.get("dimensions")),
-                   has_elements=bool(analysis_data.get("structural_elements")))
+                   has_elements=bool(analysis_data.get("structural_elements")),
+                   demo_mode=demo_mode)
         
         # Map categories to validation functions
         validation_map = {
@@ -115,6 +117,13 @@ class MamadValidator:
             "GENERAL_NOTES": ["4.2"],
             "SECTIONS": ["2.1", "2.2"],
         }
+
+        if demo_mode:
+            # For demo: focus on groups 1-3 to reduce runtime and complexity.
+            allowed_categories = {"WALL_SECTION", "ROOM_LAYOUT", "SECTIONS", "DOOR_DETAILS", "WINDOW_DETAILS"}
+            categories = [c for c in categories if c in allowed_categories]
+            if not categories:
+                categories = ["OTHER"]
         
         # Run validations based on ALL classified categories (primary + secondary)
         validations_to_run = []
@@ -133,19 +142,32 @@ class MamadValidator:
             # If category not recognized or OTHER, skip validation
             logger.info("No specific validations for this segment category",
                        category=primary_category)
-            decision_summary_he = (
-                f"לא הופעלו בדיקות כי הקטגוריה שסווגה היא '{primary_category}'. "
-                "המערכת מפעילה בדיקות רק עבור קטגוריות מוגדרות (כמו ROOM_LAYOUT/SECTIONS/WALL_SECTION וכו')."
-            )
+            if demo_mode:
+                decision_summary_he = (
+                    f"לא הופעלו בדיקות כי בדמו המערכת מתמקדת בדרישות 1–3 בלבד, "
+                    f"והקטגוריה שסווגה היא '{primary_category}'."
+                )
+            else:
+                decision_summary_he = (
+                    f"לא הופעלו בדיקות כי הקטגוריה שסווגה היא '{primary_category}'. "
+                    "המערכת מפעילה בדיקות רק עבור קטגוריות מוגדרות (כמו ROOM_LAYOUT/SECTIONS/WALL_SECTION וכו')."
+                )
         else:
             for validation_func in validations_to_run:
                 validation_func(analysis_data)
 
-            decision_summary_he = (
-                f"הופעלו בדיקות לפי קטגוריות הסגמנט: {', '.join(categories)}. "
-                f"דרישות שנבדקו בסגמנט זה: {', '.join(checked_requirements) if checked_requirements else 'אין'}. "
-                "דרישות אחרות לא נבדקו כי הן ממופות לקטגוריות אחרות או דורשות סגמנטים מסוג אחר (למשל פרט/חתך)."
-            )
+            if demo_mode:
+                decision_summary_he = (
+                    f"(דמו) הופעלו בדיקות לפי קטגוריות הסגמנט: {', '.join(categories)}. "
+                    f"דרישות שנבדקו בדמו בסגמנט זה: {', '.join(checked_requirements) if checked_requirements else 'אין'}. "
+                    "בדיקות נוספות קיימות במערכת אך לא הורצו בדמו כדי לקצר זמן ריצה."
+                )
+            else:
+                decision_summary_he = (
+                    f"הופעלו בדיקות לפי קטגוריות הסגמנט: {', '.join(categories)}. "
+                    f"דרישות שנבדקו בסגמנט זה: {', '.join(checked_requirements) if checked_requirements else 'אין'}. "
+                    "דרישות אחרות לא נבדקו כי הן ממופות לקטגוריות אחרות או דורשות סגמנטים מסוג אחר (למשל פרט/חתך)."
+                )
         
         # Categorize violations
         critical = [v for v in self.violations if v.severity == ViolationSeverity.CRITICAL]
@@ -175,6 +197,7 @@ class MamadValidator:
                 "validators_run": [fn.__name__ for fn in validations_to_run],
                 "primary_category": primary_category,
                 "relevant_requirements": relevant_requirements,
+                "demo_mode": demo_mode,
             },
         }
     

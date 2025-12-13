@@ -22,6 +22,12 @@ class SegmentValidationRequest(BaseModel):
         "segments",
         description="Validation mode: 'segments' validates selected segment crops; 'full_plan' validates the full plan image as a single unit"
     )
+    demo_mode: bool = Field(
+        False,
+        description=(
+            "If true, run a reduced subset of validations for demo purposes (does not remove rules from the system)."
+        ),
+    )
 
 
 class SegmentValidationResponse(BaseModel):
@@ -33,6 +39,8 @@ class SegmentValidationResponse(BaseModel):
     warnings: int = Field(..., description="Segments with warnings")
     analyzed_segments: List[Dict[str, Any]] = Field(default_factory=list, description="Detailed analysis for each segment")
     coverage: Optional[Dict[str, Any]] = Field(None, description="Requirements coverage report")
+    demo_mode: bool = Field(False, description="Whether demo_mode was enabled for this validation run")
+    demo_focus: Optional[str] = Field(None, description="Optional note describing the demo focus")
 
 
 @router.post("/validate-segments", response_model=SegmentValidationResponse)
@@ -115,6 +123,10 @@ async def validate_segments(request: SegmentValidationRequest):
         analyzer = get_segment_analyzer()
         validator = get_mamad_validator()
         analyzed_segments = []
+
+        demo_focus_note = None
+        if request.demo_mode:
+            demo_focus_note = "בדמו המערכת מתמקדת בדרישות 1–3 (קירות, גובה/נפח, פתחים) כדי לקצר זמן ריצה." 
         
         for segment in approved_segments:
             try:
@@ -130,7 +142,8 @@ async def validate_segments(request: SegmentValidationRequest):
                 if analysis_result["status"] == "analyzed":
                     # Run targeted validation based on segment classification
                     validation_result = validator.validate_segment(
-                        analysis_result.get("analysis_data", {})
+                        analysis_result.get("analysis_data", {}),
+                        demo_mode=request.demo_mode,
                     )
                     analysis_result["validation"] = validation_result
                     
@@ -176,6 +189,8 @@ async def validate_segments(request: SegmentValidationRequest):
             "validation_id": decomposition.get("validation_id"),
             "project_id": decomposition.get("project_id"),
             "analyzed_segments": analyzed_segments,
+            "demo_mode": request.demo_mode,
+            "demo_focus": demo_focus_note,
             "created_at": "2025-12-11T00:00:00Z"  # Will be set by Cosmos
         }
         
@@ -214,7 +229,9 @@ async def validate_segments(request: SegmentValidationRequest):
             "failed": failed,
             "warnings": warnings,
             "analyzed_segments": analyzed_segments,  # Include detailed analysis
-            "coverage": coverage_report  # Include requirements coverage
+            "coverage": coverage_report,  # Include requirements coverage
+            "demo_mode": request.demo_mode,
+            "demo_focus": demo_focus_note,
         }
         
     except HTTPException:
