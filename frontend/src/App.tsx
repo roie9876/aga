@@ -229,12 +229,14 @@ function App() {
 
     const coverage = validationResult.coverage || null;
 
-    const fullPlanUrl = (decompositionSnapshot as any)?.full_plan_url || null;
+    const apiVersion = 'v1';
+    const fullPlanUrl = decompositionId
+      ? `/api/${apiVersion}/decomposition/${encodeURIComponent(decompositionId)}/images/full-plan`
+      : null;
+
     const getSegmentImageUrl = (segmentId: string) => {
-      const fromAnalysis = analyzedSegments.find((s: any) => s?.segment_id === segmentId);
-      if (fromAnalysis?.blob_url) return fromAnalysis.blob_url;
-      const fromDecomp = allSegments.find((s: any) => s?.segment_id === segmentId);
-      return fromDecomp?.blob_url || fromDecomp?.thumbnail_url || null;
+      if (!decompositionId || !segmentId) return null;
+      return `/api/${apiVersion}/decomposition/${encodeURIComponent(decompositionId)}/images/segments/${encodeURIComponent(segmentId)}`;
     };
 
     const html = `<!doctype html>

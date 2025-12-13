@@ -348,6 +348,123 @@ class MamadValidator:
             text_items = data.get("text_items", [])
             spacing_texts = [t for t in text_items if "מרחק" in t.get("text", "") 
                            or "ס\"מ" in t.get("text", "")]
+
+            # Also look for spacing in extracted dimensions/door fields (more reliable than raw text)
+            extracted_dims = data.get("dimensions", [])
+            spacing_dims = [
+                d for d in extracted_dims
+                if any(k in str(d.get("element", "")).lower() for k in ["door", "jamb", "spacing", "clearance", "distance", "מרחק"])
+            ]
+
+            door_internal = door.get("spacing_internal_cm") or door.get("door_spacing_internal_cm")
+            door_external = door.get("spacing_external_cm") or door.get("door_spacing_external_cm")
+
+            def _as_number(v: Any) -> Optional[float]:
+                try:
+                    if v is None:
+                        return None
+                    return float(v)
+                except Exception:
+                    return None
+
+            internal_cm = _as_number(door_internal)
+            external_cm = _as_number(door_external)
+
+            def _as_cm(value: Any, unit: Any) -> Optional[float]:
+                num = _as_number(value)
+                if num is None:
+                    return None
+                u = (str(unit or "").strip().lower() or "cm")
+                if u in {"m", "meter", "meters", "מ", "מטר"}:
+                    return num * 100.0
+                if u in {"mm", "millimeter", "millimeters", "מ\"מ", "ממ"}:
+                    return num / 10.0
+                # Default to cm if unit is missing/unknown
+                return num
+
+            # If the model provided explicit internal/external values, evaluate them.
+            if internal_cm is not None or external_cm is not None:
+                ok_internal = (internal_cm is None) or (internal_cm >= 90.0)
+                ok_external = (external_cm is None) or (external_cm >= 75.0)
+                if ok_internal and ok_external:
+                    continue
+
+                found_parts: list[str] = []
+                if internal_cm is not None:
+                    found_parts.append(f"פנימי: {internal_cm:.0f} ס\"מ")
+                if external_cm is not None:
+                    found_parts.append(f"חיצוני: {external_cm:.0f} ס\"מ")
+
+                self.violations.append(Violation(
+                    rule_id="DOOR_001",
+                    severity=ViolationSeverity.WARNING,
+                    category="דלת",
+                    description_he="מרחקי דלת אינם עומדים בדרישה",
+                    requirement="מרחק מדלת לקיר ניצב: ≥ 90 ס\"מ פנימי, ≥ 75 ס\"מ חיצוני",
+                    found=", ".join(found_parts) if found_parts else "לא צוין",
+                    location=door.get("location", "")
+                ))
+                continue
+
+            # If we found spacing-like dimensions near the door, use them as evidence.
+            # For demo/real-world plans, we prefer to avoid false negatives when the drawing
+            # provides dimensions but doesn't label them as "internal/external" explicitly.
+            if spacing_dims:
+                spacing_values_cm: list[float] = []
+                found_preview: list[str] = []
+                for d in spacing_dims:
+                    v_cm = _as_cm(d.get("value"), d.get("unit"))
+                    if v_cm is not None:
+                        spacing_values_cm.append(v_cm)
+
+                    # Build a short preview for logs only
+                    if len(found_preview) < 4:
+                        elem = d.get("element") or "door"
+                        try:
+                            if v_cm is not None:
+                                found_preview.append(f"{elem}: {v_cm:.0f} cm")
+                            else:
+                                found_preview.append(f"{elem}: {d.get('value')} {d.get('unit') or ''}")
+                        except Exception:
+                            pass
+
+                if spacing_values_cm:
+                    max_cm = max(spacing_values_cm)
+                    min_cm = min(spacing_values_cm)
+
+                    # Heuristic:
+                    # - If all observed door-adjacent spacings are >= 75cm and at least one is >= 90cm,
+                    #   treat as compliant (likely covers external>=75 and internal>=90).
+                    if min_cm >= 75.0 and max_cm >= 90.0:
+                        continue
+
+                    # If all observed values are clearly below 75cm, flag as non-compliant.
+                    if max_cm < 75.0:
+                        self.violations.append(Violation(
+                            rule_id="DOOR_001",
+                            severity=ViolationSeverity.WARNING,
+                            category="דלת",
+                            description_he="מרחקי דלת אינם עומדים בדרישה",
+                            requirement="מרחק מדלת לקיר ניצב: ≥ 90 ס\"מ פנימי, ≥ 75 ס\"מ חיצוני",
+                            found="; ".join(found_preview) if found_preview else f"max={max_cm:.0f} cm",
+                            location=door.get("location", "")
+                        ))
+                        continue
+
+                    # Otherwise: evidence exists but mapping is ambiguous. Don't emit a violation.
+                    logger.info(
+                        "Door spacing evidence found but ambiguous; not emitting violation",
+                        found_preview=found_preview,
+                        location=door.get("location", "")
+                    )
+                    continue
+
+                # spacing_dims exist but without numeric values; treat as evidence and avoid false "missing".
+                logger.info(
+                    "Door spacing evidence found (non-numeric); not emitting violation",
+                    location=door.get("location", "")
+                )
+                continue
             
             # If no spacing info found, warn
             if not spacing_texts:

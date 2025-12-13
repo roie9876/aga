@@ -7,6 +7,7 @@ from pathlib import Path
 from io import BytesIO
 import anyio
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from fastapi.responses import Response
 from typing import Optional
 
 from src.models.decomposition import (
@@ -33,6 +34,102 @@ from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/decomposition", tags=["decomposition"])
+
+
+@router.get("/{decomposition_id}/images/full-plan")
+async def get_full_plan_image(decomposition_id: str):
+    """Fetch the stored full plan image for a decomposition.
+
+    This provides a same-origin URL that can be embedded in printable reports
+    (avoids cross-origin/CORS issues when printing to PDF).
+    """
+
+    cosmos_client = get_cosmos_client()
+    query = """
+        SELECT * FROM c
+        WHERE c.id = @decomposition_id
+        AND c.type = 'decomposition'
+    """
+
+    items = await cosmos_client.query_items(
+        query=query,
+        parameters=[
+            {"name": "@decomposition_id", "value": decomposition_id},
+        ],
+    )
+
+    if not items:
+        raise HTTPException(status_code=404, detail="פירוק לא נמצא")
+
+    decomposition = PlanDecomposition(**items[0])
+    if not decomposition.validation_id:
+        raise HTTPException(status_code=400, detail="validation_id חסר בפירוק")
+
+    blob_client = get_blob_client()
+    blob_name = f"{decomposition.validation_id}/full_plan.png"
+    try:
+        with anyio.fail_after(60):
+            img_bytes = await blob_client.download_blob(blob_name)
+    except Exception as e:
+        logger.error(
+            "Failed to download full plan image",
+            decomposition_id=decomposition_id,
+            blob_name=blob_name,
+            error=str(e),
+        )
+        raise HTTPException(status_code=500, detail="שגיאה בטעינת תמונת התוכנית המלאה")
+
+    return Response(content=img_bytes, media_type="image/png")
+
+
+@router.get("/{decomposition_id}/images/segments/{segment_id}")
+async def get_segment_image(
+    decomposition_id: str,
+    segment_id: str,
+    thumbnail: bool = False,
+):
+    """Fetch the stored segment crop (or thumbnail) for a decomposition."""
+
+    cosmos_client = get_cosmos_client()
+    query = """
+        SELECT * FROM c
+        WHERE c.id = @decomposition_id
+        AND c.type = 'decomposition'
+    """
+
+    items = await cosmos_client.query_items(
+        query=query,
+        parameters=[
+            {"name": "@decomposition_id", "value": decomposition_id},
+        ],
+    )
+
+    if not items:
+        raise HTTPException(status_code=404, detail="פירוק לא נמצא")
+
+    decomposition = PlanDecomposition(**items[0])
+    if not decomposition.validation_id:
+        raise HTTPException(status_code=400, detail="validation_id חסר בפירוק")
+
+    blob_client = get_blob_client()
+    suffix = "_thumb.png" if thumbnail else ".png"
+    blob_name = f"{decomposition.validation_id}/segments/{segment_id}{suffix}"
+
+    try:
+        with anyio.fail_after(60):
+            img_bytes = await blob_client.download_blob(blob_name)
+    except Exception as e:
+        logger.error(
+            "Failed to download segment image",
+            decomposition_id=decomposition_id,
+            segment_id=segment_id,
+            blob_name=blob_name,
+            thumbnail=thumbnail,
+            error=str(e),
+        )
+        raise HTTPException(status_code=500, detail="שגיאה בטעינת תמונת הסגמנט")
+
+    return Response(content=img_bytes, media_type="image/png")
 
 
 @router.post("/analyze", response_model=DecompositionResponse)

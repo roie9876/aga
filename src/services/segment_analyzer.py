@@ -163,6 +163,25 @@ What does this segment primarily show? Choose ONE or MORE categories:
    - Spacing between elements
    - Elevation heights
 
+     **Wall thickness interpretation rule (VERY IMPORTANT):**
+     - If you see small dimensions placed directly on/along a wall (or between inner and outer wall lines),
+         treat them as **wall thickness** even if the drawing does not explicitly label "עובי".
+     - In typical Israeli architectural plans, if units are not written next to the number, you may assume
+         **centimeters (cm)** for wall thickness (unless the drawing clearly indicates mm or m elsewhere).
+     - Record these as wall thickness in BOTH `dimensions[]` (element: "wall thickness") and
+         `structural_elements[]` (type: "wall").
+     - Always include `evidence` strings that point to what you saw (e.g., "dimension 25 between wall lines").
+     - If there are multiple candidate thickness values, include all with a confidence note rather than omitting.
+
+     **Door spacing interpretation rule (VERY IMPORTANT):**
+     - If this segment contains a door (especially a ממ"ד door), actively look for dimension chains near the jamb/door frame.
+     - The required values are:
+         - **Internal**: distance from the door frame/jamb to the nearest perpendicular wall *inside* the ממ"ד.
+         - **External**: distance from the door edge/frame to the nearest perpendicular wall *outside* the ממ"ד.
+     - If the drawing shows numeric distances near the door but does not explicitly write units, assume **centimeters (cm)**.
+     - Even if you are not 100% sure, include your best candidate values and add a short note in `evidence`.
+     - Prefer returning a value rather than saying "not specified" when clear dimension numbers exist near the door.
+
 3. **Structural Elements:**
    - Walls: thickness, material, type
    - Doors: width, height, location, type
