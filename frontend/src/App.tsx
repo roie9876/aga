@@ -114,13 +114,42 @@ function App() {
     stage: string;
     logs: Array<{ ts: number; line: string }>;
     door31: { status?: string; reason_not_checked?: string } | null;
+    segmentMeta?: { title?: string; type?: string; description?: string } | null;
+    analysisSummary?: {
+      primary_category?: string;
+      description_he?: string;
+      explanation_he?: string;
+      evidence?: string[];
+      relevant_requirements?: string[];
+    } | null;
+    doorFocusSummary?: {
+      internal_clearance_cm?: number | null;
+      external_clearance_cm?: number | null;
+      confidence?: number | null;
+      evidence?: string[];
+      inside_outside_hint?: string;
+    } | null;
+    validationSummary?: {
+      status?: string;
+      checked_requirements?: string[];
+      decision_summary_he?: string;
+      violation_count?: number;
+    } | null;
   } | null>(null);
   const abortValidationRef = useRef<AbortController | null>(null);
+  const validationLogWrapRef = useRef<HTMLDivElement | null>(null);
   const [validationResult, setValidationResult] = useState<any>(null);
   const [validationHistory, setValidationHistory] = useState<any[]>([]);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [showRequirementsModal, setShowRequirementsModal] = useState(false);
   const [requirementsFilter, setRequirementsFilter] = useState<'all' | 'passed' | 'failed' | 'not_checked'>('all');
+
+  useEffect(() => {
+    const el = validationLogWrapRef.current;
+    if (!el) return;
+    // Keep the newest log lines visible.
+    el.scrollTop = el.scrollHeight;
+  }, [validationLive?.logs?.length]);
   
   const handleDecompositionComplete = (decompId: string) => {
     setDecompositionId(decompId);
@@ -143,6 +172,10 @@ function App() {
       stage: 'starting',
       logs: [{ ts: Date.now(), line: 'Starting validation stream…' }],
       door31: null,
+      segmentMeta: null,
+      analysisSummary: null,
+      doorFocusSummary: null,
+      validationSummary: null,
     });
 
     // Abort any prior stream
@@ -158,6 +191,26 @@ function App() {
       if (!decompResponse.ok) throw new Error('Failed to fetch decomposition data');
       const decompData = await decompResponse.json();
       setDecompositionSnapshot(decompData);
+
+      // Preselect a segment image immediately so the user sees *something* even before
+      // the first stream event arrives.
+      const firstSegmentId =
+        params.mode === 'full_plan'
+          ? 'full_plan'
+          : (Array.isArray(params.approvedSegments) && params.approvedSegments.length > 0 ? params.approvedSegments[0] : null);
+      if (firstSegmentId) {
+        const seg = (decompData?.segments || []).find((s: any) => s?.segment_id === firstSegmentId);
+        setValidationLive((prev) => ({
+          ...(prev ?? { segmentId: null, stage: 'starting', logs: [], door31: null }),
+          segmentId: String(firstSegmentId),
+          stage: 'waiting_stream',
+          segmentMeta: {
+            title: seg?.title,
+            type: seg?.type,
+            description: seg?.description,
+          },
+        }));
+      }
 
       const response = await fetch('/api/v1/segments/validate-segments-stream', {
         method: 'POST',
@@ -191,6 +244,14 @@ function App() {
       const handleEvent = (evt: any) => {
         const type = String(evt?.event || 'unknown');
 
+        if (type === 'stream_open') {
+          setValidationLive((prev) => ({
+            ...(prev ?? { segmentId: null, stage: 'starting', logs: [], door31: null }),
+            stage: 'stream_open',
+          }));
+          appendLog('stream_open: connected');
+          return;
+        }
         if (type === 'start') {
           setValidationLive((prev) => ({
             ...(prev ?? { segmentId: null, stage: 'starting', logs: [], door31: null }),
@@ -204,6 +265,7 @@ function App() {
           return;
         }
         if (type === 'segment_start') {
+          const seg = (decompData?.segments || []).find((s: any) => s?.segment_id === evt.segment_id);
           setValidationProgress((prev) => ({
             total: prev?.total ?? evt.total ?? 0,
             current: Math.max(0, Number(evt.current || 0) - 1),
@@ -214,16 +276,46 @@ function App() {
             segmentId: String(evt.segment_id || ''),
             stage: 'segment_start',
             door31: null,
+            segmentMeta: {
+              title: seg?.title,
+              type: seg?.type ?? evt.segment_type,
+              description: seg?.description ?? evt.description,
+            },
+            analysisSummary: null,
+            doorFocusSummary: null,
+            validationSummary: null,
           }));
           appendLog(`segment_start: ${evt.segment_id}`);
           return;
         }
         if (type === 'analysis_start') {
+          setValidationProgress((prev) => {
+            if (!prev) return prev;
+            return { ...prev, currentSegment: `מנתח ${evt.segment_id || ''}…` };
+          });
           appendLog(`analysis_start: ${evt.segment_id}`);
           return;
         }
         if (type === 'analysis_done') {
+          setValidationProgress((prev) => {
+            if (!prev) return prev;
+            return { ...prev, currentSegment: `סיים ניתוח ${evt.segment_id || ''}` };
+          });
           appendLog(`analysis_done: text=${evt.text_items}, dims=${evt.dimensions}, elems=${evt.structural_elements}`);
+          return;
+        }
+        if (type === 'analysis_summary') {
+          setValidationLive((prev) => ({
+            ...(prev ?? { segmentId: null, stage: 'starting', logs: [], door31: null }),
+            analysisSummary: {
+              primary_category: evt.primary_category,
+              description_he: evt.description_he,
+              explanation_he: evt.explanation_he,
+              evidence: Array.isArray(evt.evidence) ? evt.evidence : undefined,
+              relevant_requirements: Array.isArray(evt.relevant_requirements) ? evt.relevant_requirements : undefined,
+            },
+          }));
+          appendLog(`analysis_summary: ${evt.primary_category || ''}`);
           return;
         }
         if (type === 'door_focus_start') {
@@ -231,11 +323,33 @@ function App() {
             ...(prev ?? { segmentId: null, stage: 'starting', logs: [], door31: null }),
             stage: 'door_focus',
           }));
+          setValidationProgress((prev) => {
+            if (!prev) return prev;
+            return { ...prev, currentSegment: `מזהה דלתות ומרווחים (3.1) בסגמנט ${evt.segment_id || ''}…` };
+          });
           appendLog(`door_focus_start: ${evt.segment_id}`);
           return;
         }
         if (type === 'door_focus_done') {
+          setValidationProgress((prev) => {
+            if (!prev) return prev;
+            return { ...prev, currentSegment: `סיים זיהוי דלתות (3.1) בסגמנט ${evt.segment_id || ''}` };
+          });
           appendLog(`door_focus_done: doors=${evt.doors_found ?? 0}, best_conf=${evt.best_confidence ?? ''}`);
+          return;
+        }
+        if (type === 'door_focus_summary') {
+          setValidationLive((prev) => ({
+            ...(prev ?? { segmentId: null, stage: 'starting', logs: [], door31: null }),
+            doorFocusSummary: {
+              internal_clearance_cm: evt.internal_clearance_cm ?? null,
+              external_clearance_cm: evt.external_clearance_cm ?? null,
+              confidence: evt.confidence ?? null,
+              evidence: Array.isArray(evt.evidence) ? evt.evidence : undefined,
+              inside_outside_hint: evt.inside_outside_hint,
+            },
+          }));
+          appendLog(`door_focus_summary: in=${evt.internal_clearance_cm ?? ''} out=${evt.external_clearance_cm ?? ''}`);
           return;
         }
         if (type === 'door_focus_error') {
@@ -247,13 +361,18 @@ function App() {
             ...(prev ?? { segmentId: null, stage: 'starting', logs: [], door31: null }),
             stage: 'validation',
           }));
+          setValidationProgress((prev) => {
+            if (!prev) return prev;
+            return { ...prev, currentSegment: `מריץ ולידציה על ${evt.segment_id || ''}…` };
+          });
           appendLog(`validation_start: ${evt.segment_id}`);
           return;
         }
         if (type === 'validation_done') {
           setValidationProgress((prev) => ({
             total: prev?.total ?? 0,
-            current: Math.min(prev?.total ?? 0, Number(prev?.current ?? 0) + 0),
+            // Progress is advanced on `segment_done`; keep current unchanged here.
+            current: Number(prev?.current ?? 0),
             currentSegment: `סיים ולידציה ${evt.segment_id} (${evt.status})`,
           }));
           if (evt.door_3_1) {
@@ -266,12 +385,23 @@ function App() {
           if (evt.door_3_1) {
             appendLog(`door 3.1: ${evt.door_3_1.status}${evt.door_3_1.reason_not_checked ? ' (' + evt.door_3_1.reason_not_checked + ')' : ''}`);
           }
+          if (evt.decision_summary_he || typeof evt.violation_count === 'number') {
+            setValidationLive((prev) => ({
+              ...(prev ?? { segmentId: null, stage: 'starting', logs: [], door31: null }),
+              validationSummary: {
+                status: evt.status,
+                checked_requirements: Array.isArray(evt.checked_requirements) ? evt.checked_requirements : undefined,
+                decision_summary_he: evt.decision_summary_he,
+                violation_count: typeof evt.violation_count === 'number' ? evt.violation_count : undefined,
+              },
+            }));
+          }
           return;
         }
         if (type === 'segment_done') {
           setValidationProgress((prev) => ({
             total: prev?.total ?? evt.total ?? 0,
-            current: Number(evt.current || prev?.current || 0),
+            current: Math.max(0, Math.min(Number(prev?.total ?? evt.total ?? 0), Number(evt.current ?? prev?.current ?? 0))),
             currentSegment: `הושלם ${evt.segment_id}`,
           }));
           appendLog(`segment_done: ${evt.segment_id} (${evt.current}/${evt.total})`);
@@ -890,9 +1020,27 @@ function App() {
 
                   <div className="text-sm font-semibold text-text-primary">סגמנט נבדק כעת</div>
                   <div className="rounded-lg border border-border bg-white p-3">
+                    {(validationLive.segmentMeta?.title || validationLive.segmentMeta?.type || validationLive.segmentMeta?.description) && (
+                      <div className="mb-3">
+                        {validationLive.segmentMeta?.title && (
+                          <div className="text-sm font-bold text-text-primary">{String(validationLive.segmentMeta.title)}</div>
+                        )}
+                        {(validationLive.segmentMeta?.type || validationLive.segmentMeta?.description) && (
+                          <div className="text-xs text-text-muted">
+                            {validationLive.segmentMeta?.type ? `סוג: ${String(validationLive.segmentMeta.type)}` : ''}
+                            {validationLive.segmentMeta?.type && validationLive.segmentMeta?.description ? ' · ' : ''}
+                            {validationLive.segmentMeta?.description ? String(validationLive.segmentMeta.description) : ''}
+                          </div>
+                        )}
+                      </div>
+                    )}
                     {validationLive.segmentId ? (
                       <img
-                        src={`/api/v1/decomposition/${encodeURIComponent(String(decompositionId || ''))}/images/segments/${encodeURIComponent(String(validationLive.segmentId))}`}
+                        src={
+                          String(validationLive.segmentId) === 'full_plan'
+                            ? `/api/v1/decomposition/${encodeURIComponent(String(decompositionId || ''))}/images/full-plan`
+                            : `/api/v1/decomposition/${encodeURIComponent(String(decompositionId || ''))}/images/segments/${encodeURIComponent(String(validationLive.segmentId))}`
+                        }
                         alt={`segment ${validationLive.segmentId}`}
                         className="w-full h-auto rounded-md border border-border"
                         loading="lazy"
@@ -904,14 +1052,72 @@ function App() {
                     )}
                   </div>
 
+                  {validationLive.analysisSummary && (
+                    <div className="rounded-lg border border-border bg-white p-3">
+                      <div className="text-sm font-semibold text-text-primary">מה המודל זיהה (סיכום)</div>
+                      <div className="text-xs text-text-muted mt-1">
+                        {validationLive.analysisSummary.primary_category ? `קטגוריה: ${String(validationLive.analysisSummary.primary_category)}` : ''}
+                        {validationLive.analysisSummary.relevant_requirements?.length
+                          ? ` · דרישות רלוונטיות: ${validationLive.analysisSummary.relevant_requirements.join(', ')}`
+                          : ''}
+                      </div>
+                      {validationLive.analysisSummary.description_he && (
+                        <div className="text-sm text-text-primary mt-2">{String(validationLive.analysisSummary.description_he)}</div>
+                      )}
+                      {validationLive.analysisSummary.explanation_he && (
+                        <div className="text-xs text-text-muted mt-2">{String(validationLive.analysisSummary.explanation_he)}</div>
+                      )}
+                      {validationLive.analysisSummary.evidence?.length ? (
+                        <div className="mt-2 text-xs text-text-muted">
+                          {(validationLive.analysisSummary.evidence || []).slice(0, 4).map((e, i) => (
+                            <div key={i}>• {e}</div>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                  )}
+
+                  {validationLive.doorFocusSummary && (
+                    <div className="rounded-lg border border-border bg-white p-3">
+                      <div className="text-sm font-semibold text-text-primary">מרווחי דלת (3.1) — ממצאים</div>
+                      <div className="text-xs text-text-muted mt-1">
+                        פנימי: {validationLive.doorFocusSummary.internal_clearance_cm ?? '—'} ס"מ · חיצוני: {validationLive.doorFocusSummary.external_clearance_cm ?? '—'} ס"מ
+                        {typeof validationLive.doorFocusSummary.confidence === 'number' ? ` · ביטחון: ${Math.round(validationLive.doorFocusSummary.confidence * 100)}%` : ''}
+                      </div>
+                      {validationLive.doorFocusSummary.inside_outside_hint && (
+                        <div className="text-xs text-text-muted mt-2">{String(validationLive.doorFocusSummary.inside_outside_hint)}</div>
+                      )}
+                      {validationLive.doorFocusSummary.evidence?.length ? (
+                        <div className="mt-2 text-xs text-text-muted">
+                          {(validationLive.doorFocusSummary.evidence || []).slice(0, 4).map((e, i) => (
+                            <div key={i}>• {e}</div>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                  )}
+
                   {validationLive.door31 && (
                     <div className="text-xs text-text-muted">
                       דלת 3.1: {String(validationLive.door31.status || '')}{validationLive.door31.reason_not_checked ? ` (${String(validationLive.door31.reason_not_checked)})` : ''}
                     </div>
                   )}
 
+                  {validationLive.validationSummary && (
+                    <div className="rounded-lg border border-border bg-white p-3">
+                      <div className="text-sm font-semibold text-text-primary">תוצאת בדיקה (סיכום)</div>
+                      <div className="text-xs text-text-muted mt-1">
+                        סטטוס: {String(validationLive.validationSummary.status || '')}
+                        {typeof validationLive.validationSummary.violation_count === 'number' ? ` · חריגות: ${validationLive.validationSummary.violation_count}` : ''}
+                      </div>
+                      {validationLive.validationSummary.decision_summary_he && (
+                        <div className="text-xs text-text-muted mt-2">{String(validationLive.validationSummary.decision_summary_he)}</div>
+                      )}
+                    </div>
+                  )}
+
                   <div className="text-sm font-semibold text-text-primary">לוג בזמן אמת</div>
-                  <div className="rounded-lg border border-border bg-white p-3 max-h-56 overflow-auto">
+                  <div ref={validationLogWrapRef} className="rounded-lg border border-border bg-white p-3 max-h-56 overflow-auto">
                     <pre className="text-[11px] leading-5 text-text-muted whitespace-pre-wrap wrap-break-word">
                       {(validationLive.logs || []).map((l) => `${new Date(l.ts).toLocaleTimeString('he-IL')}  ${l.line}`).join('\n')}
                     </pre>

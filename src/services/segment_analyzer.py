@@ -1,4 +1,5 @@
 """Service for analyzing individual plan segments using GPT-5.1."""
+import asyncio
 import base64
 import json
 from typing import Dict, Any, Optional, List
@@ -147,7 +148,8 @@ class SegmentAnalyzer:
         prompt_text: str,
     ) -> Dict[str, Any]:
         """Run a focused GPT pass and parse JSON response."""
-        response = self.openai_client.chat_completions_create(
+        response = await asyncio.to_thread(
+            self.openai_client.chat_completions_create,
             model=settings.azure_openai_deployment_name,
             messages=[
                 {

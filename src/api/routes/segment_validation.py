@@ -1,4 +1,5 @@
 """Segment-based validation API endpoints for decomposed plans."""
+import asyncio
 import json
 import uuid
 from datetime import datetime, timezone
@@ -678,7 +679,22 @@ async def validate_segments_stream(request: SegmentValidationRequest):
             segment_count=len(request.approved_segment_ids),
         )
 
+        # Emit an immediate heartbeat so the client can render UI even if the next
+        # Azure/Cosmos call takes time.
+        yield _ndjson(
+            {
+                "event": "stream_open",
+                "decomposition_id": request.decomposition_id,
+            }
+        )
+
+        # Some proxies/clients may buffer very small first chunks; emit a second
+        # tiny event immediately to encourage early flush.
+        yield _ndjson({"event": "prelude"})
+        await asyncio.sleep(0)
+
         # 1. Fetch decomposition
+        yield _ndjson({"event": "decomposition_fetch_start"})
         cosmos_client = get_cosmos_client()
         query = """
             SELECT * FROM c 
@@ -687,15 +703,17 @@ async def validate_segments_stream(request: SegmentValidationRequest):
         """
         parameters = [{"name": "@decomposition_id", "value": request.decomposition_id}]
         results = await cosmos_client.query_items(query, parameters)
+        yield _ndjson({"event": "decomposition_fetch_done", "result_count": len(results)})
         if not results:
             yield _ndjson({"event": "error", "message": f"Decomposition not found: {request.decomposition_id}"})
             return
         decomposition = results[0]
+        # Always keep this available for optional zoom-out context crops.
+        full_plan_url = decomposition.get("full_plan_url")
 
         # 2. Determine segments
         all_segments = decomposition.get("segments", [])
         if request.mode == "full_plan":
-            full_plan_url = decomposition.get("full_plan_url")
             if not full_plan_url:
                 yield _ndjson({"event": "error", "message": "Decomposition missing full_plan_url"})
                 return
@@ -811,6 +829,20 @@ async def validate_segments_stream(request: SegmentValidationRequest):
                         }
                     )
 
+                    # Emit a user-facing (non-CoT) summary to display in real time.
+                    evidence_list = classification.get("evidence") if isinstance(classification, dict) else None
+                    yield _ndjson(
+                        {
+                            "event": "analysis_summary",
+                            "segment_id": seg_id,
+                            "primary_category": primary_category,
+                            "description_he": classification.get("description") if isinstance(classification, dict) else None,
+                            "explanation_he": classification.get("explanation_he") if isinstance(classification, dict) else None,
+                            "relevant_requirements": classification.get("relevant_requirements") if isinstance(classification, dict) else None,
+                            "evidence": [e for e in (evidence_list or []) if isinstance(e, str) and e.strip()][:4],
+                        }
+                    )
+
                     if ("doors" in effective_check_groups) or ("DOOR_DETAILS" in cat_upper):
                         yield _ndjson({"event": "door_focus_start", "segment_id": seg_id})
                         try:
@@ -904,6 +936,34 @@ async def validate_segments_stream(request: SegmentValidationRequest):
                                     "best_confidence": best_conf,
                                 }
                             )
+
+                            # Emit compact best-door summary for UX.
+                            best_door = None
+                            inside_outside_hint = None
+                            evidence = []
+                            if isinstance(focus_payload, dict):
+                                inside_outside_hint = focus_payload.get("door_inside_outside_hint")
+                                doors = focus_payload.get("doors")
+                                if isinstance(doors, list):
+                                    scored = [d for d in doors if isinstance(d, dict)]
+                                    scored.sort(key=lambda d: float(d.get("confidence") or 0.0), reverse=True)
+                                    best_door = scored[0] if scored else None
+                                    evs = best_door.get("evidence") if isinstance(best_door, dict) else None
+                                    if isinstance(evs, list):
+                                        evidence = [e for e in evs if isinstance(e, str) and e.strip()][:4]
+
+                            if isinstance(best_door, dict):
+                                yield _ndjson(
+                                    {
+                                        "event": "door_focus_summary",
+                                        "segment_id": seg_id,
+                                        "internal_clearance_cm": best_door.get("internal_clearance_cm"),
+                                        "external_clearance_cm": best_door.get("external_clearance_cm"),
+                                        "confidence": best_door.get("confidence"),
+                                        "inside_outside_hint": inside_outside_hint,
+                                        "evidence": evidence,
+                                    }
+                                )
                         except Exception as e:
                             yield _ndjson(
                                 {
@@ -1206,6 +1266,10 @@ async def validate_segments_stream(request: SegmentValidationRequest):
                             "checks_performed": bool(validation_result.get("checks_performed")),
                             "checks_attempted": bool(validation_result.get("checks_attempted")),
                             "door_3_1": door_31,
+                            "decision_summary_he": validation_result.get("decision_summary_he"),
+                            "violation_count": len(validation_result.get("violations") or [])
+                            if isinstance(validation_result.get("violations"), list)
+                            else None,
                         }
                     )
                 else:
@@ -1270,7 +1334,16 @@ async def validate_segments_stream(request: SegmentValidationRequest):
 
         yield _ndjson({"event": "final", "result": result})
 
-    return StreamingResponse(_gen(), media_type="application/x-ndjson")
+    return StreamingResponse(
+        _gen(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 @router.get("/validations")

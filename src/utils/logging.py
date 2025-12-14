@@ -33,6 +33,16 @@ def setup_logging() -> None:
     root_logger.setLevel(log_level)
     root_logger.handlers = []
     root_logger.addHandler(handler)
+
+    # Silence extremely chatty SDK loggers (they can flood logs during streaming).
+    # Keep warnings/errors visible.
+    for noisy_logger in (
+        "azure.core.pipeline.policies.http_logging_policy",
+        "azure.identity",
+        "httpx",
+        "openai",
+    ):
+        logging.getLogger(noisy_logger).setLevel(max(log_level, logging.WARNING))
     
     # Configure structlog
     structlog.configure(

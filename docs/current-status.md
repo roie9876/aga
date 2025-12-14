@@ -56,6 +56,13 @@
 - ✅ החזרת פונקציות Focused Extraction שנקראות מ-`segment_validation.py` (דלתות/קירות/גובה/חלונות/חומרים/ברזל/הערות)
 - ✅ תמיכה אופציונלית ב-"זום-אאוט קונטקסט" עבור מרווחי דלת (3.1): אם יש `full_plan_blob_url` + `segment_bbox`, נוצרת חיתוך קונטקסט עם padding ונשלחות שתי תמונות למודל (קונטקסט + דיטייל)
 
+#### 4.2 **תיקון Streaming ל-UI + הפחתת רעש לוגים (14/12/2025)**
+- ✅ תיקון בעיית UX בשלב 3: ה-UI לא קיבל אירועי סטרים בזמן אמת למרות שה-Backend עבד (נראה ב-`backend.log`)
+- ✅ סיבת שורש: קריאות SDK סינכרוניות ל-Azure OpenAI חסמו את ה-event loop ולכן ה-StreamingResponse לא הצליח “להזרים” שורות NDJSON לדפדפן בזמן
+- ✅ פתרון: הרצת קריאות OpenAI ב-thread דרך `asyncio.to_thread(...)` כדי לשמור על סטרים פעיל
+- ✅ שיפור אנטי-buffering: הוספת אירוע `prelude` והוספת headers (כמו `X-Accel-Buffering: no`) כדי לצמצם buffering בפרוקסי/דפדפן
+- ✅ הפחתת רעש בלוגים: העלאת רמת לוגים לרכיבים “רועשים” (Azure HTTP logging policy / httpx / openai) ל-WARNING כדי למנוע מאות שורות לכל בקשה
+
 #### 5. **Requirements Catalog (66 דרישות) (NEW)**
 - ✅ `GET /api/v1/requirements` - קטלוג דרישות מלא מתוך requirements-mamad.md (סה"כ 66)
 - ✅ `GET /api/v1/requirements/summary` - ספירה לפי פרקים
