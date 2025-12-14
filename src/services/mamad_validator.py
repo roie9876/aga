@@ -286,6 +286,28 @@ class MamadValidator:
             "GENERAL_NOTES": [self._validate_ventilation_note],
             "SECTIONS": [self._validate_room_height],
         }
+
+        def _has_wall_thickness_evidence(data: Dict[str, Any]) -> bool:
+            dims = data.get("dimensions")
+            if isinstance(dims, list):
+                for d in dims:
+                    if not isinstance(d, dict):
+                        continue
+                    element = str(d.get("element") or "").lower()
+                    if "wall thickness" in element or "עובי" in element:
+                        if d.get("value") is not None:
+                            return True
+
+            elements = data.get("structural_elements")
+            if isinstance(elements, list):
+                for el in elements:
+                    if not isinstance(el, dict):
+                        continue
+                    if str(el.get("type") or "").lower() != "wall":
+                        continue
+                    if el.get("thickness") is not None:
+                        return True
+            return False
         # Which official requirement IDs each validator corresponds to.
         # IMPORTANT: We only count a requirement as "checked" if the validator actually
         # had enough evidence to evaluate it (or emitted a missing-info violation).
@@ -338,6 +360,18 @@ class MamadValidator:
                     validations_to_run.append(fn)
                 for req in mapped_effective:
                     planned_requirements.add(req)
+
+        # Heuristic: Some segments are classified as ROOM_LAYOUT but still contain
+        # explicit wall thickness callouts (e.g., 20/25/30/40 along wall lines).
+        # In those cases, we should still run Requirement 1.2 validator.
+        wants_12 = isinstance(relevant_requirements, list) and "1.2" in relevant_requirements
+        has_thickness = _has_wall_thickness_evidence(analysis_data)
+        should_force_12 = wants_12 or has_thickness
+        if should_force_12:
+            if (enabled_requirements is None or "1.2" in enabled_requirements) and "1.2" not in self._skip_requirements:
+                if self._validate_wall_thickness not in validations_to_run:
+                    validations_to_run.append(self._validate_wall_thickness)
+                planned_requirements.add("1.2")
 
         # Manual ROI / unknown classification handling:
         # If the user explicitly enabled requirement groups but the segment classification
@@ -541,10 +575,89 @@ class MamadValidator:
             )
             return False
         
-        def _classify_wall_exposure(location_text: str, wall_type_text: str) -> str:
-            """Return 'external' | 'internal' | 'unknown' based on labels in the segment."""
+        def _infer_sides_from_text(text: str) -> set[str]:
+            t = (text or "").lower()
+            sides: set[str] = set()
+            # Hebrew
+            if any(k in t for k in ["שמאל", "צד שמאל", "קיר שמאל", "שמאלה"]):
+                sides.add("left")
+            if any(k in t for k in ["ימין", "צד ימין", "קיר ימין", "ימינה"]):
+                sides.add("right")
+            if any(k in t for k in ["עליון", "למעלה", "צד עליון", "קיר עליון", "צפון"]):
+                sides.add("top")
+            if any(k in t for k in ["תחתון", "למטה", "צד תחתון", "קיר תחתון", "דרום"]):
+                sides.add("bottom")
+            # English
+            if "left" in t:
+                sides.add("left")
+            if "right" in t:
+                sides.add("right")
+            if "top" in t or "north" in t:
+                sides.add("top")
+            if "bottom" in t or "south" in t:
+                sides.add("bottom")
+            if "east" in t:
+                sides.add("right")
+            if "west" in t:
+                sides.add("left")
+            return sides
+
+        def _infer_sides_from_any(obj: Any) -> set[str]:
+            """Extract side hints from nested dict/list evidence structures."""
+            sides: set[str] = set()
+            if obj is None:
+                return sides
+            if isinstance(obj, str):
+                return _infer_sides_from_text(obj)
+            if isinstance(obj, (int, float, bool)):
+                return sides
+            if isinstance(obj, list):
+                for item in obj:
+                    sides |= _infer_sides_from_any(item)
+                return sides
+            if isinstance(obj, dict):
+                for v in obj.values():
+                    sides |= _infer_sides_from_any(v)
+                return sides
+            # Fallback: string representation
+            try:
+                return _infer_sides_from_text(str(obj))
+            except Exception:
+                return sides
+
+        # Rule-of-thumb inference: door => internal, window => external (when side can be inferred)
+        door_sides: set[str] = set()
+        window_sides: set[str] = set()
+        has_any_window = False
+
+        for el in elements:
+            if not isinstance(el, dict):
+                continue
+            el_type = str(el.get("type") or "").lower()
+            loc = str(el.get("location") or "")
+            notes = str(el.get("notes") or "")
+            combined = f"{loc} {notes}"
+            if el_type == "door":
+                # Stronger signal when it's explicitly a MAMAD door.
+                if any(k in combined for k in ["ממ\"ד", "ממד", "ד.ה", "דלת הדף", "דלת ממ\"ד", "משוריינת", "ממ" ]):
+                    door_sides |= _infer_sides_from_text(combined)
+            elif el_type == "window":
+                has_any_window = True
+                window_sides |= _infer_sides_from_text(combined)
+
+        def _classify_wall_exposure(location_text: str, wall_type_text: str, *, wall: Dict[str, Any]) -> str:
+            """Return 'external' | 'internal' | 'unknown' based on labels and rule-of-thumb inference."""
             location_lower = (location_text or "").lower()
             wall_type_lower = (wall_type_text or "").lower()
+
+            # Consider the full wall context (location/notes/evidence) when searching for explicit markers.
+            wall_notes = str(wall.get("notes") or "")
+            ev_items = wall.get("evidence")
+            ev_text = ""
+            if isinstance(ev_items, list):
+                # Evidence may contain nested dicts; include them in text search.
+                ev_text = " ".join([str(x) for x in ev_items])
+            combined_lower = f"{location_text or ''} {wall_type_text or ''} {wall_notes} {ev_text}".lower()
 
             # Explicit external markers
             external_markers = [
@@ -555,6 +668,10 @@ class MamadValidator:
                 "exterior",
                 "חזית",
                 "מעטפת",
+                "היקפי",
+                "perimeter",
+                "cyan perimeter",
+                "outer band",
                 "outer wall",
             ]
             # Explicit internal markers
@@ -563,20 +680,34 @@ class MamadValidator:
                 "פנימי",
                 "internal",
                 "inside",
+                "partition",
+                "adjacent",
                 "אזור פנימי",
                 "חלל פנימי",
             ]
 
             # If any internal marker appears, treat as internal even if 'outer wall' appears,
             # because some drawings use 'outer wall' loosely for wall thickness callouts.
-            if any(m.lower() in location_lower for m in internal_markers):
-                return "internal"
-            if any(m.lower() in wall_type_lower for m in internal_markers):
+            if any(m.lower() in combined_lower for m in internal_markers):
                 return "internal"
 
-            if any(m.lower() in location_lower for m in external_markers):
+            if any(m.lower() in combined_lower for m in external_markers):
                 return "external"
-            if any(m.lower() in wall_type_lower for m in external_markers):
+
+            # Side-hint inference from wall context (location/notes/evidence)
+            wall_side_hints: set[str] = set()
+            wall_side_hints |= _infer_sides_from_text(location_text)
+            wall_side_hints |= _infer_sides_from_text(str(wall.get("notes") or ""))
+            if isinstance(ev_items, list):
+                wall_side_hints |= _infer_sides_from_any(ev_items)
+
+            # Door/window rule-of-thumb (when a side can be inferred)
+            if wall_side_hints and (wall_side_hints & door_sides):
+                return "internal"
+
+            # A thickness callout referencing multiple sides is usually a perimeter (external) wall set.
+            # Do NOT assume a single-side callout is external just because a window exists on that side.
+            if len(wall_side_hints) >= 2 and not (wall_side_hints & door_sides):
                 return "external"
 
             return "unknown"
@@ -593,6 +724,8 @@ class MamadValidator:
         parsed_internal_thicknesses: List[float] = []
         parsed_unknown_thicknesses: List[float] = []
         external_walls_observed = 0
+        external_sides_inferred: set[str] = set()
+        internal_sides_inferred: set[str] = set()
         for wall in walls:
             thickness_str = wall.get("thickness", "")
             
@@ -604,13 +737,26 @@ class MamadValidator:
 
             wall_location = str(wall.get("location", "") or "")
             wall_type = str(wall.get("type", "") or "")
-            exposure = _classify_wall_exposure(wall_location, wall_type)
+
+            # Collect side hints for optional external-wall-count inference.
+            wall_side_hints: set[str] = set()
+            wall_side_hints |= _infer_sides_from_text(wall_location)
+            wall_side_hints |= _infer_sides_from_text(str(wall.get("notes") or ""))
+            if isinstance(wall.get("evidence"), list):
+                wall_side_hints |= _infer_sides_from_any(wall.get("evidence"))
+
+            exposure = _classify_wall_exposure(wall_location, wall_type, wall=wall)
 
             if exposure == "external":
                 parsed_external_thicknesses.append(thickness_cm)
                 external_walls_observed += 1
+                # If this wall references multiple sides, treat them as external unless a MAMAD door marks a side internal.
+                if wall_side_hints:
+                    external_sides_inferred |= (wall_side_hints - door_sides)
             elif exposure == "internal":
                 parsed_internal_thicknesses.append(thickness_cm)
+                if wall_side_hints:
+                    internal_sides_inferred |= wall_side_hints
             else:
                 parsed_unknown_thicknesses.append(thickness_cm)
 
@@ -634,6 +780,30 @@ class MamadValidator:
                 notes_he="זוהו קירות אך לא נמצאו ערכי עובי שניתנים לפענוח.",
             )
             return False
+
+        # If the LLM did not provide external_wall_count but we can infer it confidently from side hints,
+        # use it to avoid unnecessary not_checked outcomes.
+        if num_external_known is None:
+            # Resolve conflicts: a side cannot be both internal and external.
+            conflict = bool(external_sides_inferred & internal_sides_inferred)
+            if not conflict and 1 <= len(external_sides_inferred) <= 4:
+                # Only accept inference if we also have at least one strong internal/external signal.
+                # (e.g., window/door sides present or explicit markers already classified walls).
+                strong_signal = bool(window_sides or door_sides or parsed_external_thicknesses)
+                if strong_signal:
+                    num_external_known = len(external_sides_inferred)
+
+        # If nothing was explicitly classified as external, but this is a WALL_SECTION-like segment and
+        # all observed wall thicknesses are >=25cm, treat the unknown-thickness walls as *candidates*
+        # for external walls. This avoids skipping 1.2 when drawings omit explicit external labels.
+        classification_ctx = data.get("classification", {})
+        primary_category_ctx = str(classification_ctx.get("primary_category") or "").upper()
+        is_wall_section_like = "WALL_SECTION" in primary_category_ctx
+        if not parsed_external_thicknesses and is_wall_section_like and parsed_unknown_thicknesses:
+            if min(parsed_unknown_thicknesses) >= 25:
+                parsed_external_thicknesses = list(parsed_unknown_thicknesses)
+            # If there is a thickness <25cm, it might be an internal partition, so keep the conservative
+            # not_checked path below.
 
         # If we only have internal/unknown thicknesses, do not fail: requirement 1.2 applies to *external* walls.
         if not parsed_external_thicknesses:
@@ -693,6 +863,30 @@ class MamadValidator:
                 )
                 return True
 
+            # Heuristic: if we can infer at least one internal wall side (e.g., a MAMAD door side),
+            # then the room cannot have 4 external walls. In that case, a minimum external thickness
+            # of 30cm satisfies 1.2 for 1–3 external walls (and also covers the window-case for 1–2).
+            if min_external_thickness >= 30 and door_sides:
+                self._add_requirement_evaluation(
+                    "1.2",
+                    "passed",
+                    evidence=evidence
+                    + [
+                        self._evidence_dimension(
+                            value=30,
+                            unit="cm",
+                            element="required_min_wall_thickness_inferred_max3",
+                            location="external_wall_count_inferred_max3",
+                        )
+                    ],
+                    notes_he=(
+                        "זוהה עובי קיר חיצוני מינימלי ≥30 ס\"מ וכן אינדיקציה לקיר פנימי (דלת ממ\"ד), "
+                        "ולכן מספר הקירות החיצוניים הוא לכל היותר 3. במצב זה עובי ≥30 ס\"מ עומד בדרישה 1.2 "
+                        "עבור 1–3 קירות חיצוניים (כולל מקרה חלון עבור 1–2)."
+                    ),
+                )
+                return True
+
             self._add_requirement_evaluation(
                 "1.2",
                 "not_checked",
@@ -713,7 +907,9 @@ class MamadValidator:
             )
             return False
 
-        required_thickness = self._get_required_wall_thickness(num_external_known, has_window=False)
+        # Conservative: if a window exists on an inferred external wall, require the window-case thickness.
+        has_window_on_external = has_any_window and bool(window_sides)
+        required_thickness = self._get_required_wall_thickness(num_external_known, has_window=has_window_on_external)
         if min_external_thickness < required_thickness:
             self._add_requirement_evaluation(
                 "1.2",
@@ -894,6 +1090,15 @@ class MamadValidator:
             )
             return False
 
+        # Confidence/plausibility guardrails:
+        # - Prevent obvious misreads (e.g., wall thickness '30'cm parsed as 0.30m room height)
+        # - Avoid failing height rules on low-confidence, weakly-signaled measurements
+        dim_conf_raw = height_dims[0].get("confidence", None)
+        try:
+            dim_confidence = float(dim_conf_raw) if dim_conf_raw is not None else 1.0
+        except Exception:
+            dim_confidence = 1.0
+
         height_evidence = [
             self._evidence_dimension(
                 value=height_m,
@@ -904,6 +1109,45 @@ class MamadValidator:
                 raw=height_dims[0],
             )
         ]
+
+        # Room height in drawings is typically in the ~2.2–3.2m range. Anything below 1.5m is
+        # almost certainly an unrelated dimension (opening / sill / thickness / detail).
+        if height_m < 1.50 or height_m > 6.00:
+            self._add_requirement_evaluation(
+                "2.1",
+                "not_checked",
+                reason_not_checked="implausible_room_height",
+                evidence=height_evidence,
+                notes_he="נמצא ערך גובה אך הוא לא סביר כגובה חדר (ייתכן שמדובר במימד אחר), לכן לא בוצעה בדיקת גובה.",
+            )
+            self._add_requirement_evaluation(
+                "2.2",
+                "not_checked",
+                reason_not_checked="implausible_room_height",
+                evidence=height_evidence,
+                notes_he="נמצא ערך גובה אך הוא לא סביר כגובה חדר (ייתכן שמדובר במימד אחר), לכן לא בוצעה בדיקת חריג 2.2.",
+            )
+            return False
+
+        # If the extracted height is below the exception threshold and extraction confidence is low,
+        # and the segment doesn't contain explicit height markers, treat it as not_checked to avoid
+        # false failures from noisy crops.
+        if height_m < 2.20 and dim_confidence < 0.60 and not height_markers_present:
+            self._add_requirement_evaluation(
+                "2.1",
+                "not_checked",
+                reason_not_checked="low_confidence_room_height",
+                evidence=height_evidence,
+                notes_he="זוהה מימד גובה נמוך אך ברמת ביטחון נמוכה וללא סימון גובה ברור (H=/גובה), לכן לא סומן כגובה חדר.",
+            )
+            self._add_requirement_evaluation(
+                "2.2",
+                "not_checked",
+                reason_not_checked="low_confidence_room_height",
+                evidence=height_evidence,
+                notes_he="זוהה מימד גובה נמוך אך ברמת ביטחון נמוכה וללא סימון גובה ברור (H=/גובה), לכן לא סומן כגובה חדר.",
+            )
+            return False
         
         # Evidence-first evaluation for 2.1 and 2.2.
         if height_m >= 2.50:
@@ -923,7 +1167,9 @@ class MamadValidator:
             return True
 
         if height_m < 2.20:
-            # Fails both the standard and the exception minimum.
+            # Below the exception threshold: the plan cannot rely on the 2.20m exception.
+            # We still fail the standard requirement (2.1) and mark 2.2 as not_checked to avoid
+            # presenting it as an independent failure.
             self._add_requirement_evaluation(
                 "2.1",
                 "failed",
@@ -932,9 +1178,10 @@ class MamadValidator:
             )
             self._add_requirement_evaluation(
                 "2.2",
-                "failed",
+                "not_checked",
+                reason_not_checked="height_below_exception_min",
                 evidence=height_evidence + [self._evidence_dimension(value=2.20, unit="m", element="required_exception_min_height")],
-                notes_he="גובה החדר נמוך גם מהמינימום לחריג 2.20 מ'.",
+                notes_he="הגובה נמוך מ-2.20 מ' ולכן החריג (2.2) אינו יכול לחול; הכשל מדווח במסגרת 2.1.",
             )
             return True
 
