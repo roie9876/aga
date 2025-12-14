@@ -7,6 +7,23 @@ import {
 import type { PlanDecomposition } from '../types';
 import { Button, Card, Badge } from './ui';
 
+const translateModelCategory = (category: string): string => {
+  const key = String(category || '').trim().toUpperCase();
+  const map: Record<string, string> = {
+    WALL_SECTION: 'חתך קיר',
+    ROOM_LAYOUT: 'פריסת חדר',
+    DOOR_DETAILS: 'פרטי דלת',
+    WINDOW_DETAILS: 'פרטי חלון',
+    REBAR_DETAILS: 'פרטי זיון',
+    MATERIALS_SPECS: 'מפרט חומרים',
+    GENERAL_NOTES: 'הערות כלליות',
+    SECTIONS: 'חתכים',
+    OTHER: 'אחר',
+    UNKNOWN: 'לא ידוע',
+  };
+  return map[key] || (category ? String(category) : 'לא ידוע');
+};
+
 interface DecompositionReviewProps {
   decompositionId: string;
   onApprove: (params: { mode: 'segments' | 'full_plan'; approvedSegments: string[]; check_groups: string[] }) => void;
@@ -764,7 +781,7 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
                         <div>
                           <strong className="text-text-primary block mb-1">ניתוח AI:</strong>
                           <div className="text-xs text-text-muted leading-relaxed bg-background p-2 rounded border border-border">
-                            {segment.llm_reasoning}
+                            {segment.llm_reasoning === 'MANUAL_ROI' ? 'אזור שסומן ידנית' : ''}
                           </div>
                         </div>
                       )}
@@ -774,17 +791,21 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
                           <strong className="text-text-primary block mb-1">סיווג וחילוץ (שקיפות):</strong>
                           <div className="text-xs text-text-muted leading-relaxed bg-background p-2 rounded border border-border space-y-2">
                             <div>
-                              <span className="font-semibold">Primary:</span>{' '}
-                              {String(segment.analysis_data.classification.primary_category || '—')}
+                              <span className="font-semibold">ראשי:</span>{' '}
+                              {segment.analysis_data.classification.primary_category
+                                ? translateModelCategory(String(segment.analysis_data.classification.primary_category))
+                                : '—'}
                               {Array.isArray(segment.analysis_data.classification.secondary_categories) && segment.analysis_data.classification.secondary_categories.length > 0 ? (
                                 <>
-                                  {' '}<span className="font-semibold">Secondary:</span>{' '}
-                                  {segment.analysis_data.classification.secondary_categories.join(', ')}
+                                  {' '}<span className="font-semibold">משני:</span>{' '}
+                                  {segment.analysis_data.classification.secondary_categories
+                                    .map((c: any) => translateModelCategory(String(c)))
+                                    .join(', ')}
                                 </>
                               ) : null}
                               {typeof segment.analysis_data.classification.confidence === 'number' ? (
                                 <>
-                                  {' '}<span className="font-semibold">Confidence:</span>{' '}
+                                  {' '}<span className="font-semibold">ביטחון:</span>{' '}
                                   {(segment.analysis_data.classification.confidence * 100).toFixed(0)}%
                                 </>
                               ) : null}

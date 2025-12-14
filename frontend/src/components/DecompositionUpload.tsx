@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { Upload, FileImage, Loader2, AlertCircle } from 'lucide-react';
 import type { DecompositionResponse } from '../types';
 
@@ -17,6 +17,15 @@ export const DecompositionUpload: React.FC<DecompositionUploadProps> = ({
   const [progress, setProgress] = useState(0);
   const [currentStep, setCurrentStep] = useState('');
   const [error, setError] = useState<string | null>(null);
+
+  const folderInputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    const input = folderInputRef.current;
+    if (!input) return;
+    input.setAttribute('webkitdirectory', '');
+    input.setAttribute('directory', '');
+  }, []);
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -42,6 +51,12 @@ export const DecompositionUpload: React.FC<DecompositionUploadProps> = ({
     if (files && files.length > 0) {
       handleFileUpload(files[0]);
     }
+  }, []);
+
+  const handleSegmentsFolderSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+    handleSegmentsUpload(files);
   }, []);
 
   const handleFileUpload = async (file: File) => {
@@ -95,6 +110,73 @@ export const DecompositionUpload: React.FC<DecompositionUploadProps> = ({
     } catch (err) {
       console.error('Upload error:', err);
       setError(err instanceof Error ? err.message : 'שגיאה בהעלאת הקובץ');
+      setIsUploading(false);
+    }
+  };
+
+  const handleSegmentsUpload = async (files: FileList) => {
+    setIsUploading(true);
+    setError(null);
+    setProgress(0);
+    setCurrentStep('מעלה סגמנטים...');
+
+    try {
+      const segmentFiles = Array.from(files)
+        .filter((f) => {
+          const name = (f.name || '').toLowerCase();
+          const type = (f.type || '').toLowerCase();
+          return type.startsWith('image/') || type === 'application/pdf' || name.endsWith('.pdf');
+        })
+        .sort((a: any, b: any) => {
+          const ap = String(a.webkitRelativePath || a.name);
+          const bp = String(b.webkitRelativePath || b.name);
+          return ap.localeCompare(bp);
+        });
+
+      if (segmentFiles.length === 0) {
+        throw new Error('לא נמצאו תמונות או PDF בספרייה שבחרת');
+      }
+
+      const formData = new FormData();
+      formData.append('project_id', projectId);
+      for (const f of segmentFiles) {
+        formData.append('files', f, f.name);
+      }
+
+      setProgress(20);
+      setCurrentStep(`מעלה ${segmentFiles.length} קבצים...`);
+
+      const progressInterval = setInterval(() => {
+        setProgress((prev) => {
+          if (prev >= 90) {
+            clearInterval(progressInterval);
+            return 90;
+          }
+          return prev + 5;
+        });
+      }, 1500);
+
+      const response = await fetch('/api/v1/decomposition/upload-segments', {
+        method: 'POST',
+        body: formData,
+      });
+
+      clearInterval(progressInterval);
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || 'שגיאה בטעינת הסגמנטים');
+      }
+
+      const data: DecompositionResponse = await response.json();
+      setProgress(100);
+      setCurrentStep('הושלם!');
+      setTimeout(() => {
+        onDecompositionComplete(data.decomposition_id);
+      }, 500);
+    } catch (err) {
+      console.error('Segments upload error:', err);
+      setError(err instanceof Error ? err.message : 'שגיאה בטעינת הסגמנטים');
       setIsUploading(false);
     }
   };
@@ -165,7 +247,7 @@ export const DecompositionUpload: React.FC<DecompositionUploadProps> = ({
 
       {error && (
         <div className="p-4 bg-error/5 border border-error/20 rounded-xl flex items-start gap-3">
-          <AlertCircle className="w-5 h-5 text-error flex-shrink-0 mt-0.5" />
+          <AlertCircle className="w-5 h-5 text-error shrink-0 mt-0.5" />
           <div className="text-sm text-error font-medium">{error}</div>
         </div>
       )}
@@ -192,6 +274,16 @@ export const DecompositionUpload: React.FC<DecompositionUploadProps> = ({
           onChange={handleFileSelect}
         />
 
+        <input
+          ref={folderInputRef}
+          id="segments-folder-input"
+          type="file"
+          className="hidden"
+          multiple
+          accept="image/*,.pdf"
+          onChange={handleSegmentsFolderSelect}
+        />
+
         <div className="flex flex-col items-center gap-4">
           <div className={`
             w-16 h-16 rounded-full flex items-center justify-center border transition-colors duration-300
@@ -211,10 +303,23 @@ export const DecompositionUpload: React.FC<DecompositionUploadProps> = ({
         </div>
       </div>
 
+      <div className="flex flex-wrap items-center gap-3">
+        <button
+          type="button"
+          className="px-4 py-2 rounded-xl border border-border bg-card text-text-primary text-sm font-medium hover:border-primary/40 hover:bg-gray-50/50 transition-colors"
+          onClick={() => document.getElementById('segments-folder-input')?.click()}
+        >
+          טען תיקיית סגמנטים (תמונות / PDF)
+        </button>
+        <div className="text-xs text-text-muted">
+          מתאים כשיש לך כבר קבצים חתוכים של אותו ממ״ד
+        </div>
+      </div>
+
       <div className="grid gap-4 md:grid-cols-2">
         <div className="rounded-xl bg-primary/5 border border-primary/10 p-4">
           <div className="flex items-start gap-3">
-            <FileImage className="w-5 h-5 text-primary flex-shrink-0 mt-0.5" />
+            <FileImage className="w-5 h-5 text-primary shrink-0 mt-0.5" />
             <div className="text-sm text-text-primary leading-relaxed">
               <strong className="font-semibold">תמיכה בקבצים</strong>: המערכת מקבלת PDF או תמונה (PNG/JPG). קבצי CAD (כמו DWF/DWFX/DWG) אינם נתמכים.
             </div>
@@ -222,7 +327,7 @@ export const DecompositionUpload: React.FC<DecompositionUploadProps> = ({
         </div>
         <div className="rounded-xl bg-success/5 border border-success/10 p-4">
           <div className="flex items-start gap-3">
-            <FileImage className="w-5 h-5 text-success flex-shrink-0 mt-0.5" />
+            <FileImage className="w-5 h-5 text-success shrink-0 mt-0.5" />
             <div className="text-sm text-text-primary leading-relaxed">
               <strong className="font-semibold">איך זה עובד</strong>: GPT-5.1 מזהה תוכנית קומה, חתכים ופרטי בניה ומכין רשימת סגמנטים שתוכל לאשר לבדיקה.
             </div>

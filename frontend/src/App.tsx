@@ -21,6 +21,24 @@ import { StepIndicator } from './components/ValidationComponents';
 
 type WorkflowStage = 'upload' | 'decomposition_review' | 'validation' | 'results' | 'history';
 
+// Translate model classification categories (backend emits UPPER_SNAKE_CASE)
+const translateModelCategory = (category: string): string => {
+  const key = String(category || '').trim().toUpperCase();
+  const map: Record<string, string> = {
+    WALL_SECTION: 'חתך קיר',
+    ROOM_LAYOUT: 'פריסת חדר',
+    DOOR_DETAILS: 'פרטי דלת',
+    WINDOW_DETAILS: 'פרטי חלון',
+    REBAR_DETAILS: 'פרטי זיון',
+    MATERIALS_SPECS: 'מפרט חומרים',
+    GENERAL_NOTES: 'הערות כלליות',
+    SECTIONS: 'חתכים',
+    OTHER: 'אחר',
+    UNKNOWN: 'לא ידוע',
+  };
+  return map[key] || (category ? String(category) : 'לא ידוע');
+};
+
 // Helper to translate category names (from enum to Hebrew)
 const translateCategory = (category: string): string => {
   const categories: Record<string, string> = {
@@ -910,7 +928,7 @@ function App() {
                     </div>
                     <div>
                       <p className="text-sm font-semibold text-text-primary">AI מתקדם</p>
-                      <p className="text-xs text-text-muted mt-1">GPT-5.1 Reasoning</p>
+                      <p className="text-xs text-text-muted mt-1">מופעל ע"י GPT-5.1</p>
                     </div>
                   </div>
                 </Card>
@@ -1043,7 +1061,8 @@ function App() {
                         }
                         alt={`segment ${validationLive.segmentId}`}
                         className="w-full h-auto rounded-md border border-border"
-                        loading="lazy"
+                        loading="eager"
+                        fetchPriority="high"
                       />
                     ) : (
                       <div className="text-xs text-text-muted">
@@ -1056,7 +1075,7 @@ function App() {
                     <div className="rounded-lg border border-border bg-white p-3">
                       <div className="text-sm font-semibold text-text-primary">מה המודל זיהה (סיכום)</div>
                       <div className="text-xs text-text-muted mt-1">
-                        {validationLive.analysisSummary.primary_category ? `קטגוריה: ${String(validationLive.analysisSummary.primary_category)}` : ''}
+                        {validationLive.analysisSummary.primary_category ? `קטגוריה: ${translateModelCategory(String(validationLive.analysisSummary.primary_category))}` : ''}
                         {validationLive.analysisSummary.relevant_requirements?.length
                           ? ` · דרישות רלוונטיות: ${validationLive.analysisSummary.relevant_requirements.join(', ')}`
                           : ''}
@@ -1393,9 +1412,9 @@ function App() {
                               {(() => {
                                 const debug = (validation as any)?.debug;
                                 const categoriesUsed = debug?.categories_used as string[] | undefined;
-                                const validatorsRun = debug?.validators_run as string[] | undefined;
 
-                                if ((!categoriesUsed || categoriesUsed.length === 0) && (!validatorsRun || validatorsRun.length === 0)) {
+                                // Hide internal function names from end users; keep optional category list.
+                                if (!categoriesUsed || categoriesUsed.length === 0) {
                                   return null;
                                 }
 
@@ -1408,13 +1427,9 @@ function App() {
                                       {Array.isArray(categoriesUsed) && categoriesUsed.length > 0 && (
                                         <div>
                                           <span className="font-semibold">קטגוריות ששימשו:</span>{' '}
-                                          <span className="text-text-muted">{categoriesUsed.join(', ')}</span>
-                                        </div>
-                                      )}
-                                      {Array.isArray(validatorsRun) && validatorsRun.length > 0 && (
-                                        <div>
-                                          <span className="font-semibold">פונקציות בדיקה שרצו:</span>{' '}
-                                          <span className="text-text-muted">{validatorsRun.join(', ')}</span>
+                                          <span className="text-text-muted">
+                                            {categoriesUsed.map((c) => translateModelCategory(String(c))).join(', ')}
+                                          </span>
                                         </div>
                                       )}
                                     </div>
@@ -1676,9 +1691,9 @@ function App() {
                                 {/* LLM Reasoning */}
                                 {(() => {
                                   const decisionSummary = segment?.validation?.decision_summary_he;
-                                  const llmReasoning = analysis.reasoning;
 
-                                  if (!decisionSummary && !llmReasoning) return null;
+                                  // Do not display raw LLM reasoning/debug strings (often English/internal).
+                                  if (!decisionSummary) return null;
 
                                   return (
                                     <details open className="text-sm mt-3 border-t border-border pt-3">
@@ -1688,11 +1703,6 @@ function App() {
                                       {decisionSummary && (
                                         <div className="mt-2 text-text-muted bg-background rounded-lg p-3 border border-border text-sm leading-relaxed">
                                           {decisionSummary}
-                                        </div>
-                                      )}
-                                      {llmReasoning && (
-                                        <div className="mt-2 text-text-muted bg-blue-50 rounded-lg p-3 border border-blue-200 text-sm leading-relaxed">
-                                          {llmReasoning}
                                         </div>
                                       )}
                                     </details>

@@ -582,6 +582,7 @@ Coverage Report (NEW - Tracks 16 implemented checks)
 | **2025-12-11** | Enhanced CSS with animations, shadows, and utilities | System |
 | **2025-12-11** | **Production-ready UI matching Linear/Vercel quality** | System |
 | **2025-12-13** | Disabled automatic segmentation (manual ROI workflow) + moved Blob SDK calls off event loop to prevent ROI-save hangs | Copilot |
+| **2025-12-14** | Added folder upload for pre-cut segment images (new /api/v1/decomposition/upload-segments + UI hook in DecompositionUpload) | Copilot |
 
 
 

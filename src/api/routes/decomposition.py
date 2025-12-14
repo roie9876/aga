@@ -36,6 +36,153 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/decomposition", tags=["decomposition"])
 
 
+@router.post("/upload-segments", response_model=DecompositionResponse)
+async def create_decomposition_from_uploaded_segments(
+    project_id: str = Form(..., description="Project identifier"),
+    files: list[UploadFile] = File(..., description="Segment image files (PNG, JPG)"),
+    validation_id: Optional[str] = Form(None, description="Optional validation ID"),
+):
+    """Create a decomposition from already-cropped segment images.
+
+    This is useful when the user already has a folder of segment images.
+    We upload each segment + thumbnail to Blob Storage and persist a decomposition
+    document for the regular review/approval workflow.
+    """
+
+    if not files:
+        raise HTTPException(status_code=400, detail="לא נבחרו קבצים")
+
+    if len(files) > 200:
+        raise HTTPException(status_code=400, detail="יותר מדי קבצים (מקסימום 200)")
+
+    try:
+        if not validation_id:
+            validation_id = f"val-{uuid.uuid4()}"
+
+        decomp_id = f"decomp-{uuid.uuid4()}"
+        cropper = get_image_cropper()
+        blob_client = get_blob_client()
+
+        segments: list[PlanSegment] = []
+        total_bytes = 0
+
+        from src.utils.file_converter import convert_to_image_if_needed
+        from PIL import Image
+
+        for idx, upload in enumerate(files, start=1):
+            filename = upload.filename or f"segment_{idx:03d}"
+            data = await upload.read()
+            if not data:
+                continue
+
+            total_bytes += len(data)
+
+            # Support: images + PDF (convert PDF->PNG if needed)
+            try:
+                processed_bytes, processed_filename, _was_converted = convert_to_image_if_needed(
+                    data,
+                    filename,
+                )
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+
+            # Normalize to PNG regardless of input (JPG/PNG/PDF)
+            try:
+                with Image.open(BytesIO(processed_bytes)) as img:
+                    if img.mode in ("P", "LA", "RGBA"):
+                        normalized = img.convert("RGBA")
+                    elif img.mode != "RGB":
+                        normalized = img.convert("RGB")
+                    else:
+                        normalized = img
+
+                    png_buffer = BytesIO()
+                    normalized.save(png_buffer, format="PNG")
+                    png_buffer.seek(0)
+            except Exception:
+                raise HTTPException(status_code=400, detail=f"קובץ לא תקין: {processed_filename}")
+
+            thumb_buffer = cropper.create_thumbnail(png_buffer)
+            png_buffer.seek(0)
+
+            seg_id = f"seg_{idx:03d}"
+            segment_blob = f"{validation_id}/segments/{seg_id}.png"
+            with anyio.fail_after(60):
+                segment_url = await blob_client.upload_blob(
+                    blob_name=segment_blob,
+                    data=png_buffer,
+                    overwrite=True,
+                )
+
+            thumb_blob = f"{validation_id}/segments/{seg_id}_thumb.png"
+            with anyio.fail_after(60):
+                thumb_url = await blob_client.upload_blob(
+                    blob_name=thumb_blob,
+                    data=thumb_buffer,
+                    overwrite=True,
+                )
+
+            title = Path(filename).stem or f"סגמנט {idx}"
+
+            segments.append(
+                PlanSegment(
+                    segment_id=seg_id,
+                    type=SegmentType.UNKNOWN,
+                    title=title,
+                    description="סגמנט שהועלה כתמונה חתוכה",
+                    bounding_box=BoundingBox(x=0.0, y=0.0, width=1.0, height=1.0),
+                    blob_url=segment_url,
+                    thumbnail_url=thumb_url,
+                    confidence=1.0,
+                    llm_reasoning=None,
+                    approved_by_user=True,
+                    used_in_checks=[],
+                )
+            )
+
+        file_size_mb = total_bytes / (1024 * 1024)
+
+        decomposition = PlanDecomposition(
+            id=decomp_id,
+            validation_id=validation_id,
+            project_id=project_id,
+            status=DecompositionStatus.REVIEW_NEEDED,
+            full_plan_url="",
+            full_plan_width=0,
+            full_plan_height=0,
+            file_size_mb=file_size_mb,
+            metadata=ProjectMetadata(),
+            segments=segments,
+            processing_stats=ProcessingStats(
+                total_segments=len(segments),
+                processing_time_seconds=0.0,
+                llm_tokens_used=0,
+            ),
+        )
+
+        cosmos_client = get_cosmos_client()
+        decomp_dict = decomposition.model_dump(mode="json")
+        decomp_dict["type"] = "decomposition"
+        await cosmos_client.create_item(decomp_dict)
+
+        return DecompositionResponse(
+            decomposition_id=decomposition.id,
+            status=decomposition.status,
+            estimated_time_seconds=10,
+            message="הסגמנטים נטענו בהצלחה. סמן/בטל סגמנטים והמשך לשלב הבא.",
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(
+            "Failed to create decomposition from uploaded segments",
+            project_id=project_id,
+            error=str(e),
+        )
+        raise HTTPException(status_code=500, detail=f"שגיאה ביצירת פירוק מסגמנטים: {str(e)}")
+
+
 @router.get("/{decomposition_id}/images/full-plan")
 async def get_full_plan_image(decomposition_id: str):
     """Fetch the stored full plan image for a decomposition.

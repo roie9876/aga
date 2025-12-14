@@ -518,14 +518,17 @@ Return JSON:
         Returns:
             Image bytes
         """
-        # Extract blob name from URL (simple approach - assumes URL format)
-        # Format: https://account.blob.core.windows.net/container/path?sas
+        # NOTE: This runs as part of an async workflow (streaming validation).
+        # `requests.get` is blocking, so run it in a worker thread to avoid
+        # blocking the event loop and to allow streaming events to flush.
         import requests
-        
-        response = requests.get(blob_url)
-        response.raise_for_status()
-        
-        return response.content
+
+        def _get() -> bytes:
+            response = requests.get(blob_url, timeout=60)
+            response.raise_for_status()
+            return response.content
+
+        return await asyncio.to_thread(_get)
     
     async def _analyze_with_gpt(
         self,
@@ -695,9 +698,12 @@ What does this segment primarily show? Choose ONE or MORE categories:
 - Include units for all measurements
 - Be comprehensive - this data will be used for compliance validation"""
 
-        # Call Azure OpenAI deployment configured via AZURE_OPENAI_DEPLOYMENT_NAME
+        # Call Azure OpenAI deployment configured via AZURE_OPENAI_DEPLOYMENT_NAME.
+        # This is a potentially long-running, blocking network call. Run it in a
+        # worker thread so the event loop can keep flushing NDJSON stream events.
         try:
-            response = self.openai_client.chat_completions_create(
+            response = await asyncio.to_thread(
+                self.openai_client.chat_completions_create,
                 model=settings.azure_openai_deployment_name,
                 messages=[
                     {
@@ -706,13 +712,11 @@ What does this segment primarily show? Choose ONE or MORE categories:
                             {"type": "text", "text": system_prompt + "\n\n" + user_prompt},
                             {
                                 "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/png;base64,{image_base64}"
-                                }
-                            }
-                        ]
+                                "image_url": {"url": f"data:image/png;base64,{image_base64}"},
+                            },
+                        ],
                     }
-                ]
+                ],
             )
             
             content = response.choices[0].message.content
