@@ -1,3 +1,5 @@
+from typing import Optional
+
 import pytest
 
 
@@ -49,13 +51,19 @@ def test_manual_roi_enabled_requirements_emits_not_checked_evals_only() -> None:
 
 
 @pytest.mark.parametrize(
-    "thickness,expected_status",
+    "thickness,location,external_wall_count,expected_status",
     [
-        ("30cm", "passed"),
-        ("20cm", "failed"),
+        ("30cm", "קיר חיצוני", 1, "passed"),
+        ("20cm", "קיר חיצוני", 1, "failed"),
+        ("20cm", "אזור פנימי ללא חלונות", None, "not_checked"),
     ],
 )
-def test_wall_thickness_pass_or_fail_requires_evidence(thickness: str, expected_status: str) -> None:
+def test_wall_thickness_pass_or_fail_requires_evidence(
+    thickness: str,
+    location: str,
+    external_wall_count: Optional[int],
+    expected_status: str,
+) -> None:
     from src.services.mamad_validator import MamadValidator
 
     validator = MamadValidator()
@@ -64,8 +72,9 @@ def test_wall_thickness_pass_or_fail_requires_evidence(thickness: str, expected_
         "text_items": [],
         "dimensions": [],
         "annotations": [],
+        "external_wall_count": external_wall_count,
         "structural_elements": [
-            {"type": "wall", "thickness": thickness, "unit": "cm", "location": "test-wall"},
+            {"type": "wall", "thickness": thickness, "unit": "cm", "location": location},
         ],
     }
 
@@ -85,7 +94,10 @@ def test_wall_thickness_pass_or_fail_requires_evidence(thickness: str, expected_
     _assert_no_passed_or_failed_without_evidence(evals)
 
     # If we got pass/fail, the requirement must be counted as checked.
-    assert "1.2" in (result.get("checked_requirements") or [])
+    if expected_status in {"passed", "failed"}:
+        assert "1.2" in (result.get("checked_requirements") or [])
+    else:
+        assert "1.2" not in (result.get("checked_requirements") or [])
 
 
 def test_room_height_evaluation_requires_evidence_when_failed() -> None:

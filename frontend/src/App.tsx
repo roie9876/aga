@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { 
   CheckCircle2, 
   Sparkles, 
@@ -20,6 +20,104 @@ import { Button, Card, StatCard, Badge, ProgressBar, EmptyState, FloatingActionB
 import { StepIndicator } from './components/ValidationComponents';
 
 type WorkflowStage = 'upload' | 'decomposition_review' | 'validation' | 'results' | 'history';
+
+type RequirementStatus = 'passed' | 'failed' | 'not_checked';
+
+const normalizeRequirementId = (value: unknown): string | null => {
+  if (typeof value !== 'string') return null;
+  const id = value.trim();
+  if (!id) return null;
+
+  // Normalize legacy/internal rule ids used in violations (e.g., "REQ_1_2" -> "1.2").
+  const m = /^REQ_(\d+)(?:_(\d+))?$/.exec(id);
+  if (m) {
+    return m[2] ? `${m[1]}.${m[2]}` : m[1];
+  }
+
+  // Keep typical requirement id shapes like 1, 1.2, 3.1 etc; otherwise return as-is.
+  return id;
+};
+
+const computeOverallRequirementStatus = (validationResult: any): Record<string, RequirementStatus> => {
+  const status: Record<string, RequirementStatus> = {};
+  const seen: Record<string, { passed: boolean; failed: boolean; notChecked: boolean }> = {};
+
+  const segments: any[] = Array.isArray(validationResult?.segments)
+    ? validationResult.segments
+    : (Array.isArray(validationResult?.analyzed_segments) ? validationResult.analyzed_segments : []);
+
+  for (const seg of segments) {
+    const validation = seg?.validation || {};
+
+    const reqEvals: any[] = Array.isArray(validation?.requirement_evaluations)
+      ? validation.requirement_evaluations
+      : [];
+    for (const ev of reqEvals) {
+      const rid = normalizeRequirementId(ev?.requirement_id);
+      if (!rid) continue;
+      (seen[rid] ||= { passed: false, failed: false, notChecked: false });
+      const s = String(ev?.status || '').toLowerCase();
+      if (s === 'passed' || s === 'pass') seen[rid].passed = true;
+      else if (s === 'failed' || s === 'fail') seen[rid].failed = true;
+      else if (s === 'not_checked' || s === 'skip' || s === 'skipped') seen[rid].notChecked = true;
+    }
+
+    // If segment is explicitly "passed", treat checked_requirements as evidence of pass.
+    const checkedReqs: unknown = validation?.checked_requirements;
+    const segStatus = String(validation?.status || '').toLowerCase();
+    const segPassed = Boolean(validation?.passed) || segStatus === 'passed' || segStatus === 'pass';
+    if (segPassed && Array.isArray(checkedReqs)) {
+      for (const r of checkedReqs) {
+        const rid = normalizeRequirementId(r);
+        if (!rid) continue;
+        (seen[rid] ||= { passed: false, failed: false, notChecked: false });
+        seen[rid].passed = true;
+      }
+    }
+
+    // Violations are evidence of failure.
+    const violations: any[] = Array.isArray(validation?.violations) ? validation.violations : [];
+    for (const v of violations) {
+      const rid = normalizeRequirementId(v?.rule_id);
+      if (!rid) continue;
+      (seen[rid] ||= { passed: false, failed: false, notChecked: false });
+      seen[rid].failed = true;
+    }
+  }
+
+  // Prefer evidence-based aggregation (pass if any segment passed).
+  for (const [rid, flags] of Object.entries(seen)) {
+    status[rid] = flags.passed ? 'passed' : flags.failed ? 'failed' : 'not_checked';
+  }
+
+  // Merge in server coverage ids (for ids that had no per-segment evidence)
+  const coverageReqs = validationResult?.coverage?.requirements;
+  if (coverageReqs && typeof coverageReqs === 'object') {
+    for (const [rid, req] of Object.entries(coverageReqs)) {
+      if (status[rid as string]) continue;
+      const s = String((req as any)?.status || '').toLowerCase();
+      if (s === 'passed') status[rid as string] = 'passed';
+      else if (s === 'failed') status[rid as string] = 'failed';
+      else if (s === 'not_checked') status[rid as string] = 'not_checked';
+    }
+  }
+
+  return status;
+};
+
+const translateDemoFocusText = (text: string): string => {
+  if (!text) return text;
+  // Replace enum-like tokens (UPPER_SNAKE_CASE) with Hebrew labels when we have them.
+  return text.replace(/\b[A-Z_]{3,}\b/g, (token) => translateModelCategory(token));
+};
+
+const toSimpleOneLiner = (text: string): string => {
+  const t = String(text || '').trim();
+  if (!t) return 'אין תיאור זמין לדרישה זו.';
+  const firstLine = t.split('\n').map((s) => s.trim()).find(Boolean) || t;
+  const sentence = firstLine.split(/(?<=[.!?])\s+/)[0] || firstLine;
+  return sentence.length > 180 ? `${sentence.slice(0, 180).trim()}…` : sentence;
+};
 
 // Translate model classification categories (backend emits UPPER_SNAKE_CASE)
 const translateModelCategory = (category: string): string => {
@@ -53,6 +151,17 @@ const translateCategory = (category: string): string => {
   };
   
   return categories[category.toLowerCase()] || category;
+};
+
+const translateAnyCategory = (category: string): string => {
+  const raw = String(category || '').trim();
+  if (!raw) return 'לא ידוע';
+  const upper = raw.toUpperCase();
+  // If it's enum-like (UPPER_SNAKE_CASE), prefer the model-category translation.
+  if (upper === raw && /_/.test(raw)) {
+    return translateModelCategory(raw);
+  }
+  return translateCategory(raw);
 };
 
 // Helper to translate segment types (from enum to Hebrew)
@@ -115,6 +224,61 @@ const calculateCoverageStatistics = (validationResult: any) => {
   };
 };
 
+// Calculate coverage statistics using *effective* (global) requirement status where
+// pass wins over fail across segments.
+const calculateEffectiveCoverageStatistics = (
+  validationResult: any,
+  overallRequirementStatus: Record<string, RequirementStatus>
+) => {
+  const coverageReqs = validationResult?.coverage?.requirements;
+  const byCat = validationResult?.coverage?.by_category;
+
+  const reqIds: string[] = [];
+  if (coverageReqs && typeof coverageReqs === 'object') {
+    reqIds.push(...Object.keys(coverageReqs));
+  } else if (byCat && typeof byCat === 'object') {
+    for (const reqs of Object.values(byCat)) {
+      if (!Array.isArray(reqs)) continue;
+      for (const r of reqs) {
+        if (r?.requirement_id) reqIds.push(String(r.requirement_id));
+      }
+    }
+  }
+
+  // Fallback: use backend stats if we have no ids.
+  if (reqIds.length === 0) {
+    return calculateCoverageStatistics(validationResult);
+  }
+
+  let passed = 0;
+  let failed = 0;
+  let notChecked = 0;
+
+  for (const rid of reqIds) {
+    const fromOverall = overallRequirementStatus[rid];
+    const fromCoverage = (coverageReqs && typeof coverageReqs === 'object') ? (coverageReqs as any)[rid]?.status : undefined;
+    const s = (fromOverall || fromCoverage || 'not_checked') as RequirementStatus;
+    if (s === 'passed') passed += 1;
+    else if (s === 'failed') failed += 1;
+    else notChecked += 1;
+  }
+
+  const total = reqIds.length;
+  const checked = total - notChecked;
+  const coveragePercentage = total > 0 ? (checked / total * 100) : 0;
+  const passPercentage = total > 0 ? (passed / total * 100) : 0;
+
+  return {
+    total_requirements: total,
+    checked,
+    passed,
+    failed,
+    not_checked: notChecked,
+    coverage_percentage: Math.round(coveragePercentage * 10) / 10,
+    pass_percentage: Math.round(passPercentage * 10) / 10,
+  };
+};
+
 function App() {
   const DEMO_MODE = true;
   const [stage, setStage] = useState<WorkflowStage>('upload');
@@ -161,6 +325,39 @@ function App() {
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [showRequirementsModal, setShowRequirementsModal] = useState(false);
   const [requirementsFilter, setRequirementsFilter] = useState<'all' | 'passed' | 'failed' | 'not_checked'>('all');
+
+  const [imageLightbox, setImageLightbox] = useState<{ src: string; title: string } | null>(null);
+  const [requirementInfoId, setRequirementInfoId] = useState<string | null>(null);
+
+  const overallRequirementStatus = useMemo(
+    () => (validationResult ? computeOverallRequirementStatus(validationResult) : {}),
+    [validationResult]
+  );
+
+  const effectiveCoverageStats = useMemo(
+    () => (validationResult ? calculateEffectiveCoverageStatistics(validationResult, overallRequirementStatus) : null),
+    [validationResult, overallRequirementStatus]
+  );
+
+  const getRequirementFromCoverage = (reqId: string): any | null => {
+    if (!validationResult?.coverage) return null;
+    const fromDict = validationResult.coverage.requirements?.[reqId];
+    if (fromDict) return fromDict;
+    const byCat = validationResult.coverage.by_category || {};
+    for (const reqs of Object.values(byCat)) {
+      if (!Array.isArray(reqs)) continue;
+      const found = reqs.find((r: any) => r?.requirement_id === reqId);
+      if (found) return found;
+    }
+    return null;
+  };
+
+  const getRequirementBadgeVariant = (reqId: string): 'success' | 'error' | 'neutral' => {
+    const s = overallRequirementStatus[reqId] || (getRequirementFromCoverage(reqId)?.status as RequirementStatus | undefined);
+    if (s === 'passed') return 'success';
+    if (s === 'failed') return 'error';
+    return 'neutral';
+  };
 
   useEffect(() => {
     const el = validationLogWrapRef.current;
@@ -525,6 +722,8 @@ function App() {
   const openPrintableReport = () => {
     if (!validationResult) return;
 
+    const effectiveStats = effectiveCoverageStats ?? calculateEffectiveCoverageStatistics(validationResult, overallRequirementStatus);
+
     const selectedIds = Array.isArray(lastApprovedSegmentIds) ? lastApprovedSegmentIds : [];
     const allSegments: any[] = Array.isArray(decompositionSnapshot?.segments) ? decompositionSnapshot.segments : [];
     const selectedSegments = selectedIds
@@ -589,10 +788,10 @@ function App() {
       <span class="pill">תאריך בדיקה: ${esc(new Date(validationResult.created_at || Date.now()).toLocaleString('he-IL'))}</span>
       <span class="pill">מזהה פירוק: ${esc(decompositionId || '')}</span>
       <span class="pill">סגמנטים שנותחו: ${esc(validationResult.total_segments ?? analyzedSegments.length ?? '')}</span>
-      <span class="pill">עברו: ${esc(validationResult.passed || 0)}</span>
+      <span class="pill">דרישות שעברו: ${esc(effectiveStats.passed || 0)}</span>
       <span class="pill">אזהרות: ${esc(validationResult.warnings || 0)}</span>
     </div>
-    ${validationResult.demo_mode ? `<div class="muted" style="margin-top:8px;"><strong>מצב דמו:</strong> מתמקדים בדרישות 1–3 (קירות, גובה/נפח, פתחים). ${esc(validationResult.demo_focus || '')}</div>` : ''}
+    ${validationResult.demo_mode ? `<div class="muted" style="margin-top:8px;"><strong>מצב דמו:</strong> מתמקדים בדרישות 1–3 (קירות, גובה/נפח, פתחים). ${esc(translateDemoFocusText(String(validationResult.demo_focus || '')))}</div>` : ''}
   </div>
 
   <div class="card">
@@ -633,7 +832,7 @@ function App() {
         }).join('')}
       </tbody>
     </table>
-    ${selectedIds.length ? `<div class="muted" style="margin-top:8px;">Selected IDs: ${esc(selectedIds.join(', '))}</div>` : ''}
+    ${selectedIds.length ? `<div class="muted" style="margin-top:8px;">סגמנטים שנבחרו: ${esc(selectedIds.join(', '))}</div>` : ''}
   </div>
 
   <div class="card">
@@ -674,8 +873,8 @@ function App() {
           <h3 style="margin:10px 0 6px; font-size:14px;">בדיקות שהורצו</h3>
           <table>
             <tbody>
-              <tr><th>primary_category</th><td>${esc(classification.primary_category || debug.primary_category || '')}</td></tr>
-              <tr><th>categories_used</th><td>${esc(Array.isArray(debug.categories_used) ? debug.categories_used.join(', ') : '')}</td></tr>
+              <tr><th>primary_category</th><td>${esc(translateAnyCategory(String(classification.primary_category || debug.primary_category || '')))}</td></tr>
+              <tr><th>categories_used</th><td>${esc(Array.isArray(debug.categories_used) ? debug.categories_used.map((c: any) => translateModelCategory(String(c))).join(', ') : '')}</td></tr>
               <tr><th>validators_run</th><td>${esc(Array.isArray(debug.validators_run) ? debug.validators_run.join(', ') : '')}</td></tr>
               <tr><th>checked_requirements</th><td>${esc(Array.isArray(validation.checked_requirements) ? validation.checked_requirements.join(', ') : '')}</td></tr>
               <tr><th>decision_summary</th><td>${esc(validation.decision_summary_he || '')}</td></tr>
@@ -1130,7 +1329,7 @@ function App() {
                         {typeof validationLive.validationSummary.violation_count === 'number' ? ` · חריגות: ${validationLive.validationSummary.violation_count}` : ''}
                       </div>
                       {validationLive.validationSummary.decision_summary_he && (
-                        <div className="text-xs text-text-muted mt-2">{String(validationLive.validationSummary.decision_summary_he)}</div>
+                        <div className="text-xs text-text-muted mt-2">{translateDemoFocusText(String(validationLive.validationSummary.decision_summary_he))}</div>
                       )}
                     </div>
                   )}
@@ -1163,8 +1362,8 @@ function App() {
                   </div>
                 </div>
                 <div className="flex flex-wrap gap-3 items-center justify-end">
-                  <Badge variant={(validationResult.passed || 0) > 0 ? 'success' : 'neutral'}>
-                    עברו {validationResult.passed || 0} בדיקות
+                  <Badge variant={((effectiveCoverageStats?.passed || 0) > 0) ? 'success' : 'neutral'}>
+                    עברו {effectiveCoverageStats?.passed || 0} בדיקות
                   </Badge>
                   <Badge variant="info">{validationResult.total_segments} סגמנטים נותחו</Badge>
                   <Badge variant="warning">{validationResult.warnings || 0} אזהרות</Badge>
@@ -1199,7 +1398,7 @@ function App() {
                   מצב דמו: מתמקדים בדרישות 1–3 (קירות, גובה/נפח, פתחים) כדי לקצר זמן ריצה.
                 </div>
                 {validationResult.demo_focus && (
-                  <div className="text-xs text-text-muted mt-1">{String(validationResult.demo_focus)}</div>
+                  <div className="text-xs text-text-muted mt-1">{translateDemoFocusText(String(validationResult.demo_focus))}</div>
                 )}
               </Card>
             )}
@@ -1219,6 +1418,13 @@ function App() {
                         const classification = analysis.classification || {};
                         const validation = segment.validation || {};
 
+                        const rawViolations: any[] = Array.isArray(validation?.violations) ? validation.violations : [];
+                        const filteredViolations = rawViolations.filter((v: any) => {
+                          const rid = normalizeRequirementId(v?.rule_id);
+                          if (!rid) return true;
+                          return overallRequirementStatus[rid] !== 'passed';
+                        });
+
                         const checkedReqs: string[] = Array.isArray(validation.checked_requirements)
                           ? (validation.checked_requirements as string[])
                           : [];
@@ -1237,10 +1443,11 @@ function App() {
                         const isSuccess =
                           segment.status === 'analyzed' &&
                           checksPerformed &&
-                          validation.status === 'passed';
+                          (String(validation.status || '').toLowerCase() === 'passed' || Boolean(validation.passed)) &&
+                          filteredViolations.length === 0;
                         const isFailed =
                           segment.status === 'analyzed' &&
-                          (validation.status === 'failed' || (Array.isArray(validation.violations) && validation.violations.length > 0));
+                          (String(validation.status || '').toLowerCase() === 'failed' || filteredViolations.length > 0);
                         const isError = segment.status === 'error';
                         
                         return (
@@ -1261,12 +1468,25 @@ function App() {
                               'bg-gray-50 border-border'
                             }`}>
                               {/* Thumbnail */}
-                              {segment.thumbnail_url && (
-                                <img 
-                                  src={segment.thumbnail_url} 
-                                  alt={`Segment ${idx + 1}`}
-                                  className="w-24 h-24 object-cover rounded-lg border border-border shadow-sm"
-                                />
+                              {(segment.thumbnail_url || segment.blob_url) && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const src = String(segment.blob_url || segment.thumbnail_url);
+                                    setImageLightbox({
+                                      src,
+                                      title: segment.title || segment.segment_id || `סגמנט ${idx + 1}`,
+                                    });
+                                  }}
+                                  className="w-24 h-24 rounded-lg border border-border shadow-sm overflow-hidden bg-white hover:shadow-md transition-shadow focus:outline-none focus:ring-2 focus:ring-primary/30"
+                                  title="לחץ להגדלה"
+                                >
+                                  <img
+                                    src={String(segment.thumbnail_url || segment.blob_url)}
+                                    alt={`Segment ${idx + 1}`}
+                                    className="w-full h-full object-cover"
+                                  />
+                                </button>
                               )}
                               
                               <div className="flex-1">
@@ -1318,7 +1538,7 @@ function App() {
                                   <div className="mt-3 flex flex-wrap gap-2 items-center">
                                     <span className="text-xs text-text-muted">קטגוריה:</span>
                                     <Badge variant="neutral" size="sm">
-                                      {translateCategory(classification.primary_category)}
+                                      {translateAnyCategory(classification.primary_category)}
                                     </Badge>
                                     {classification.relevant_requirements && classification.relevant_requirements.length > 0 ? (
                                       <span className="text-xs text-text-muted">
@@ -1355,7 +1575,7 @@ function App() {
                                     <div className="bg-background/50 border border-border rounded-lg p-3 text-sm space-y-2">
                                       {typeof confidence === 'number' && (
                                         <div className="text-xs text-text-muted">
-                                          <span className="font-semibold">Confidence:</span>{' '}
+                                          <span className="font-semibold">ביטחון:</span>{' '}
                                           {(confidence * 100).toFixed(0)}%
                                         </div>
                                       )}
@@ -1399,9 +1619,17 @@ function App() {
                                     </h5>
                                     <div className="flex flex-wrap gap-2">
                                       {checkedReqs.map((reqId: string) => (
-                                        <Badge key={reqId} variant="info" size="sm">
-                                          {reqId}
-                                        </Badge>
+                                        <button
+                                          key={reqId}
+                                          type="button"
+                                          onClick={() => setRequirementInfoId(reqId)}
+                                          className="focus:outline-none focus:ring-2 focus:ring-primary/30 rounded-full"
+                                          title="לחץ להסבר הבדיקה"
+                                        >
+                                          <Badge variant={getRequirementBadgeVariant(reqId)} size="sm">
+                                            {reqId}
+                                          </Badge>
+                                        </button>
                                       ))}
                                     </div>
                                   </div>
@@ -1519,13 +1747,13 @@ function App() {
                               })()}
                                 
                                 {/* Validation Results */}
-                                {validation.violations && validation.violations.length > 0 && (
+                                {filteredViolations.length > 0 && (
                                   <div>
                                     <h5 className="text-sm font-semibold text-error mb-3">
-                                      בעיות שנמצאו ({validation.violations.length}):
+                                      בעיות שנמצאו ({filteredViolations.length}):
                                     </h5>
                                     <div className="space-y-2">
-                                      {validation.violations.map((violation: any, vIdx: number) => (
+                                      {filteredViolations.map((violation: any, vIdx: number) => (
                                         <div 
                                           key={vIdx}
                                           className="bg-error/5 border border-error/20 rounded-lg p-3 text-sm"
@@ -1581,6 +1809,8 @@ function App() {
                                         .filter((e: any) => e && e.status === 'failed' && typeof e.requirement_id === 'string')
                                         .map((e: any) => e.requirement_id as string);
 
+                                      const failedReqsFiltered = failedReqs.filter((rid: string) => overallRequirementStatus[rid] !== 'passed');
+
                                       // If nothing was actually checked, do not show a green success.
                                       if (checkedReqs.length === 0 && failedReqs.length === 0) {
                                         const showAttempted = attemptedReqs.length > 0;
@@ -1623,7 +1853,7 @@ function App() {
                                       }
 
                                       // If there are explicit failures (from evidence-first evaluations), show a failure summary.
-                                      if (failedReqs.length > 0) {
+                                      if (failedReqsFiltered.length > 0) {
                                         return (
                                           <div className="bg-error/5 border border-error/20 rounded-lg p-4">
                                             <div className="flex items-start gap-3">
@@ -1633,7 +1863,7 @@ function App() {
                                                   נמצאו כשלים בדרישות שנבדקו
                                                 </h5>
                                                 <p className="text-xs text-text-muted">
-                                                  דרישות שנכשלו: {failedReqs.join(', ')}
+                                                  דרישות שנכשלו: {failedReqsFiltered.join(', ')}
                                                 </p>
                                               </div>
                                             </div>
@@ -1663,15 +1893,23 @@ function App() {
                                             <div className="flex flex-wrap gap-2">
                                               {checkedReqs.map((reqId: string) => {
                                                 const requirement = validationResult.coverage?.requirements?.[reqId];
+                                                const variant = getRequirementBadgeVariant(reqId);
                                                 return (
                                                   <div
                                                     key={reqId}
                                                     className="flex items-start gap-2 text-xs bg-success/5 border border-success/20 rounded-md px-2 py-1"
                                                     title={requirement?.description}
                                                   >
-                                                    <Badge variant="success" size="sm" className="text-xs">
-                                                      {reqId}
-                                                    </Badge>
+                                                    <button
+                                                      type="button"
+                                                      onClick={() => setRequirementInfoId(reqId)}
+                                                      className="focus:outline-none focus:ring-2 focus:ring-primary/30 rounded-full"
+                                                      title="לחץ להסבר הבדיקה"
+                                                    >
+                                                      <Badge variant={variant} size="sm" className="text-xs">
+                                                        {reqId}
+                                                      </Badge>
+                                                    </button>
                                                     {requirement && (
                                                       <span className="text-text-muted max-w-xs truncate">
                                                         {requirement.description}
@@ -1702,7 +1940,7 @@ function App() {
                                       </summary>
                                       {decisionSummary && (
                                         <div className="mt-2 text-text-muted bg-background rounded-lg p-3 border border-border text-sm leading-relaxed">
-                                          {decisionSummary}
+                                          {translateDemoFocusText(String(decisionSummary))}
                                         </div>
                                       )}
                                     </details>
@@ -1734,7 +1972,7 @@ function App() {
                     {/* Coverage Statistics */}
                     <div className="bg-background rounded-xl p-6 mb-8 border border-border">
                       {(() => {
-                        const stats = calculateCoverageStatistics(validationResult);
+                        const stats = calculateEffectiveCoverageStatistics(validationResult, overallRequirementStatus);
                         return (
                           <>
                             <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
@@ -1837,8 +2075,13 @@ function App() {
                       {(() => {
                         const filteredCategories = Object.entries(validationResult.coverage.by_category || {})
                           .map(([category, requirements]: [string, any]) => {
+                            const enhancedRequirements = requirements.map((req: any) => {
+                              const reqId = String(req?.requirement_id || '');
+                              const effectiveStatus = overallRequirementStatus[reqId] || (req?.status as RequirementStatus | undefined) || 'not_checked';
+                              return { ...req, status: effectiveStatus };
+                            });
                             // Filter requirements based on selected filter
-                            const filteredRequirements = requirements.filter((req: any) => {
+                            const filteredRequirements = enhancedRequirements.filter((req: any) => {
                               if (requirementsFilter === 'all') return true;
                               if (requirementsFilter === 'passed') return req.status === 'passed';
                               if (requirementsFilter === 'failed') return req.status === 'failed';
@@ -1937,7 +2180,7 @@ function App() {
                       color="blue"
                     />
                     <StatCard 
-                      label="הושלמו בהצלחה"
+                      label="סגמנטים שעברו"
                       value={validationResult.passed || 0}
                       icon={<CheckCircle2 className="w-5 h-5" />}
                       color="green"
@@ -2101,6 +2344,115 @@ function App() {
         isOpen={showRequirementsModal} 
         onClose={() => setShowRequirementsModal(false)} 
       />
+
+      {/* Segment Image Lightbox */}
+      {imageLightbox && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4"
+          onClick={() => setImageLightbox(null)}
+          role="dialog"
+          aria-modal="true"
+        >
+          <div
+            className="bg-white rounded-2xl shadow-2xl w-full max-w-5xl max-h-[92vh] overflow-hidden flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-6 py-4 border-b border-border flex items-center justify-between">
+              <div className="min-w-0">
+                <div className="text-sm font-semibold text-text-primary truncate">{imageLightbox.title}</div>
+                <div className="text-xs text-text-muted">לחץ על הרקע כדי לסגור</div>
+              </div>
+              <Button variant="outline" size="sm" onClick={() => setImageLightbox(null)}>
+                סגור
+              </Button>
+            </div>
+            <div className="p-4 overflow-auto bg-background">
+              <div className="flex justify-end mb-3">
+                <a
+                  href={imageLightbox.src}
+                  target="_blank"
+                  rel="noopener"
+                  className="text-xs text-primary hover:text-primary/80 font-medium underline"
+                >
+                  פתיחה בחלון חדש
+                </a>
+              </div>
+              <img
+                src={imageLightbox.src}
+                alt={imageLightbox.title}
+                className="w-full h-auto rounded-lg border border-border bg-white"
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Requirement Info Modal */}
+      {requirementInfoId && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4"
+          onClick={() => setRequirementInfoId(null)}
+          role="dialog"
+          aria-modal="true"
+        >
+          <div
+            className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {(() => {
+              const rid = requirementInfoId;
+              const req = rid ? getRequirementFromCoverage(rid) : null;
+              const status = rid ? (overallRequirementStatus[rid] || (req?.status as RequirementStatus | undefined) || 'not_checked') : 'not_checked';
+              const statusHe = status === 'passed' ? 'עבר' : status === 'failed' ? 'נכשל' : 'לא נבדק';
+              const desc = String(req?.description || '');
+              const simple = toSimpleOneLiner(desc);
+
+              return (
+                <>
+                  <div className="px-6 py-4 border-b border-border flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <Badge variant={getRequirementBadgeVariant(rid)} size="md">
+                        {rid}
+                      </Badge>
+                      <div>
+                        <div className="text-sm font-semibold text-text-primary">הסבר בדיקה</div>
+                        <div className="text-xs text-text-muted">סטטוס כללי: {statusHe}</div>
+                      </div>
+                    </div>
+                    <Button variant="outline" size="sm" onClick={() => setRequirementInfoId(null)}>
+                      סגור
+                    </Button>
+                  </div>
+                  <div className="p-6 overflow-auto space-y-4">
+                    <div className="bg-background border border-border rounded-lg p-4">
+                      <div className="text-xs font-semibold text-text-primary mb-1">במילים פשוטות</div>
+                      <div className="text-sm text-text-muted leading-relaxed">{simple}</div>
+                    </div>
+
+                    <div>
+                      <div className="text-xs font-semibold text-text-primary mb-2">תיאור הבדיקה (כפי שמוגדר במערכת)</div>
+                      <div className="text-sm text-text-primary leading-relaxed whitespace-pre-wrap">
+                        {desc || 'אין תיאור זמין לדרישה זו.'}
+                      </div>
+                    </div>
+
+                    {Array.isArray(req?.segments_checked) && req.segments_checked.length > 0 && (
+                      <div>
+                        <div className="text-xs font-semibold text-text-primary mb-2">אומת/נבדק בסגמנטים</div>
+                        <div className="flex flex-wrap gap-2">
+                          {req.segments_checked.map((s: string, i: number) => (
+                            <Badge key={`${s}-${i}`} variant="neutral" size="sm">{s}</Badge>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </>
+              );
+            })()}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

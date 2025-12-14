@@ -662,12 +662,12 @@ What does this segment primarily show? Choose ONE or MORE categories:
     ...
   ],
   "dimensions": [
-    {{"value": 20, "unit": "cm", "element": "wall thickness", "location": "outer wall"}},
+        {{"value": 20, "unit": "cm", "element": "wall thickness", "location": "קיר חיצוני"}},
     {{"value": 80, "unit": "cm", "element": "door width", "location": "entrance"}},
     ...
   ],
   "structural_elements": [
-    {{"type": "wall", "thickness": 20, "unit": "cm", "material": "בטון", "location": "...", "notes": "..."}},
+        {{"type": "wall", "thickness": 20, "unit": "cm", "material": "בטון", "location": "קיר חיצוני|קיר פנימי|לא ברור", "notes": "..."}},
     {{"type": "door", "width": 80, "height": 210, "unit": "cm", "location": "...", "notes": "..."}},
     {{"type": "window", "width": 100, "height": 120, "unit": "cm", "location": "...", "notes": "..."}},
     ...
@@ -688,8 +688,17 @@ What does this segment primarily show? Choose ONE or MORE categories:
     "primary_function": "floor_plan|section|detail|elevation",
     "key_measurements": "Brief summary of critical dimensions",
     "special_notes": "Any important observations"
-  }}
+    }},
+    "external_wall_count": null
 }}
+
+**Extra requirement for wall thickness (1.2):**
+- When you extract wall thickness, try to label each wall as **קיר חיצוני** or **קיר פנימי** in `structural_elements[].location`.
+    - If the wall borders an area explicitly labeled as internal (e.g., "אזור פנימי"), treat it as **קיר פנימי**.
+    - If the wall clearly borders the outside/facade or has an exterior window, treat it as **קיר חיצוני**.
+    - If you cannot infer reliably, use "לא ברור".
+- If (and only if) this segment shows enough context to determine the TOTAL number of external walls of the ממ"ד (1-4), set `external_wall_count` to that number.
+    Otherwise set it to null.
 
 **IMPORTANT:**
 - Extract EVERYTHING visible

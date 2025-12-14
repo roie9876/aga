@@ -146,6 +146,7 @@ async def validate_segments(request: SegmentValidationRequest):
         analyzer = get_segment_analyzer()
         validator = get_mamad_validator()
         analyzed_segments = []
+        passed_requirements_global: set[str] = set()
 
         demo_focus_note = None
         if request.demo_mode:
@@ -556,8 +557,17 @@ async def validate_segments(request: SegmentValidationRequest):
                         analysis_result.get("analysis_data", {}),
                         demo_mode=request.demo_mode,
                         enabled_requirements=enabled_requirements,
+                        skip_requirements=passed_requirements_global,
                     )
                     analysis_result["validation"] = validation_result
+
+                    # Update global pass-state: once a requirement passed in any segment,
+                    # skip re-running it in later segments.
+                    for ev in (validation_result.get("requirement_evaluations") or []):
+                        if isinstance(ev, dict) and ev.get("status") == "passed":
+                            req_id = ev.get("requirement_id")
+                            if isinstance(req_id, str) and req_id:
+                                passed_requirements_global.add(req_id)
                     
                     # Log what was found vs what was checked
                     classification = analysis_result.get("analysis_data", {}).get("classification", {})
@@ -747,6 +757,7 @@ async def validate_segments_stream(request: SegmentValidationRequest):
         analyzer = get_segment_analyzer()
         validator = get_mamad_validator()
         analyzed_segments: List[Dict[str, Any]] = []
+        passed_requirements_global: set[str] = set()
 
         demo_focus_note = None
         if request.demo_mode:
@@ -1244,8 +1255,17 @@ async def validate_segments_stream(request: SegmentValidationRequest):
                         analysis_result.get("analysis_data", {}),
                         demo_mode=request.demo_mode,
                         enabled_requirements=enabled_requirements,
+                        skip_requirements=passed_requirements_global,
                     )
                     analysis_result["validation"] = validation_result
+
+                    # Update global pass-state: once a requirement passed in any segment,
+                    # skip re-running it in later segments.
+                    for ev in (validation_result.get("requirement_evaluations") or []):
+                        if isinstance(ev, dict) and ev.get("status") == "passed":
+                            req_id = ev.get("requirement_id")
+                            if isinstance(req_id, str) and req_id:
+                                passed_requirements_global.add(req_id)
 
                     # Emit a compact summary (and door 3.1 status if present)
                     door_31 = None

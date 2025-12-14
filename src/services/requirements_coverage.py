@@ -79,14 +79,14 @@ class RequirementsCoverageTracker:
                     if seg_id and seg_id not in coverage[req_id]["segments_checked"]:
                         coverage[req_id]["segments_checked"].append(seg_id)
 
-                    # Merge status: failed > passed > not_checked
+                    # Merge status (UI semantics): passed > failed > not_checked
+                    # Rationale: if a requirement was satisfied in any segment, we consider it
+                    # globally satisfied; conflicting failures remain visible via `violations`.
                     current = coverage[req_id]["status"]
-                    if current == "failed":
-                        continue
-                    if status == "failed":
-                        coverage[req_id]["status"] = "failed"
-                    elif status == "passed" and current == "not_checked":
+                    if status == "passed":
                         coverage[req_id]["status"] = "passed"
+                    elif status == "failed" and current != "passed":
+                        coverage[req_id]["status"] = "failed"
 
                 # Still record mapped violations for context, but do not use them to infer status
                 # (status is driven by requirement_evaluations).
@@ -151,7 +151,9 @@ class RequirementsCoverageTracker:
 
                 segment_violations = violations_by_req.get(req_id, [])
                 if segment_violations:
-                    coverage[req_id]["status"] = "failed"
+                    # Keep passed if any prior segment passed this requirement.
+                    if coverage[req_id]["status"] != "passed":
+                        coverage[req_id]["status"] = "failed"
                     coverage[req_id]["violations"].extend(segment_violations)
                 elif coverage[req_id]["status"] == "not_checked":
                     coverage[req_id]["status"] = "passed"

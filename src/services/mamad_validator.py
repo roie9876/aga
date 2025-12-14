@@ -47,6 +47,8 @@ class MamadValidator:
     def __init__(self):
         self.violations: List[Violation] = []
         self.requirement_evaluations: List[Dict[str, Any]] = []
+        # Per-run skip list (e.g., requirements already passed in earlier segments)
+        self._skip_requirements: set[str] = set()
 
     def _add_requirement_evaluation(
         self,
@@ -57,6 +59,24 @@ class MamadValidator:
         evidence: Optional[List[Dict[str, Any]]] = None,
         notes_he: Optional[str] = None,
     ) -> None:
+        # If a requirement already passed elsewhere, do not re-evaluate it.
+        # Force a consistent explicit not_checked evaluation so UI/coverage are stable.
+        if requirement_id in self._skip_requirements:
+            # Avoid duplicating the same skip evaluation.
+            for existing in self.requirement_evaluations:
+                if (
+                    isinstance(existing, dict)
+                    and existing.get("requirement_id") == requirement_id
+                    and existing.get("status") == "not_checked"
+                    and existing.get("reason_not_checked") == "already_passed_in_other_segment"
+                ):
+                    return
+            status = "not_checked"
+            reason_not_checked = "already_passed_in_other_segment"
+            if not notes_he:
+                notes_he = "דרישה זו כבר עברה בסגמנט קודם ולכן לא הורצה שוב בסגמנט זה."
+            evidence = []
+
         ev: Dict[str, Any] = {
             "requirement_id": requirement_id,
             "status": status,
@@ -207,6 +227,7 @@ class MamadValidator:
         *,
         demo_mode: bool = False,
         enabled_requirements: Optional[set[str]] = None,
+        skip_requirements: Optional[set[str]] = None,
     ) -> Dict[str, Any]:
         """
         Validate a single segment's analysis data against MAMAD requirements.
@@ -222,6 +243,7 @@ class MamadValidator:
         """
         self.violations = []  # Reset violations
         self.requirement_evaluations = []
+        self._skip_requirements = set(skip_requirements or set())
         
         # Get segment classification
         classification = analysis_data.get("classification", {})
@@ -288,20 +310,34 @@ class MamadValidator:
         # Run validations based on ALL classified categories (primary + secondary)
         validations_to_run = []
         planned_requirements: set[str] = set()
+        skipped_due_to_already_passed: set[str] = set()
         for cat in categories:
             for fn in validation_map.get(cat, []):
                 # If user selected a subset of requirements, only allow validators that map
                 # to at least one enabled requirement.
+                mapped_all = set(validator_to_requirements.get(fn, []))
+
+                # Track requirements that would have been planned but are skipped due to
+                # already passing in other segments.
+                for req in mapped_all:
+                    if req in self._skip_requirements and (enabled_requirements is None or req in enabled_requirements):
+                        skipped_due_to_already_passed.add(req)
+
+                mapped_effective = {r for r in mapped_all if r not in self._skip_requirements}
+
                 if enabled_requirements is not None:
-                    mapped = set(validator_to_requirements.get(fn, []))
-                    if mapped and mapped.isdisjoint(enabled_requirements):
+                    mapped_effective = {r for r in mapped_effective if r in enabled_requirements}
+                    if mapped_all and not mapped_effective:
+                        continue
+                else:
+                    # If all requirements for this validator are skipped, do not run it.
+                    if mapped_all and not mapped_effective:
                         continue
 
                 if fn not in validations_to_run:
                     validations_to_run.append(fn)
-                for req in validator_to_requirements.get(fn, []):
-                    if enabled_requirements is None or req in enabled_requirements:
-                        planned_requirements.add(req)
+                for req in mapped_effective:
+                    planned_requirements.add(req)
 
         # Manual ROI / unknown classification handling:
         # If the user explicitly enabled requirement groups but the segment classification
@@ -312,18 +348,22 @@ class MamadValidator:
         ran_by_enabled_requirements = False
         if enabled_requirements is not None and not validations_to_run:
             for fn, reqs in validator_to_requirements.items():
-                mapped = set(reqs)
-                if mapped and not mapped.isdisjoint(enabled_requirements):
+                mapped_all = set(reqs)
+                for req in mapped_all:
+                    if req in self._skip_requirements and req in enabled_requirements:
+                        skipped_due_to_already_passed.add(req)
+
+                mapped_effective = {r for r in mapped_all if r in enabled_requirements and r not in self._skip_requirements}
+                if mapped_all and mapped_effective:
                     validations_to_run.append(fn)
                     ran_by_enabled_requirements = True
-                    for req in mapped:
-                        if req in enabled_requirements:
-                            planned_requirements.add(req)
+                    for req in mapped_effective:
+                        planned_requirements.add(req)
 
         # If the user explicitly enabled requirements that have no validator implementation,
         # emit explicit not_checked evaluations so the UI doesn't show a silent "nothing happened".
         if enabled_requirements is not None:
-            unsupported = set(enabled_requirements) - planned_requirements
+            unsupported = set(enabled_requirements) - planned_requirements - skipped_due_to_already_passed
             for req in sorted(unsupported):
                 self._add_requirement_evaluation(
                     req,
@@ -331,6 +371,11 @@ class MamadValidator:
                     reason_not_checked="validator_not_implemented",
                     notes_he="המערכת עדיין לא מממשת בדיקה דטרמיניסטית לדרישה זו בסגמנטים; לא בוצעה בדיקה.",
                 )
+
+        # Emit explicit not_checked evaluations for requirements skipped because they already
+        # passed in earlier segments (keeps UI/coverage consistent).
+        for req in sorted(skipped_due_to_already_passed):
+            self._add_requirement_evaluation(req, "not_checked")
 
         checked_requirements: List[str] = []
         skipped_requirements: List[str] = []
@@ -496,13 +541,58 @@ class MamadValidator:
             )
             return False
         
-        # Count external walls (simplified - would need more context)
-        external_walls = walls  # TODO: Distinguish external vs internal
-        num_external = len(external_walls)
-        
-        # Check each wall thickness
+        def _classify_wall_exposure(location_text: str, wall_type_text: str) -> str:
+            """Return 'external' | 'internal' | 'unknown' based on labels in the segment."""
+            location_lower = (location_text or "").lower()
+            wall_type_lower = (wall_type_text or "").lower()
+
+            # Explicit external markers
+            external_markers = [
+                "קיר חיצוני",
+                "חיצוני",
+                "external",
+                "outside",
+                "exterior",
+                "חזית",
+                "מעטפת",
+                "outer wall",
+            ]
+            # Explicit internal markers
+            internal_markers = [
+                "קיר פנימי",
+                "פנימי",
+                "internal",
+                "inside",
+                "אזור פנימי",
+                "חלל פנימי",
+            ]
+
+            # If any internal marker appears, treat as internal even if 'outer wall' appears,
+            # because some drawings use 'outer wall' loosely for wall thickness callouts.
+            if any(m.lower() in location_lower for m in internal_markers):
+                return "internal"
+            if any(m.lower() in wall_type_lower for m in internal_markers):
+                return "internal"
+
+            if any(m.lower() in location_lower for m in external_markers):
+                return "external"
+            if any(m.lower() in wall_type_lower for m in external_markers):
+                return "external"
+
+            return "unknown"
+
+        # Prefer an explicitly extracted external-wall count when present.
+        external_wall_count_raw = data.get("external_wall_count")
+        num_external_known: Optional[int] = None
+        if isinstance(external_wall_count_raw, int) and 1 <= external_wall_count_raw <= 4:
+            num_external_known = external_wall_count_raw
+
+        # Check each wall thickness. We only apply requirement 1.2 to walls that are explicitly external.
         evidence: List[Dict[str, Any]] = []
-        parsed_thicknesses: List[float] = []
+        parsed_external_thicknesses: List[float] = []
+        parsed_internal_thicknesses: List[float] = []
+        parsed_unknown_thicknesses: List[float] = []
+        external_walls_observed = 0
         for wall in walls:
             thickness_str = wall.get("thickness", "")
             
@@ -512,19 +602,30 @@ class MamadValidator:
             if thickness_cm is None:
                 continue
 
-            parsed_thicknesses.append(thickness_cm)
+            wall_location = str(wall.get("location", "") or "")
+            wall_type = str(wall.get("type", "") or "")
+            exposure = _classify_wall_exposure(wall_location, wall_type)
+
+            if exposure == "external":
+                parsed_external_thicknesses.append(thickness_cm)
+                external_walls_observed += 1
+            elif exposure == "internal":
+                parsed_internal_thicknesses.append(thickness_cm)
+            else:
+                parsed_unknown_thicknesses.append(thickness_cm)
+
             evidence.append(
                 self._evidence_dimension(
                     value=thickness_cm,
                     unit="cm",
                     element="wall_thickness",
-                    location=wall.get("location", ""),
+                    location=wall_location,
                     text=thickness_str,
                     raw=wall,
                 )
             )
 
-        if not parsed_thicknesses:
+        if not (parsed_external_thicknesses or parsed_internal_thicknesses or parsed_unknown_thicknesses):
             self._add_requirement_evaluation(
                 "1.2",
                 "not_checked",
@@ -534,43 +635,122 @@ class MamadValidator:
             )
             return False
 
-        required_thickness = self._get_required_wall_thickness(num_external, has_window=False)
-        min_thickness = min(parsed_thicknesses)
-        if min_thickness < required_thickness:
+        # If we only have internal/unknown thicknesses, do not fail: requirement 1.2 applies to *external* walls.
+        if not parsed_external_thicknesses:
+            self._add_requirement_evaluation(
+                "1.2",
+                "not_checked",
+                reason_not_checked="no_external_wall_thickness_identified",
+                evidence=evidence,
+                notes_he=(
+                    "נמצאו מידות עובי קיר, אך אין סימון ברור שמדובר בקיר חיצוני. "
+                    "לכן לא בוצעה בדיקת עובי לפי סעיף 1.2 (קירות חיצוניים בלבד)."
+                ),
+            )
+            return False
+
+        # Absolute minimum: any external wall thinner than 25cm is always non-compliant (independent of wall count).
+        min_external_thickness = min(parsed_external_thicknesses)
+        if min_external_thickness < 25:
             self._add_requirement_evaluation(
                 "1.2",
                 "failed",
-                evidence=(
-                    evidence
+                evidence=evidence
+                + [
+                    self._evidence_dimension(
+                        value=25,
+                        unit="cm",
+                        element="required_min_wall_thickness_absolute",
+                        location="external_wall_minimum",
+                    )
+                ],
+                notes_he=(
+                    f"נמצא עובי קיר חיצוני {min_external_thickness:.0f} ס\"מ קטן מהמינימום 25 ס\"מ לפי סעיף 1.2."
+                ),
+            )
+            return True
+
+        # If we don't reliably know how many external walls the *room* has, we avoid a false PASS.
+        # Exception: if thickness is >=40cm, it satisfies 1.2 for any 1-4 external walls.
+        if num_external_known is None:
+            if min_external_thickness >= 40:
+                self._add_requirement_evaluation(
+                    "1.2",
+                    "passed",
+                    evidence=evidence
                     + [
                         self._evidence_dimension(
-                            value=required_thickness,
+                            value=40,
                             unit="cm",
-                            element="required_min_wall_thickness",
-                            location=f"external_walls={num_external}",
+                            element="required_min_wall_thickness_max_case",
+                            location="external_wall_maximum_case",
                         )
-                    ]
-                ),
-                notes_he=f"נמצא עובי קיר {min_thickness:.0f} ס\"מ קטן מהמינימום {required_thickness} ס\"מ.",
-            )
-        else:
+                    ],
+                    notes_he=(
+                        "נמצא עובי קיר חיצוני ≥40 ס\"מ, ולכן הדרישה לעובי קירות חיצוניים לפי סעיף 1.2 מתקיימת "
+                        "ללא תלות במספר הקירות החיצוניים (1-4)."
+                    ),
+                )
+                return True
+
             self._add_requirement_evaluation(
                 "1.2",
-                "passed",
-                evidence=(
-                    evidence
-                    + [
-                        self._evidence_dimension(
-                            value=required_thickness,
-                            unit="cm",
-                            element="required_min_wall_thickness",
-                            location=f"external_walls={num_external}",
-                        )
-                    ]
+                "not_checked",
+                reason_not_checked="external_wall_count_unknown",
+                evidence=evidence
+                + [
+                    self._evidence_dimension(
+                        value=25,
+                        unit="cm",
+                        element="required_min_wall_thickness_absolute",
+                        location="external_wall_minimum",
+                    )
+                ],
+                notes_he=(
+                    "זוהה לפחות קיר חיצוני אחד עם עובי ≥25 ס\"מ, אך מספר הקירות החיצוניים הכולל לא זוהה בוודאות "
+                    "ולכן לא ניתן לקבוע אם נדרש 30/40 ס\"מ."
                 ),
-                notes_he=f"כל עוביי הקירות שפוענחו עומדים במינימום {required_thickness} ס\"מ (בהנחת {num_external} קירות חיצוניים בסגמנט).",
             )
+            return False
 
+        required_thickness = self._get_required_wall_thickness(num_external_known, has_window=False)
+        if min_external_thickness < required_thickness:
+            self._add_requirement_evaluation(
+                "1.2",
+                "failed",
+                evidence=evidence
+                + [
+                    self._evidence_dimension(
+                        value=required_thickness,
+                        unit="cm",
+                        element="required_min_wall_thickness",
+                        location=f"external_walls={num_external_known}",
+                    )
+                ],
+                notes_he=(
+                    f"נמצא עובי קיר חיצוני {min_external_thickness:.0f} ס\"מ קטן מהמינימום {required_thickness} ס\"מ "
+                    f"(לפי {num_external_known} קירות חיצוניים)."
+                ),
+            )
+            return True
+
+        self._add_requirement_evaluation(
+            "1.2",
+            "passed",
+            evidence=evidence
+            + [
+                self._evidence_dimension(
+                    value=required_thickness,
+                    unit="cm",
+                    element="required_min_wall_thickness",
+                    location=f"external_walls={num_external_known}",
+                )
+            ],
+            notes_he=(
+                f"עובי הקירות החיצוניים שפוענחו עומד בדרישה: מינימום {required_thickness} ס\"מ "
+                f"(לפי {num_external_known} קירות חיצוניים)."
+            ),
+        )
         return True
     
     def _validate_room_height(self, data: Dict[str, Any]) -> bool:
