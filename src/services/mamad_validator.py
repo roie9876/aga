@@ -592,9 +592,12 @@ class MamadValidator:
                 sides.add("left")
             if "right" in t:
                 sides.add("right")
-            if "top" in t or "north" in t:
+            # Be conservative: free-form OCR locations often include words like "top"/"bottom"
+            # that describe drawing placement (not the room's wall side). Only accept these when
+            # explicitly tied to a wall/side direction.
+            if any(p in t for p in ["north wall", "wall north", "top wall", "wall top", "top side", "upper wall"]):
                 sides.add("top")
-            if "bottom" in t or "south" in t:
+            if any(p in t for p in ["south wall", "wall south", "bottom wall", "wall bottom", "bottom side", "lower wall"]):
                 sides.add("bottom")
             if "east" in t:
                 sides.add("right")
@@ -723,9 +726,21 @@ class MamadValidator:
         parsed_external_thicknesses: List[float] = []
         parsed_internal_thicknesses: List[float] = []
         parsed_unknown_thicknesses: List[float] = []
+        explicit_external_thicknesses: List[float] = []
         external_walls_observed = 0
         external_sides_inferred: set[str] = set()
         internal_sides_inferred: set[str] = set()
+
+        def _has_any_marker(*, wall: Dict[str, Any], markers: List[str]) -> bool:
+            wall_location = str(wall.get("location") or "")
+            wall_type = str(wall.get("type") or "")
+            wall_notes = str(wall.get("notes") or "")
+            ev_items = wall.get("evidence")
+            ev_text = ""
+            if isinstance(ev_items, list):
+                ev_text = " ".join([str(x) for x in ev_items])
+            combined_lower = f"{wall_location} {wall_type} {wall_notes} {ev_text}".lower()
+            return any(m.lower() in combined_lower for m in markers)
         for wall in walls:
             thickness_str = wall.get("thickness", "")
             
@@ -750,6 +765,24 @@ class MamadValidator:
             if exposure == "external":
                 parsed_external_thicknesses.append(thickness_cm)
                 external_walls_observed += 1
+                # Track explicit external marker separately for absolute-min failure.
+                if _has_any_marker(
+                    wall=wall,
+                    markers=[
+                        "קיר חיצוני",
+                        "חיצוני",
+                        "external",
+                        "outside",
+                        "exterior",
+                        "חזית",
+                        "מעטפת",
+                        "היקפי",
+                        "perimeter",
+                        "outer wall",
+                        "outer band",
+                    ],
+                ):
+                    explicit_external_thicknesses.append(thickness_cm)
                 # If this wall references multiple sides, treat them as external unless a MAMAD door marks a side internal.
                 if wall_side_hints:
                     external_sides_inferred |= (wall_side_hints - door_sides)
@@ -822,6 +855,30 @@ class MamadValidator:
         # Absolute minimum: any external wall thinner than 25cm is always non-compliant (independent of wall count).
         min_external_thickness = min(parsed_external_thicknesses)
         if min_external_thickness < 25:
+            # If the <25cm value came from heuristic classification (no explicit "external" markers),
+            # be conservative: report not_checked instead of failing.
+            min_explicit = min(explicit_external_thicknesses) if explicit_external_thicknesses else None
+            if min_explicit is None or min_explicit >= 25:
+                self._add_requirement_evaluation(
+                    "1.2",
+                    "not_checked",
+                    reason_not_checked="ambiguous_thin_wall_candidate",
+                    evidence=evidence
+                    + [
+                        self._evidence_dimension(
+                            value=25,
+                            unit="cm",
+                            element="required_min_wall_thickness_absolute",
+                            location="external_wall_minimum",
+                        )
+                    ],
+                    notes_he=(
+                        f"זוהתה מידה {min_external_thickness:.0f} ס\"מ שעשויה להתפרש כעובי קיר, אך ללא סימון חד-משמעי שמדובר בקיר חיצוני. "
+                        "כדי למנוע כשל שווא, בדיקת 1.2 סומנה כ'לא נבדק' במקרה זה."
+                    ),
+                )
+                return False
+
             self._add_requirement_evaluation(
                 "1.2",
                 "failed",
@@ -1519,6 +1576,151 @@ class MamadValidator:
         
         checked_any = False
 
+        # Prefer structured focused extraction when available.
+        focus = data.get("window_spacing_focus")
+        focus_windows = focus.get("windows") if isinstance(focus, dict) else None
+        focus_unavailable = False
+        if isinstance(focus, dict):
+            notes = str(focus.get("notes") or "").strip().lower()
+            if notes.startswith("focus_unavailable"):
+                focus_unavailable = True
+
+        focus_inconclusive_evidence: List[Dict[str, Any]] = []
+        if isinstance(focus_windows, list) and focus_windows:
+            any_failed = False
+            any_checked = False
+            any_inconclusive = False
+            evidence: List[Dict[str, Any]] = []
+
+            def _as_number(v: Any) -> Optional[float]:
+                try:
+                    if v is None:
+                        return None
+                    return float(v)
+                except Exception:
+                    return None
+
+            for w in focus.get("windows", [])[:6]:
+                if not isinstance(w, dict):
+                    continue
+
+                conf = _as_number(w.get("confidence"))
+                location = str(w.get("location") or "")
+                ev_list = w.get("evidence")
+                if isinstance(ev_list, list):
+                    for ev in ev_list[:8]:
+                        if isinstance(ev, str) and ev.strip():
+                            evidence.append(
+                                self._evidence_text(
+                                    text=ev.strip(),
+                                    element="window_spacing_focus",
+                                    location=location,
+                                    raw=w,
+                                )
+                            )
+
+                # If confidence is low, do not make a pass/fail decision.
+                if conf is not None and conf < 0.60:
+                    continue
+
+                niche_cm = _as_number(w.get("niche_to_niche_cm"))
+                openings_cm = _as_number(w.get("light_openings_spacing_cm"))
+                to_wall_cm = _as_number(w.get("to_perpendicular_wall_cm"))
+                sep_cm = _as_number(w.get("same_wall_door_separation_cm"))
+                door_h_cm = _as_number(w.get("door_height_cm"))
+                has_concrete_between = w.get("has_concrete_wall_between_openings")
+                conc_th_cm = _as_number(w.get("concrete_wall_thickness_cm"))
+
+                # Subchecks 1-3: only evaluate when value is present.
+                sub_checked = 0
+                if niche_cm is not None:
+                    sub_checked += 1
+                    evidence.append(self._evidence_dimension(value=niche_cm, unit="cm", element="niche_to_niche", location=location, raw=w))
+                    if niche_cm < 20.0:
+                        any_failed = True
+                if openings_cm is not None:
+                    sub_checked += 1
+                    evidence.append(self._evidence_dimension(value=openings_cm, unit="cm", element="light_openings_spacing", location=location, raw=w))
+                    if openings_cm < 100.0:
+                        any_failed = True
+                if to_wall_cm is not None:
+                    sub_checked += 1
+                    evidence.append(self._evidence_dimension(value=to_wall_cm, unit="cm", element="window_to_perpendicular_wall", location=location, raw=w))
+                    if to_wall_cm < 20.0:
+                        any_failed = True
+
+                # Subcheck 4: window+door same wall rule.
+                # Evaluate only if we have separation evidence, or explicit concrete-between evidence.
+                if has_concrete_between is True:
+                    evidence.append(self._evidence_text(text="קיים קיר בטון בין דלת לחלון", element="window_door_separator", location=location, raw=w))
+                    if conc_th_cm is not None:
+                        any_checked = True
+                        evidence.append(self._evidence_dimension(value=conc_th_cm, unit="cm", element="concrete_wall_thickness", location=location, raw=w))
+                        if conc_th_cm < 20.0:
+                            any_failed = True
+                    else:
+                        # Condition suggests this sub-rule applies, but we can't validate thickness.
+                        any_inconclusive = True
+                elif sep_cm is not None:
+                    evidence.append(self._evidence_dimension(value=sep_cm, unit="cm", element="window_door_separation", location=location, raw=w))
+                    if door_h_cm is not None:
+                        any_checked = True
+                        evidence.append(self._evidence_dimension(value=door_h_cm, unit="cm", element="door_height", location=location, raw=w))
+                        if sep_cm < door_h_cm:
+                            any_failed = True
+                    else:
+                        # Condition suggests this sub-rule applies, but we can't validate without door height.
+                        any_inconclusive = True
+
+                if sub_checked > 0:
+                    any_checked = True
+
+            if any_checked:
+                checked_any = True
+                if any_failed:
+                    self._add_requirement_evaluation(
+                        "3.2",
+                        "failed",
+                        evidence=evidence
+                        + [
+                            self._evidence_dimension(value=20.0, unit="cm", element="required_min_niche_or_wall"),
+                            self._evidence_dimension(value=100.0, unit="cm", element="required_min_light_openings"),
+                            self._evidence_dimension(value=20.0, unit="cm", element="required_min_window_to_wall"),
+                        ],
+                        notes_he="נמצאו מרחקים/נישות לחלון הדף שאינם עומדים בדרישות סעיף 3.2.",
+                    )
+                    return True
+
+                # If any sub-rule seems applicable but is inconclusive (e.g., window+door rule without door height),
+                # stay evidence-first and do not force pass/fail.
+                if any_inconclusive:
+                    self._add_requirement_evaluation(
+                        "3.2",
+                        "not_checked",
+                        reason_not_checked="window_spacing_inconclusive",
+                        evidence=evidence,
+                        notes_he="נמצאו ראיות המעידות שייתכן שחלק מדרישות 3.2 חלות (למשל חלון+דלת באותו קיר), אך חסרים נתונים כדי להכריע באופן חד-משמעי.",
+                    )
+                else:
+                    # Conditional logic per the guide: only evaluate rules that are applicable.
+                    # If the applicable rules we could evaluate all pass, mark as PASSED.
+                    self._add_requirement_evaluation(
+                        "3.2",
+                        "passed",
+                        evidence=evidence
+                        + [
+                            self._evidence_dimension(value=20.0, unit="cm", element="required_min_niche_or_wall"),
+                            self._evidence_dimension(value=100.0, unit="cm", element="required_min_light_openings"),
+                            self._evidence_dimension(value=20.0, unit="cm", element="required_min_window_to_wall"),
+                        ],
+                        notes_he="כל תתי-הבדיקות הרלוונטיות של 3.2 שניתן היה לאמת בסגמנט זה עומדות בדרישות (כלל מותנה לפי מצב תכנוני).",
+                    )
+                return True
+
+            # Structured focus exists but didn't yield any confident numeric checks.
+            # Keep the evidence and continue to the legacy text-based fallback.
+            focus_inconclusive_evidence = evidence
+
         # Check spacing (simplified)
         for window in windows:
             window_evidence: List[Dict[str, Any]] = [
@@ -1529,6 +1731,11 @@ class MamadValidator:
                     raw=window,
                 )
             ]
+
+            if focus_inconclusive_evidence:
+                # Include a small subset of focus evidence to explain why the
+                # structured path couldn't be used (e.g., low confidence / capacity).
+                window_evidence.extend(focus_inconclusive_evidence[:10])
             # Look for spacing annotations
             text_items = data.get("text_items", [])
             spacing_found = False
@@ -1560,12 +1767,20 @@ class MamadValidator:
                 )
             else:
                 # Evidence-first: do not fail on absence; mark not_checked.
+                reason = "no_window_spacing_annotation"
+                notes_he = "לא נמצאו מידות ריווח חלון מפורשות בסגמנט (עם יחידות והקשר לחלון)."
+                if focus_unavailable:
+                    reason = "window_spacing_focus_unavailable"
+                    notes_he = "לא ניתן היה לבצע חילוץ ממוקד לריווח חלון (לרוב עקב עומס/קיבולת זמנית במודל), וגם לא נמצאו מידות ריווח מפורשות בסגמנט."
+                elif focus_inconclusive_evidence:
+                    reason = "low_confidence_or_no_numeric_window_spacing"
+                    notes_he = "החילוץ הממוקד לריווח חלון לא סיפק ערכים מספריים ברמת ביטחון מספקת, וגם לא נמצאו מידות ריווח מפורשות בסגמנט."
                 self._add_requirement_evaluation(
                     "3.2",
                     "not_checked",
-                    reason_not_checked="no_window_spacing_annotation",
+                    reason_not_checked=reason,
                     evidence=window_evidence,
-                    notes_he="לא נמצאו מידות ריווח חלון מפורשות בסגמנט (עם יחידות והקשר לחלון).",
+                    notes_he=notes_he,
                 )
 
         return checked_any

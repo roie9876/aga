@@ -258,6 +258,292 @@ def test_wall_thickness_does_not_treat_single_side_callout_as_external_due_to_wi
     assert ev_12 is not None
     assert ev_12.get("status") == "passed"
     assert "1.2" in (result.get("checked_requirements") or [])
+
+
+def test_wall_thickness_does_not_fail_on_top_bottom_location_noise_without_explicit_external_markers() -> None:
+    """Regression: free-form location strings like 'base/top of section' must not infer external walls.
+
+    This matches the 474c1df9 pattern where a 20cm dimension exists near the window detail and was
+    incorrectly treated as an external wall thickness, causing a false 1.2 failure.
+    """
+
+    from src.services.mamad_validator import MamadValidator
+
+    v = MamadValidator()
+    analysis_data = {
+        "classification": {"primary_category": "REBAR_DETAILS"},
+        "text_items": [{"text": "חלון A1", "language": "hebrew", "type": "title"}],
+        "annotations": [{"text": "פנים", "type": "label"}, {"text": "חוץ", "type": "label"}],
+        "dimensions": [],
+        "external_wall_count": None,
+        "structural_elements": [
+            {
+                "type": "wall",
+                "thickness": "20.0 cm",
+                "unit": "cm",
+                "location": "right-side vertical section detail, small horizontal dimension at base/top of section",
+                "notes": "wall_thickness_focus",
+                "evidence": ["dimension label '20' shown as a short horizontal thickness marker"],
+            },
+            {
+                "type": "wall",
+                "thickness": "25cm",
+                "unit": "cm",
+                "location": "לא ברור",
+            },
+            {
+                "type": "window",
+                "width": 100,
+                "height": 115,
+                "unit": "cm",
+                "location": "פתח חלון A1",
+            },
+        ],
+    }
+
+    result = v.validate_segment(
+        analysis_data,
+        demo_mode=True,
+        enabled_requirements={"1.2"},
+    )
+
+    evals = result.get("requirement_evaluations")
+    assert isinstance(evals, list)
+    ev_12 = next((e for e in evals if isinstance(e, dict) and e.get("requirement_id") == "1.2"), None)
+    assert ev_12 is not None
+    # Must not hard-fail based on ambiguous inferred-external 20cm.
+    assert ev_12.get("status") in {"not_checked", "passed"}
+    assert ev_12.get("status") != "failed"
+
+
+def test_window_spacing_passes_when_all_3_2_base_checks_present_and_meet_thresholds() -> None:
+    from src.services.mamad_validator import MamadValidator
+
+    v = MamadValidator()
+    analysis_data = {
+        "classification": {"primary_category": "WINDOW_DETAILS"},
+        "text_items": [],
+        "dimensions": [],
+        "annotations": [],
+        "structural_elements": [
+            {"type": "window", "location": "פרט חלון הדף", "notes": "חלון"},
+        ],
+        "window_spacing_focus": {
+            "windows": [
+                {
+                    "niche_to_niche_cm": 20,
+                    "light_openings_spacing_cm": 100,
+                    "to_perpendicular_wall_cm": 20,
+                    "same_wall_door_separation_cm": None,
+                    "door_height_cm": None,
+                    "has_concrete_wall_between_openings": None,
+                    "concrete_wall_thickness_cm": None,
+                    "confidence": 0.9,
+                    "location": "חלון הדף",
+                    "evidence": ["20", "100", "20"],
+                }
+            ]
+        },
+    }
+
+    result = v.validate_segment(analysis_data, demo_mode=True, enabled_requirements={"3.2"})
+    evals = result.get("requirement_evaluations")
+    assert isinstance(evals, list)
+    ev = next((e for e in evals if isinstance(e, dict) and e.get("requirement_id") == "3.2"), None)
+    assert ev is not None
+    assert ev.get("status") == "passed"
+    assert "3.2" in (result.get("checked_requirements") or [])
+    _assert_no_passed_or_failed_without_evidence(evals)
+
+
+def test_window_spacing_passes_when_only_applicable_subrules_have_confident_numeric_evidence() -> None:
+    from src.services.mamad_validator import MamadValidator
+
+    v = MamadValidator()
+    analysis_data = {
+        "classification": {"primary_category": "WINDOW_DETAILS"},
+        "text_items": [],
+        "dimensions": [],
+        "annotations": [],
+        "structural_elements": [
+            {"type": "window", "location": "פרט חלון הדף", "notes": "חלון"},
+        ],
+        # Simulates the real-world case: we can verify 100cm between openings and 20cm to a perpendicular wall,
+        # but niche-to-niche is not applicable/available in this segment.
+        "window_spacing_focus": {
+            "windows": [
+                {
+                    "niche_to_niche_cm": None,
+                    "light_openings_spacing_cm": 100,
+                    "to_perpendicular_wall_cm": 20,
+                    "same_wall_door_separation_cm": None,
+                    "door_height_cm": None,
+                    "has_concrete_wall_between_openings": None,
+                    "concrete_wall_thickness_cm": None,
+                    "confidence": 0.62,
+                    "location": "חלון הדף",
+                    "evidence": ["100", "20"],
+                }
+            ]
+        },
+    }
+
+    result = v.validate_segment(analysis_data, demo_mode=True, enabled_requirements={"3.2"})
+    evals = result.get("requirement_evaluations")
+    assert isinstance(evals, list)
+    ev = next((e for e in evals if isinstance(e, dict) and e.get("requirement_id") == "3.2"), None)
+    assert ev is not None
+    assert ev.get("status") == "passed"
+    assert "3.2" in (result.get("checked_requirements") or [])
+    _assert_no_passed_or_failed_without_evidence(evals)
+
+
+def test_window_spacing_fails_when_any_base_threshold_violated_with_confident_numeric_evidence() -> None:
+    from src.services.mamad_validator import MamadValidator
+
+    v = MamadValidator()
+    analysis_data = {
+        "classification": {"primary_category": "WINDOW_DETAILS"},
+        "text_items": [],
+        "dimensions": [],
+        "annotations": [],
+        "structural_elements": [
+            {"type": "window", "location": "פרט חלון הדף", "notes": "חלון"},
+        ],
+        "window_spacing_focus": {
+            "windows": [
+                {
+                    "niche_to_niche_cm": 20,
+                    "light_openings_spacing_cm": 100,
+                    "to_perpendicular_wall_cm": 15,
+                    "confidence": 0.9,
+                    "location": "חלון הדף",
+                    "evidence": ["15"],
+                }
+            ]
+        },
+    }
+
+    result = v.validate_segment(analysis_data, demo_mode=True, enabled_requirements={"3.2"})
+    evals = result.get("requirement_evaluations")
+    assert isinstance(evals, list)
+    ev = next((e for e in evals if isinstance(e, dict) and e.get("requirement_id") == "3.2"), None)
+    assert ev is not None
+    assert ev.get("status") == "failed"
+    assert "3.2" in (result.get("checked_requirements") or [])
+    _assert_no_passed_or_failed_without_evidence(evals)
+
+
+def test_window_spacing_is_not_checked_when_focus_confidence_is_low() -> None:
+    from src.services.mamad_validator import MamadValidator
+
+    v = MamadValidator()
+    analysis_data = {
+        "classification": {"primary_category": "WINDOW_DETAILS"},
+        "text_items": [],
+        "dimensions": [],
+        "annotations": [],
+        "structural_elements": [
+            {"type": "window", "location": "פרט חלון הדף", "notes": "חלון"},
+        ],
+        "window_spacing_focus": {
+            "windows": [
+                {
+                    "niche_to_niche_cm": 20,
+                    "light_openings_spacing_cm": 100,
+                    "to_perpendicular_wall_cm": 20,
+                    "confidence": 0.4,
+                    "location": "חלון הדף",
+                    "evidence": ["20", "100"],
+                }
+            ]
+        },
+    }
+
+    result = v.validate_segment(analysis_data, demo_mode=True, enabled_requirements={"3.2"})
+    evals = result.get("requirement_evaluations")
+    assert isinstance(evals, list)
+    ev = next((e for e in evals if isinstance(e, dict) and e.get("requirement_id") == "3.2"), None)
+    assert ev is not None
+    assert ev.get("status") == "not_checked"
+    assert "3.2" not in (result.get("checked_requirements") or [])
+
+
+def test_window_and_door_same_wall_rule_fails_when_separation_below_door_height_and_no_concrete_separator() -> None:
+    from src.services.mamad_validator import MamadValidator
+
+    v = MamadValidator()
+    analysis_data = {
+        "classification": {"primary_category": "WINDOW_DETAILS"},
+        "text_items": [],
+        "dimensions": [],
+        "annotations": [],
+        "structural_elements": [
+            {"type": "window", "location": "קיר משותף", "notes": "חלון"},
+        ],
+        "window_spacing_focus": {
+            "windows": [
+                {
+                    "niche_to_niche_cm": 20,
+                    "light_openings_spacing_cm": 100,
+                    "to_perpendicular_wall_cm": 20,
+                    "same_wall_door_separation_cm": 150,
+                    "door_height_cm": 200,
+                    "has_concrete_wall_between_openings": False,
+                    "confidence": 0.9,
+                    "location": "קיר משותף",
+                    "evidence": ["150", "200"],
+                }
+            ]
+        },
+    }
+
+    result = v.validate_segment(analysis_data, demo_mode=True, enabled_requirements={"3.2"})
+    evals = result.get("requirement_evaluations")
+    assert isinstance(evals, list)
+    ev = next((e for e in evals if isinstance(e, dict) and e.get("requirement_id") == "3.2"), None)
+    assert ev is not None
+    assert ev.get("status") == "failed"
+    assert "3.2" in (result.get("checked_requirements") or [])
+    _assert_no_passed_or_failed_without_evidence(evals)
+
+
+def test_window_and_door_same_wall_rule_passes_when_concrete_wall_between_openings_is_at_least_20cm() -> None:
+    from src.services.mamad_validator import MamadValidator
+
+    v = MamadValidator()
+    analysis_data = {
+        "classification": {"primary_category": "WINDOW_DETAILS"},
+        "text_items": [],
+        "dimensions": [],
+        "annotations": [],
+        "structural_elements": [
+            {"type": "window", "location": "קיר משותף", "notes": "חלון"},
+        ],
+        "window_spacing_focus": {
+            "windows": [
+                {
+                    "niche_to_niche_cm": 20,
+                    "light_openings_spacing_cm": 100,
+                    "to_perpendicular_wall_cm": 20,
+                    "has_concrete_wall_between_openings": True,
+                    "concrete_wall_thickness_cm": 20,
+                    "confidence": 0.9,
+                    "location": "קיר משותף",
+                    "evidence": ["קיר 20"],
+                }
+            ]
+        },
+    }
+
+    result = v.validate_segment(analysis_data, demo_mode=True, enabled_requirements={"3.2"})
+    evals = result.get("requirement_evaluations")
+    assert isinstance(evals, list)
+    ev = next((e for e in evals if isinstance(e, dict) and e.get("requirement_id") == "3.2"), None)
+    assert ev is not None
+    assert ev.get("status") == "passed"
+    assert "3.2" in (result.get("checked_requirements") or [])
+    _assert_no_passed_or_failed_without_evidence(evals)
     _assert_no_passed_or_failed_without_evidence(evals)
 
 

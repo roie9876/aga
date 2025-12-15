@@ -263,6 +263,30 @@ class RequirementsParser:
             operator=">=",
             expected_value=20
         ))
+
+        # Rule 3.2: Sliding niches spacing
+        rules.append(ValidationRule(
+            rule_id="3.2_sliding_niches_spacing",
+            section="3.2",
+            category="window_spacing",
+            description="מרחק בין נישות גרירה: 20 ס\"מ לפחות",
+            severity=ValidationSeverity.MAJOR,
+            field="window_niche_spacing_cm",
+            operator=">=",
+            expected_value=20,
+        ))
+
+        # Rule 3.2: Light openings spacing
+        rules.append(ValidationRule(
+            rule_id="3.2_light_openings_spacing",
+            section="3.2",
+            category="window_spacing",
+            description="מרחק בין פתחי אור: 100 ס\"מ לפחות",
+            severity=ValidationSeverity.MAJOR,
+            field="window_light_openings_spacing_cm",
+            operator=">=",
+            expected_value=100,
+        ))
         
         # Rule 3.2: Window to door spacing
         rules.append(ValidationRule(

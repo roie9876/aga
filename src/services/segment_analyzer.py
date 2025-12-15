@@ -357,30 +357,99 @@ Rules:
         logger.info("Running focused window-spacing extraction", segment_id=segment_id)
         image_bytes = await self._download_segment_image(segment_blob_url)
 
-        prompt_text = f"""Return ONLY valid JSON.
+        prompt_text = f"""You are a strict extractor for Israeli ממ"ד requirements.
+Return ONLY valid JSON. No markdown. No explanations.
 
-Extract evidence about window spacing / setbacks relevant to Requirement 3.2.
-If exact numeric values are unclear, extract the best evidence strings.
+Task: Extract window (חלון הדף) spacing evidence for Requirement 3.2, aligned with the architectural guide.
 
 Segment Type: {segment_type}
 Description: {segment_description}
 
-Return JSON:
-{{
-  "window_spacing_focus": {{
-    "evidence_texts": ["..."],
-    "confidence": 0.0,
-    "notes": "brief"
-  }},
-  "window_roi": {{"x": 0.0, "y": 0.0, "width": 0.0, "height": 0.0, "confidence": 0.0, "notes": "brief"}}
-}}"""
+Requirement 3.2 subchecks (extract what you can):
+1) Distance between sliding niches (מרחק בין נישות גרירה): >= 20 cm
+2) Distance between light openings (מרחק בין פתחי אור): >= 100 cm
+3) Distance from blast window to perpendicular wall (מרחק חלון הדף מקיר ניצב): >= 20 cm
+4) If window and door are on the SAME wall: separation >= door height, OR a 20cm concrete wall exists between the openings.
 
-        extracted = await self._run_focused_extraction(
-            image_bytes_list=[image_bytes],
-            prompt_text=prompt_text,
-        )
+Return JSON with this shape:
+{{
+    "window_spacing_focus": {{
+        "windows": [
+            {{
+                "niche_to_niche_cm": null,
+                "light_openings_spacing_cm": null,
+                "to_perpendicular_wall_cm": null,
+                "same_wall_door_separation_cm": null,
+                "door_height_cm": null,
+                "has_concrete_wall_between_openings": null,
+                "concrete_wall_thickness_cm": null,
+                "confidence": 0.0,
+                "location": "short description",
+                "evidence": ["short evidence strings of what you saw (dimension text / arrows / labels)"]
+            }}
+        ],
+        "notes": "brief"
+    }},
+    "window_roi": {{"x": 0.0, "y": 0.0, "width": 0.0, "height": 0.0, "confidence": 0.0, "notes": "brief"}}
+}}
+
+Rules:
+- Units: if not specified in the drawing, assume centimeters (cm).
+- Extract numeric values as numbers (not strings).
+- If the segment includes multiple windows/openings, include multiple objects.
+- If you cannot find ANY numeric spacing values, still return one object with all null values and confidence < 0.5,
+    and put your best evidence strings (e.g., labels you saw) in evidence.
+- ROI coords are PERCENT (0-100) relative to the image."""
+
+        try:
+            extracted = await self._run_focused_extraction(
+                image_bytes_list=[image_bytes],
+                prompt_text=prompt_text,
+            )
+        except Exception as e:
+            # Evidence-first fallback: if the focused pass is unavailable (e.g., 429 NoCapacity),
+            # return a low-confidence payload instead of raising.
+            msg = str(e)
+            if len(msg) > 240:
+                msg = msg[:240] + "..."
+            logger.warning(
+                "Focused window-spacing extraction failed; returning fallback",
+                segment_id=segment_id,
+                error=msg,
+            )
+            return {
+                "window_spacing_focus": {
+                    "windows": [
+                        {
+                            "niche_to_niche_cm": None,
+                            "light_openings_spacing_cm": None,
+                            "to_perpendicular_wall_cm": None,
+                            "same_wall_door_separation_cm": None,
+                            "door_height_cm": None,
+                            "has_concrete_wall_between_openings": None,
+                            "concrete_wall_thickness_cm": None,
+                            "confidence": 0.0,
+                            "location": "",
+                            "evidence": [
+                                "Focused window-spacing extraction unavailable (likely temporary capacity).",
+                                f"error: {msg}",
+                            ],
+                        }
+                    ],
+                    "notes": "focus_unavailable",
+                },
+                "window_roi": {
+                    "x": 0.0,
+                    "y": 0.0,
+                    "width": 0.0,
+                    "height": 0.0,
+                    "confidence": 0.0,
+                    "notes": "focus_unavailable",
+                },
+            }
+
         if not isinstance(extracted, dict):
-            return {"window_spacing_focus": {"evidence_texts": []}}
+            return {"window_spacing_focus": {"windows": [], "evidence_texts": []}}
         return {
             "window_spacing_focus": extracted.get("window_spacing_focus"),
             "window_roi": extracted.get("window_roi"),

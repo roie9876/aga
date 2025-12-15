@@ -409,14 +409,65 @@ async def validate_segments(request: SegmentValidationRequest):
                                 if window_focus.get("window_roi"):
                                     base.setdefault("window_roi", window_focus.get("window_roi"))
                                 base.setdefault("text_items", [])
+                                base.setdefault("dimensions", [])
 
                                 payload = window_focus.get("window_spacing_focus")
-                                if isinstance(payload, dict) and isinstance(payload.get("evidence_texts"), list):
-                                    for ev in payload.get("evidence_texts")[:10]:
-                                        if isinstance(ev, str) and ev.strip():
-                                            base["text_items"].append(
-                                                {"text": ev.strip(), "language": "hebrew", "type": "dimension"}
-                                            )
+                                if isinstance(payload, dict):
+                                    # Back-compat: old extractor emitted evidence_texts.
+                                    ev_texts = payload.get("evidence_texts")
+                                    if isinstance(ev_texts, list):
+                                        for ev in ev_texts[:10]:
+                                            if isinstance(ev, str) and ev.strip():
+                                                base["text_items"].append(
+                                                    {"text": ev.strip(), "language": "hebrew", "type": "dimension"}
+                                                )
+
+                                    # New extractor: structured windows[] values.
+                                    windows_payload = payload.get("windows")
+                                    if isinstance(windows_payload, list):
+                                        for w in windows_payload[:6]:
+                                            if not isinstance(w, dict):
+                                                continue
+                                            conf = w.get("confidence")
+                                            location = w.get("location") or ""
+
+                                            def _add_dim(key: str, element: str) -> None:
+                                                val = w.get(key)
+                                                if isinstance(val, (int, float)):
+                                                    base["dimensions"].append(
+                                                        {
+                                                            "value": float(val),
+                                                            "unit": "cm",
+                                                            "element": element,
+                                                            "location": location,
+                                                            "confidence": conf,
+                                                        }
+                                                    )
+
+                                            _add_dim("niche_to_niche_cm", "window niche spacing")
+                                            _add_dim("light_openings_spacing_cm", "window light openings spacing")
+                                            _add_dim("to_perpendicular_wall_cm", "window to perpendicular wall")
+                                            _add_dim("same_wall_door_separation_cm", "window-door separation")
+                                            _add_dim("door_height_cm", "door height")
+                                            _add_dim("concrete_wall_thickness_cm", "concrete wall thickness")
+
+                                            ev_list = w.get("evidence")
+                                            if isinstance(ev_list, list):
+                                                for ev in ev_list[:8]:
+                                                    if isinstance(ev, str) and ev.strip():
+                                                        base["text_items"].append(
+                                                            {"text": ev.strip(), "language": "hebrew", "type": "dimension"}
+                                                        )
+
+                                            # Represent boolean hints as evidence text for downstream validators.
+                                            if w.get("has_concrete_wall_between_openings") is True:
+                                                base["text_items"].append(
+                                                    {
+                                                        "text": "קיים קיר בטון בין דלת לחלון (לפי זיהוי ממוקד)",
+                                                        "language": "hebrew",
+                                                        "type": "note",
+                                                    }
+                                                )
                                 analysis_result["analysis_data"] = base
                         except Exception as e:
                             logger.warning(
@@ -1110,16 +1161,66 @@ async def validate_segments_stream(request: SegmentValidationRequest):
                                 if window_focus.get("window_roi"):
                                     base.setdefault("window_roi", window_focus.get("window_roi"))
                                 base.setdefault("text_items", [])
+                                base.setdefault("dimensions", [])
 
                                 payload = window_focus.get("window_spacing_focus")
                                 evidence_count = 0
-                                if isinstance(payload, dict) and isinstance(payload.get("evidence_texts"), list):
-                                    for ev in payload.get("evidence_texts")[:10]:
-                                        if isinstance(ev, str) and ev.strip():
-                                            evidence_count += 1
-                                            base["text_items"].append(
-                                                {"text": ev.strip(), "language": "hebrew", "type": "dimension"}
-                                            )
+                                if isinstance(payload, dict):
+                                    ev_texts = payload.get("evidence_texts")
+                                    if isinstance(ev_texts, list):
+                                        for ev in ev_texts[:10]:
+                                            if isinstance(ev, str) and ev.strip():
+                                                evidence_count += 1
+                                                base["text_items"].append(
+                                                    {"text": ev.strip(), "language": "hebrew", "type": "dimension"}
+                                                )
+
+                                    windows_payload = payload.get("windows")
+                                    if isinstance(windows_payload, list):
+                                        for w in windows_payload[:6]:
+                                            if not isinstance(w, dict):
+                                                continue
+                                            conf = w.get("confidence")
+                                            location = w.get("location") or ""
+
+                                            def _add_dim(key: str, element: str) -> None:
+                                                val = w.get(key)
+                                                if isinstance(val, (int, float)):
+                                                    base["dimensions"].append(
+                                                        {
+                                                            "value": float(val),
+                                                            "unit": "cm",
+                                                            "element": element,
+                                                            "location": location,
+                                                            "confidence": conf,
+                                                        }
+                                                    )
+
+                                            _add_dim("niche_to_niche_cm", "window niche spacing")
+                                            _add_dim("light_openings_spacing_cm", "window light openings spacing")
+                                            _add_dim("to_perpendicular_wall_cm", "window to perpendicular wall")
+                                            _add_dim("same_wall_door_separation_cm", "window-door separation")
+                                            _add_dim("door_height_cm", "door height")
+                                            _add_dim("concrete_wall_thickness_cm", "concrete wall thickness")
+
+                                            ev_list = w.get("evidence")
+                                            if isinstance(ev_list, list):
+                                                for ev in ev_list[:8]:
+                                                    if isinstance(ev, str) and ev.strip():
+                                                        evidence_count += 1
+                                                        base["text_items"].append(
+                                                            {"text": ev.strip(), "language": "hebrew", "type": "dimension"}
+                                                        )
+
+                                            if w.get("has_concrete_wall_between_openings") is True:
+                                                evidence_count += 1
+                                                base["text_items"].append(
+                                                    {
+                                                        "text": "קיים קיר בטון בין דלת לחלון (לפי זיהוי ממוקד)",
+                                                        "language": "hebrew",
+                                                        "type": "note",
+                                                    }
+                                                )
                                 analysis_result["analysis_data"] = base
 
                             yield _ndjson({"event": "window_focus_done", "segment_id": seg_id, "evidence_texts": evidence_count})
