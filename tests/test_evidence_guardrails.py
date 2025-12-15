@@ -131,6 +131,95 @@ def test_wall_thickness_runs_even_when_classified_as_room_layout_if_evidence_exi
         _assert_no_passed_or_failed_without_evidence(evals)
 
 
+def test_wall_thickness_with_sliding_blast_window_requires_30cm_for_1_or_2_external_walls() -> None:
+    from src.services.mamad_validator import MamadValidator
+
+    v = MamadValidator()
+    analysis_data = {
+        "classification": {"primary_category": "ROOM_LAYOUT"},
+        "text_items": [],
+        "annotations": [],
+        "dimensions": [],
+        "external_wall_count": 1,
+        "structural_elements": [
+            {
+                "type": "wall",
+                "thickness": "25cm",
+                "unit": "cm",
+                "location": "קיר חיצוני",
+                "notes": "wall_thickness_focus",
+                "evidence": ["left", "top"],
+            },
+            {
+                "type": "window",
+                "location": "קיר חיצוני שמאלי",
+                "notes": "חלון הדף נגרר (נישת גרירה) ת\"י 4422 ממ\"ד",
+            },
+        ],
+    }
+
+    result = v.validate_segment(
+        analysis_data,
+        demo_mode=True,
+        enabled_requirements={"1.2"},
+    )
+
+    evals = result.get("requirement_evaluations")
+    assert isinstance(evals, list)
+    ev_12 = next((e for e in evals if isinstance(e, dict) and e.get("requirement_id") == "1.2"), None)
+    assert ev_12 is not None
+    assert ev_12.get("status") == "failed"
+    assert "30" in str(ev_12.get("notes_he") or "")
+    _assert_no_passed_or_failed_without_evidence(evals)
+
+
+def test_wall_thickness_with_non_sliding_blast_window_does_not_require_30cm_for_1_or_2_external_walls() -> None:
+    """Section 1.2 window-case (30cm) applies only to sliding blast windows.
+
+    If the window is explicitly non-sliding (e.g., outward-opening), thickness should be evaluated
+    as if there is no window.
+    """
+
+    from src.services.mamad_validator import MamadValidator
+
+    v = MamadValidator()
+    analysis_data = {
+        "classification": {"primary_category": "ROOM_LAYOUT"},
+        "text_items": [],
+        "annotations": [],
+        "dimensions": [],
+        "external_wall_count": 1,
+        "structural_elements": [
+            {
+                "type": "wall",
+                "thickness": "25cm",
+                "unit": "cm",
+                "location": "קיר חיצוני",
+                "notes": "wall_thickness_focus",
+                "evidence": ["left"],
+            },
+            {
+                "type": "window",
+                "location": "קיר חיצוני שמאלי",
+                "notes": "חלון הדף נפתח החוצה ת\"י 4422 ממ\"ד",
+            },
+        ],
+    }
+
+    result = v.validate_segment(
+        analysis_data,
+        demo_mode=True,
+        enabled_requirements={"1.2"},
+    )
+
+    evals = result.get("requirement_evaluations")
+    assert isinstance(evals, list)
+    ev_12 = next((e for e in evals if isinstance(e, dict) and e.get("requirement_id") == "1.2"), None)
+    assert ev_12 is not None
+    assert ev_12.get("status") == "passed"
+    _assert_no_passed_or_failed_without_evidence(evals)
+
+
 def test_wall_thickness_rule_of_thumb_infers_external_internal_and_counts_walls() -> None:
     """Door=>internal, window=>external, perimeter sides=>external should allow a real 1.2 check.
 
@@ -258,6 +347,158 @@ def test_wall_thickness_does_not_treat_single_side_callout_as_external_due_to_wi
     assert ev_12 is not None
     assert ev_12.get("status") == "passed"
     assert "1.2" in (result.get("checked_requirements") or [])
+
+
+def test_room_height_generic_h_marker_in_floor_plan_is_not_checked() -> None:
+    """Regression: Non-section segments often contain multiple H= markers.
+
+    A bare H=2.40 annotation (without explicit 'גובה חדר/תקרה' context) must not
+    trigger a hard failure for 2.1, because it can refer to an opening/installation.
+    """
+
+    from src.services.mamad_validator import MamadValidator
+
+    v = MamadValidator()
+    analysis_data = {
+        "classification": {"primary_category": "ROOM_LAYOUT"},
+        "text_items": [
+            {"text": "ממ\"ד", "language": "hebrew", "type": "label"},
+            {"text": "H=2.40", "language": "hebrew", "type": "dimension"},
+        ],
+        # The segment pipeline currently injects this as a dimension element "room height".
+        "dimensions": [
+            {"value": 2.40, "unit": "m", "element": "room height", "location": "", "confidence": 0.95},
+        ],
+        "structural_elements": [],
+        "annotations": [],
+    }
+
+    result = v.validate_segment(analysis_data, demo_mode=True, enabled_requirements={"2.1", "2.2"})
+    evals = result.get("requirement_evaluations")
+    assert isinstance(evals, list)
+    ev_21 = next((e for e in evals if isinstance(e, dict) and e.get("requirement_id") == "2.1"), None)
+    assert ev_21 is not None
+    assert ev_21.get("status") == "not_checked"
+    assert ev_21.get("reason_not_checked") in {
+        "non_section_weak_height_evidence",
+        "segment_not_section_like",
+        "room_height_not_found",
+    }
+
+
+def test_room_height_word_present_but_opening_height_context_is_not_checked() -> None:
+    """Regression: floor plans may include the word 'גובה' for opening/installation heights.
+
+    Even if OCR includes 'גובה' and a Mamad label, 2.1 must NOT evaluate unless there is explicit
+    room/ceiling height context (e.g., 'גובה תקרה', 'גובה חדר').
+    """
+
+    from src.services.mamad_validator import MamadValidator
+
+    v = MamadValidator()
+    analysis_data = {
+        "classification": {"primary_category": "ROOM_LAYOUT"},
+        "text_items": [
+            {"text": 'ממ"ד', "language": "hebrew", "type": "label"},
+            {"text": "גובה אדן חלון H=0.90", "language": "hebrew", "type": "note"},
+            {"text": "H=2.40", "language": "hebrew", "type": "dimension"},
+        ],
+        # Simulate a mis-extraction where a floor plan height marker got injected as "room height".
+        "dimensions": [
+            {
+                "value": 2.40,
+                "unit": "m",
+                "element": "room height",
+                "location": "H=2.40",
+                "confidence": 0.95,
+            },
+        ],
+        "structural_elements": [],
+        "annotations": [],
+    }
+
+    result = v.validate_segment(analysis_data, demo_mode=True, enabled_requirements={"2.1", "2.2"})
+    evals = result.get("requirement_evaluations")
+    assert isinstance(evals, list)
+    ev_21 = next((e for e in evals if isinstance(e, dict) and e.get("requirement_id") == "2.1"), None)
+    assert ev_21 is not None
+    assert ev_21.get("status") == "not_checked"
+    assert ev_21.get("reason_not_checked") in {
+        "non_section_weak_height_evidence",
+        "segment_not_section_like",
+        "room_height_not_found",
+        "segment_top_view",
+    }
+
+
+def test_room_height_not_checked_when_summary_marks_floor_plan_even_if_category_is_sections() -> None:
+    """Regression: classification can be noisy; view signal should win.
+
+    If the segment is a top-view floor plan, 2.1/2.2 must be not_checked even if:
+    - primary_category is incorrectly set to SECTIONS
+    - a height value was injected into dimensions
+    """
+
+    from src.services.mamad_validator import MamadValidator
+
+    v = MamadValidator()
+    analysis_data = {
+        "classification": {"primary_category": "SECTIONS"},
+        "summary": {"primary_function": "floor_plan"},
+        "text_items": [
+            {"text": 'ממ"ד', "language": "hebrew", "type": "label"},
+            {"text": "H=2.40", "language": "hebrew", "type": "dimension"},
+        ],
+        "dimensions": [
+            {"value": 2.40, "unit": "m", "element": "room height", "location": "H=2.40", "confidence": 0.95},
+        ],
+        "structural_elements": [],
+        "annotations": [],
+    }
+
+    result = v.validate_segment(analysis_data, demo_mode=True, enabled_requirements={"2.1", "2.2"})
+    evals = result.get("requirement_evaluations")
+    assert isinstance(evals, list)
+    ev_21 = next((e for e in evals if isinstance(e, dict) and e.get("requirement_id") == "2.1"), None)
+    assert ev_21 is not None
+    assert ev_21.get("status") == "not_checked"
+    assert ev_21.get("reason_not_checked") == "segment_top_view"
+
+
+def test_room_height_explicit_ceiling_height_text_fails_when_below_standard() -> None:
+    """If the segment explicitly states ceiling/room height for the Mamad, 2.1 should evaluate."""
+
+    from src.services.mamad_validator import MamadValidator
+
+    v = MamadValidator()
+    analysis_data = {
+        "classification": {"primary_category": "ROOM_LAYOUT"},
+        "text_items": [
+            {"text": "ממ\"ד", "language": "hebrew", "type": "label"},
+            {"text": "גובה תקרה 2.40", "language": "hebrew", "type": "note"},
+        ],
+        "dimensions": [
+            {
+                "value": 2.40,
+                "unit": "m",
+                "element": "room height",
+                "location": "גובה תקרה בחלל הממ\"ד",
+                "confidence": 0.95,
+            },
+        ],
+        "structural_elements": [],
+        "annotations": [],
+    }
+
+    result = v.validate_segment(analysis_data, demo_mode=True, enabled_requirements={"2.1", "2.2"})
+    evals = result.get("requirement_evaluations")
+    assert isinstance(evals, list)
+    ev_21 = next((e for e in evals if isinstance(e, dict) and e.get("requirement_id") == "2.1"), None)
+    assert ev_21 is not None
+    assert ev_21.get("status") == "failed"
+
+    # Any pass/fail must contain evidence.
+    _assert_no_passed_or_failed_without_evidence(evals)
 
 
 def test_wall_thickness_does_not_fail_on_top_bottom_location_noise_without_explicit_external_markers() -> None:
@@ -632,6 +873,157 @@ def test_room_height_implausible_height_is_not_checked() -> None:
     ev_22 = next((e for e in evals if isinstance(e, dict) and e.get("requirement_id") == "2.2"), None)
     assert ev_21 is not None and ev_21.get("status") == "not_checked"
     assert ev_22 is not None and ev_22.get("status") == "not_checked"
+    _assert_no_passed_or_failed_without_evidence(evals)
+
+
+def test_room_height_exception_22_passes_only_when_context_and_volume_present() -> None:
+    """2.2 should be evaluated only when basement/addition context exists, and requires volume evidence."""
+
+    from src.services.mamad_validator import MamadValidator
+
+    v = MamadValidator()
+    analysis_data = {
+        "classification": {"primary_category": "SECTIONS"},
+        "text_items": [{"text": "מרתף"}, {"text": "נפח 23 m3"}],
+        "annotations": [],
+        "structural_elements": [],
+        "dimensions": [
+            {"value": 2.30, "unit": "m", "element": "room height", "location": "H=2.30", "confidence": 0.9},
+            {"value": 23.0, "unit": "m3", "element": "room volume", "location": "נפח", "confidence": 0.9},
+        ],
+    }
+
+    result = v.validate_segment(analysis_data, demo_mode=True, enabled_requirements={"2.1", "2.2"})
+    evals = result.get("requirement_evaluations")
+    assert isinstance(evals, list)
+    ev_21 = next((e for e in evals if isinstance(e, dict) and e.get("requirement_id") == "2.1"), None)
+    ev_22 = next((e for e in evals if isinstance(e, dict) and e.get("requirement_id") == "2.2"), None)
+    assert ev_21 is not None and ev_21.get("status") == "passed"
+    assert ev_22 is not None and ev_22.get("status") == "passed"
+    assert set(result.get("checked_requirements") or []) >= {"2.1", "2.2"}
+    _assert_no_passed_or_failed_without_evidence(evals)
+
+
+def test_requirement_11_external_wall_count_passes_with_explicit_count() -> None:
+    from src.services.mamad_validator import MamadValidator
+
+    v = MamadValidator()
+    analysis_data = {
+        "classification": {"primary_category": "ROOM_LAYOUT"},
+        "text_items": [],
+        "annotations": [],
+        "dimensions": [],
+        "structural_elements": [],
+        "external_wall_count": 2,
+    }
+
+    result = v.validate_segment(analysis_data, demo_mode=True, enabled_requirements={"1.1"})
+    evals = result.get("requirement_evaluations")
+    assert isinstance(evals, list)
+    ev = next((e for e in evals if isinstance(e, dict) and e.get("requirement_id") == "1.1"), None)
+    assert ev is not None
+    assert ev.get("status") == "passed"
+    assert "1.1" in (result.get("checked_requirements") or [])
+    _assert_no_passed_or_failed_without_evidence(evals)
+
+
+def test_requirement_13_requires_protective_wall_when_claiming_not_external_near_exterior_line() -> None:
+    from src.services.mamad_validator import MamadValidator
+
+    v = MamadValidator()
+    analysis_data = {
+        "classification": {"primary_category": "ROOM_LAYOUT"},
+        "text_items": [
+            {"text": "קו חיצוני של הבניין 2m"},
+            {"text": "לא נחשב קיר חיצוני"},
+        ],
+        "annotations": [],
+        "dimensions": [],
+        "structural_elements": [],
+    }
+
+    result = v.validate_segment(analysis_data, demo_mode=True, enabled_requirements={"1.3"})
+    evals = result.get("requirement_evaluations")
+    assert isinstance(evals, list)
+    ev = next((e for e in evals if isinstance(e, dict) and e.get("requirement_id") == "1.3"), None)
+    assert ev is not None
+    assert ev.get("status") == "failed"
+    assert "1.3" in (result.get("checked_requirements") or [])
+    _assert_no_passed_or_failed_without_evidence(evals)
+
+
+def test_requirement_14_is_not_applicable_when_clear_opening_not_above_28m() -> None:
+    from src.services.mamad_validator import MamadValidator
+
+    v = MamadValidator()
+    analysis_data = {
+        "classification": {"primary_category": "SECTIONS"},
+        "text_items": [],
+        "annotations": [],
+        "structural_elements": [],
+        "dimensions": [
+            {"value": 2.70, "unit": "m", "element": "בטון-לבטון", "location": "חתך"},
+        ],
+    }
+
+    result = v.validate_segment(analysis_data, demo_mode=True, enabled_requirements={"1.4"})
+    evals = result.get("requirement_evaluations")
+    assert isinstance(evals, list)
+    ev = next((e for e in evals if isinstance(e, dict) and e.get("requirement_id") == "1.4"), None)
+    assert ev is not None
+    assert ev.get("status") == "not_checked"
+    assert ev.get("reason_not_checked") == "not_applicable_not_high_wall"
+
+
+def test_requirement_15_passes_when_tower_continuity_at_least_70_percent() -> None:
+    from src.services.mamad_validator import MamadValidator
+
+    v = MamadValidator()
+    analysis_data = {
+        "classification": {"primary_category": "ROOM_LAYOUT"},
+        "text_items": [{"text": "מגדל ממ\"דים רציפות: 75%"}],
+        "annotations": [],
+        "dimensions": [],
+        "structural_elements": [],
+    }
+
+    result = v.validate_segment(analysis_data, demo_mode=True, enabled_requirements={"1.5"})
+    evals = result.get("requirement_evaluations")
+    assert isinstance(evals, list)
+    ev = next((e for e in evals if isinstance(e, dict) and e.get("requirement_id") == "1.5"), None)
+    assert ev is not None
+    assert ev.get("status") == "passed"
+    assert "1.5" in (result.get("checked_requirements") or [])
+    _assert_no_passed_or_failed_without_evidence(evals)
+
+
+def test_wall_thickness_uses_post_exception_external_wall_count_when_provided() -> None:
+    """1.2 must depend on the *final* external wall count after applying 1.1–1.3 exceptions."""
+
+    from src.services.mamad_validator import MamadValidator
+
+    v = MamadValidator()
+    analysis_data = {
+        "classification": {"primary_category": "ROOM_LAYOUT"},
+        "text_items": [],
+        "annotations": [],
+        "dimensions": [],
+        # Base count might be uncertain/earlier; final count after exceptions is stricter.
+        "external_wall_count": 2,
+        "external_wall_count_after_exceptions": 4,
+        "structural_elements": [
+            {"type": "wall", "thickness": "30cm", "unit": "cm", "location": "קיר חיצוני"},
+        ],
+    }
+
+    result = v.validate_segment(analysis_data, demo_mode=True, enabled_requirements={"1.2"})
+    evals = result.get("requirement_evaluations")
+    assert isinstance(evals, list)
+    ev_12 = next((e for e in evals if isinstance(e, dict) and e.get("requirement_id") == "1.2"), None)
+    assert ev_12 is not None
+    # With 4 external walls, required thickness is 40cm; 30cm must fail.
+    assert ev_12.get("status") == "failed"
+    assert "1.2" in (result.get("checked_requirements") or [])
     _assert_no_passed_or_failed_without_evidence(evals)
 
 

@@ -157,11 +157,17 @@ class ValidationEngine:
         Returns:
             Required thickness in cm
         """
+        # requirements-mamad.md (Section 1.2):
+        # 1–2 external walls: 25cm (30cm if wall has a window)
+        # 3 external walls: 30cm
+        # 4 external walls: 40cm
         if wall_count in [1, 2]:
-            return 62 if has_window else 52
-        elif wall_count in [3, 4]:
-            return 62
-        return 62  # Default to strictest requirement
+            return 30 if has_window else 25
+        if wall_count == 3:
+            return 30
+        if wall_count == 4:
+            return 40
+        return 40  # Default to strictest requirement
     
     def _validate_room_dimensions(self, data: ExtractedPlanData) -> List[ValidationViolation]:
         """Validate room height and volume (Section 2)."""

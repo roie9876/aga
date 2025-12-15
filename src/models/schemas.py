@@ -84,7 +84,13 @@ class ExtractedPlanData(BaseModel):
     # Wall measurements
     external_wall_count: Optional[int] = Field(None, description="Number of external walls")
     wall_thickness_cm: Optional[List[float]] = Field(None, description="Wall thickness measurements in cm")
-    wall_with_window: Optional[bool] = Field(None, description="Whether any wall has a window")
+    wall_with_window: Optional[bool] = Field(
+        None,
+        description=(
+            'Whether any external wall has a **sliding** blast window ("חלון הדף נגרר"); '
+            "outward-opening regular windows should be treated as no-window for Section 1.2."
+        ),
+    )
     
     # Room dimensions
     room_height_m: Optional[float] = Field(None, description="Room height in meters")

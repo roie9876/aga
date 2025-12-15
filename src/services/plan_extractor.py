@@ -104,7 +104,9 @@ class PlanExtractor:
 **1. קירות:**
 - מספר קירות חיצוניים (1-4)
 - עובי כל קיר בס"מ (רשימה)
-- האם יש חלון בקיר כלשהו
+- האם בקיר חיצוני של הממ"ד מותקן **חלון הדף נגרר** (עם נישת גרירה / סימון "נגרר")
+    - אם מדובר בחלון רגיל שנפתח החוצה (לא נגרר) — התשובה כאן צריכה להיות false
+    - אם לא ברור מהסגמנט/התוכנית אם זה נגרר או נפתח — החזר null
 
 **2. מידות חדר:**
 - גובה החדר במטרים
@@ -140,7 +142,7 @@ class PlanExtractor:
 {
   "external_wall_count": <מספר או null>,
   "wall_thickness_cm": [<רשימת עוביים בס"מ>],
-  "wall_with_window": <true/false/null>,
+    "wall_with_window": <true/false/null>,
   "room_height_m": <גובה במטרים או null>,
   "room_volume_m3": <נפח במ"ק או null>,
   "door_spacing_internal_cm": <מרחק פנימי או null>,

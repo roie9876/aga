@@ -132,24 +132,24 @@ class RequirementsParser:
         ))
         
         # Rule 1.2: Wall thickness based on external wall count
-        # 1 external wall - 25cm (30cm with window)
+        # 1 external wall - 25cm (30cm with sliding blast window)
         rules.append(ValidationRule(
             rule_id="1.2_wall_thickness_1_wall",
             section="1.2",
             category="wall_thickness",
-            description="1 קיר חיצוני: עובי 25 ס\"מ (קיר עם חלון: 30 ס\"מ)",
+            description="1 קיר חיצוני: עובי 25 ס\"מ (קיר עם חלון הדף נגרר: 30 ס\"מ)",
             severity=ValidationSeverity.CRITICAL,
             field="wall_thickness_cm",
             operator=">=",
-            expected_value=25  # 30 if window present
+            expected_value=25  # 30 if sliding blast window present
         ))
         
-        # 2 external walls - 25cm (30cm with window)
+        # 2 external walls - 25cm (30cm with sliding blast window)
         rules.append(ValidationRule(
             rule_id="1.2_wall_thickness_2_walls",
             section="1.2",
             category="wall_thickness",
-            description="2 קירות חיצוניים: עובי 25 ס\"מ (קיר עם חלון: 30 ס\"מ)",
+            description="2 קירות חיצוניים: עובי 25 ס\"מ (קיר עם חלון הדף נגרר: 30 ס\"מ)",
             severity=ValidationSeverity.CRITICAL,
             field="wall_thickness_cm",
             operator=">=",

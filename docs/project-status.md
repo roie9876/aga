@@ -583,6 +583,7 @@ Coverage Report (NEW - Tracks 16 implemented checks)
 | **2025-12-11** | **Production-ready UI matching Linear/Vercel quality** | System |
 | **2025-12-13** | Disabled automatic segmentation (manual ROI workflow) + moved Blob SDK calls off event loop to prevent ROI-save hangs | Copilot |
 | **2025-12-14** | Added folder upload for pre-cut segment images (new /api/v1/decomposition/upload-segments + UI hook in DecompositionUpload) | Copilot |
+| **2025-12-15** | Implemented conditional (context-dependent) validations for 2.2 (AND conditions w/ explicit volume) and new deterministic checks for 1.1/1.3/1.4/1.5 + regression tests | Copilot |
 
 
 

@@ -308,31 +308,37 @@ Rules:
         logger.info("Running focused room-height extraction", segment_id=segment_id)
         image_bytes = await self._download_segment_image(segment_blob_url)
 
-        prompt_text = f"""Return ONLY valid JSON.
+        prompt_text = f"""You are a strict extractor for Israeli ממ"ד validation.
+Return ONLY valid JSON. No markdown. No explanations.
 
-Extract room/ceiling height measurements relevant to a ממ"ד.
+Task: Extract the Mamad ROOM/CEILING height (Requirement 2.1/2.2).
 
 Segment Type: {segment_type}
 Description: {segment_description}
 
+CRITICAL RULES (to avoid false failures):
+- Only return a height if it is explicitly the ROOM/CEILING height of the ממ"ד (e.g., mentions "גובה חדר", "גובה תקרה", "תקרה", or clearly indicates the room height).
+- Do NOT treat generic "H=..." markers as room height unless the surrounding text clearly indicates it's the room/ceiling height.
+- Do NOT return sill/opening/installation heights (e.g., window sill "אדן", door jamb "משקוף", "חלון", "דלת").
+- If you cannot be sure the height is the Mamad room/ceiling height, return one item with null height_m and confidence < 0.5, and explain why in evidence.
+
 Return JSON:
 {{
-  "room_height_focus": {{
-    "heights": [
-      {{
-        "height_m": 0.0,
-        "confidence": 0.0,
-        "location": "short description",
-        "evidence": ["evidence strings"]
-      }}
-    ]
-  }},
-  "height_roi": {{"x": 0.0, "y": 0.0, "width": 0.0, "height": 0.0, "confidence": 0.0, "notes": "brief"}}
+    "room_height_focus": {{
+        "heights": [
+            {{
+                "height_m": null,
+                "confidence": 0.0,
+                "location": "Describe WHAT the height refers to (e.g., 'גובה תקרה בחלל הממ\"ד', 'גובה אדן חלון', 'גובה משקוף דלת')",
+                "evidence": ["Short evidence strings (exact text you saw, like 'גובה תקרה 2.40', NOT guesses)"]
+            }}
+        ]
+    }},
+    "height_roi": {{"x": 0.0, "y": 0.0, "width": 0.0, "height": 0.0, "confidence": 0.0, "notes": "brief"}}
 }}
 
-Rules:
-- Convert cm to meters if needed.
-- If uncertain, include best candidates with lower confidence."""
+Units:
+- Prefer meters. Convert cm to meters if needed."""
 
         extracted = await self._run_focused_extraction(
             image_bytes_list=[image_bytes],
@@ -647,6 +653,11 @@ Your task has TWO PARTS:
 What does this segment primarily show? Choose ONE or MORE categories:
 - WALL_SECTION, ROOM_LAYOUT, DOOR_DETAILS, WINDOW_DETAILS, REBAR_DETAILS, MATERIALS_SPECS, GENERAL_NOTES, SECTIONS, OTHER
 
+Additionally, determine the **VIEW TYPE**:
+- top_view: floor plan / looking from above (you can often see door swing arcs and window opening direction)
+- side_section: vertical section / cut view showing heights/elevations
+- unknown: unclear from this crop
+
 **IMPORTANT: Write the description in HEBREW (עברית)!**
 
 **STEP 2: EXTRACT ALL RELEVANT INFORMATION:**
@@ -692,7 +703,9 @@ What does this segment primarily show? Choose ONE or MORE categories:
 3. **Structural Elements:**
    - Walls: thickness, material, type
    - Doors: width, height, location, type
-   - Windows: width, height, location, type
+     - Windows: width, height, location, type
+         - IMPORTANT: If you identify a window, state in `notes` whether it is **sliding** ("נגרר" / "נישת גרירה" / "גרירה")
+             or **outward-opening** ("נפתח החוצה" / "כנף" / casement). If unclear, say "לא ברור".
    - Beams: dimensions, material
    - Columns: dimensions, location
    - Slabs: thickness
@@ -719,6 +732,7 @@ What does this segment primarily show? Choose ONE or MORE categories:
   "classification": {{
     "primary_category": "WALL_SECTION|ROOM_LAYOUT|DOOR_DETAILS|etc.",
     "secondary_categories": ["...", "..."],
+                "view_type": "top_view|side_section|unknown",
         "description": "Brief description of what this segment shows (HEBREW)",
         "confidence": 0.0,
         "explanation_he": "Short user-facing explanation (HEBREW) of why this classification fits",
@@ -738,7 +752,7 @@ What does this segment primarily show? Choose ONE or MORE categories:
   "structural_elements": [
         {{"type": "wall", "thickness": 20, "unit": "cm", "material": "בטון", "location": "קיר חיצוני|קיר פנימי|לא ברור", "notes": "..."}},
     {{"type": "door", "width": 80, "height": 210, "unit": "cm", "location": "...", "notes": "..."}},
-    {{"type": "window", "width": 100, "height": 120, "unit": "cm", "location": "...", "notes": "..."}},
+        {{"type": "window", "width": 100, "height": 120, "unit": "cm", "location": "...", "notes": "חלון הדף נגרר / חלון נפתח החוצה / לא ברור"}},
     ...
   ],
   "rebar_details": [
@@ -758,7 +772,8 @@ What does this segment primarily show? Choose ONE or MORE categories:
     "key_measurements": "Brief summary of critical dimensions",
     "special_notes": "Any important observations"
     }},
-    "external_wall_count": null
+    "external_wall_count": null,
+    "external_wall_count_after_exceptions": null
 }}
 
 **Extra requirement for wall thickness (1.2):**
@@ -768,6 +783,10 @@ What does this segment primarily show? Choose ONE or MORE categories:
     - If you cannot infer reliably, use "לא ברור".
 - If (and only if) this segment shows enough context to determine the TOTAL number of external walls of the ממ"ד (1-4), set `external_wall_count` to that number.
     Otherwise set it to null.
+
+**Counting dependency (1.1–1.3 → 1.2):**
+- If (and only if) this segment shows enough context to determine the TOTAL number of external walls *after applying the counting exceptions in 1.3* (e.g., wall <2m from exterior line with/without protective wall), set `external_wall_count_after_exceptions`.
+    - If you cannot confidently apply the 1.3 exceptions from this segment alone, set it to null.
 
 **IMPORTANT:**
 - Extract EVERYTHING visible

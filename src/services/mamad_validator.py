@@ -278,13 +278,18 @@ class MamadValidator:
         # Map categories to validation functions
         validation_map = {
             "WALL_SECTION": [self._validate_wall_thickness],
-            "ROOM_LAYOUT": [self._validate_room_height],
+            "ROOM_LAYOUT": [
+                self._validate_room_height,
+                self._validate_external_wall_count,
+                self._validate_external_wall_classification,
+                self._validate_tower_continuity,
+            ],
             "DOOR_DETAILS": [self._validate_door_spacing],
             "WINDOW_DETAILS": [self._validate_window_spacing],
             "REBAR_DETAILS": [self._validate_rebar_specifications],
             "MATERIALS_SPECS": [self._validate_concrete_grade, self._validate_steel_type],
             "GENERAL_NOTES": [self._validate_ventilation_note],
-            "SECTIONS": [self._validate_room_height],
+            "SECTIONS": [self._validate_room_height, self._validate_high_wall],
         }
 
         def _has_wall_thickness_evidence(data: Dict[str, Any]) -> bool:
@@ -314,6 +319,10 @@ class MamadValidator:
         validator_to_requirements = {
             self._validate_wall_thickness: ["1.2"],
             self._validate_room_height: ["2.1", "2.2"],
+            self._validate_external_wall_count: ["1.1"],
+            self._validate_external_wall_classification: ["1.3"],
+            self._validate_high_wall: ["1.4"],
+            self._validate_tower_continuity: ["1.5"],
             self._validate_door_spacing: ["3.1"],
             self._validate_window_spacing: ["3.2"],
             self._validate_rebar_specifications: ["6.3"],
@@ -632,6 +641,9 @@ class MamadValidator:
         door_sides: set[str] = set()
         window_sides: set[str] = set()
         has_any_window = False
+        has_mamad_window_marker = False
+        has_sliding_window_marker = False
+        window_external_marker_present = False
 
         for el in elements:
             if not isinstance(el, dict):
@@ -647,6 +659,29 @@ class MamadValidator:
             elif el_type == "window":
                 has_any_window = True
                 window_sides |= _infer_sides_from_text(combined)
+                combined_lower = combined.lower()
+
+                # Blast-window markers (not necessarily sliding).
+                if any(k in combined for k in ["חלון הדף", "הדף", "ת\"י 4422", "4422", "ממ\"ד", "ממד", "blast"]):
+                    has_mamad_window_marker = True
+
+                # Sliding-window markers: the 30cm window-case in 1.2 applies ONLY to sliding blast windows.
+                # Be conservative: only treat as sliding when explicitly indicated.
+                if any(
+                    k in combined_lower
+                    for k in [
+                        "נגרר",
+                        "נגררת",
+                        "נגררים",
+                        "נישת גרירה",
+                        "גרירה",
+                        "sliding",
+                        "pocket",
+                    ]
+                ):
+                    has_sliding_window_marker = True
+                if any(k in combined.lower() for k in ["קיר חיצוני", "חיצוני", "external", "outside", "exterior", "חזית", "מעטפת", "perimeter", "outer"]):
+                    window_external_marker_present = True
 
         def _classify_wall_exposure(location_text: str, wall_type_text: str, *, wall: Dict[str, Any]) -> str:
             """Return 'external' | 'internal' | 'unknown' based on labels and rule-of-thumb inference."""
@@ -715,8 +750,18 @@ class MamadValidator:
 
             return "unknown"
 
-        # Prefer an explicitly extracted external-wall count when present.
-        external_wall_count_raw = data.get("external_wall_count")
+        # Prefer an explicitly extracted external-wall count AFTER applying counting exceptions (1.1–1.3).
+        # This supports the updated spec in requirements-mamad.md where 1.2 depends on the *final* count.
+        external_wall_count_raw = None
+        for key in [
+            "external_wall_count_after_exceptions",
+            "external_wall_count_final",
+            "external_wall_count_post_exceptions",
+            "external_wall_count",
+        ]:
+            if key in data:
+                external_wall_count_raw = data.get(key)
+                break
         num_external_known: Optional[int] = None
         if isinstance(external_wall_count_raw, int) and 1 <= external_wall_count_raw <= 4:
             num_external_known = external_wall_count_raw
@@ -855,6 +900,16 @@ class MamadValidator:
         # Absolute minimum: any external wall thinner than 25cm is always non-compliant (independent of wall count).
         min_external_thickness = min(parsed_external_thicknesses)
         if min_external_thickness < 25:
+            # If we know the external wall count and have strong SLIDING window evidence, use the spec minimum
+            # (e.g., 30cm for 1–2 external walls with a sliding blast window) for the error message/evidence.
+            sliding_window_case_evidence_strong = bool(has_sliding_window_marker and (window_external_marker_present or window_sides))
+            required_min_for_message: int = 25
+            if num_external_known is not None and sliding_window_case_evidence_strong:
+                required_min_for_message = self._get_required_wall_thickness(
+                    num_external_known,
+                    has_window=True,
+                )
+
             # If the <25cm value came from heuristic classification (no explicit "external" markers),
             # be conservative: report not_checked instead of failing.
             min_explicit = min(explicit_external_thicknesses) if explicit_external_thicknesses else None
@@ -866,7 +921,7 @@ class MamadValidator:
                     evidence=evidence
                     + [
                         self._evidence_dimension(
-                            value=25,
+                            value=required_min_for_message,
                             unit="cm",
                             element="required_min_wall_thickness_absolute",
                             location="external_wall_minimum",
@@ -885,14 +940,14 @@ class MamadValidator:
                 evidence=evidence
                 + [
                     self._evidence_dimension(
-                        value=25,
+                        value=required_min_for_message,
                         unit="cm",
                         element="required_min_wall_thickness_absolute",
                         location="external_wall_minimum",
                     )
                 ],
                 notes_he=(
-                    f"נמצא עובי קיר חיצוני {min_external_thickness:.0f} ס\"מ קטן מהמינימום 25 ס\"מ לפי סעיף 1.2."
+                    f"נמצא עובי קיר חיצוני {min_external_thickness:.0f} ס\"מ קטן מהמינימום {required_min_for_message} ס\"מ לפי סעיף 1.2."
                 ),
             )
             return True
@@ -964,9 +1019,15 @@ class MamadValidator:
             )
             return False
 
-        # Conservative: if a window exists on an inferred external wall, require the window-case thickness.
-        has_window_on_external = has_any_window and bool(window_sides)
-        required_thickness = self._get_required_wall_thickness(num_external_known, has_window=has_window_on_external)
+        # Window-case rule (1.2): for 1–2 external walls, ONLY a *sliding* blast window in the external wall requires 30cm.
+        # Do NOT upgrade thickness on generic "window" or generic blast-window markers unless sliding is explicitly indicated.
+        has_sliding_window_on_external = bool(
+            has_any_window and has_sliding_window_marker and (window_external_marker_present or window_sides)
+        )
+        required_thickness = self._get_required_wall_thickness(
+            num_external_known,
+            has_window=has_sliding_window_on_external,
+        )
         if min_external_thickness < required_thickness:
             self._add_requirement_evaluation(
                 "1.2",
@@ -1024,14 +1085,54 @@ class MamadValidator:
         elif isinstance(primary_category_raw, list) and primary_category_raw:
             primary_category = str(primary_category_raw[0]).strip().upper()
 
+        # View type gating: height (2.1/2.2) should only be extracted from vertical sections.
+        # Floor plans / top-view crops frequently contain H=/installation heights that are NOT room height.
+        view_type_raw = None
+        if isinstance(classification, dict):
+            view_type_raw = classification.get("view_type")
+        summary = data.get("summary", {})
+        primary_function_raw = summary.get("primary_function") if isinstance(summary, dict) else None
+        view_type_norm = str(view_type_raw or "").strip().lower()
+        primary_function_norm = str(primary_function_raw or "").strip().lower()
+        is_top_view = view_type_norm in {"top_view", "floor_plan", "plan"} or primary_function_norm == "floor_plan"
+        is_side_section = view_type_norm in {"side_section", "section"} or primary_function_norm == "section"
+
         text_items = data.get("text_items", [])
         annotations = data.get("annotations", [])
         all_text_lower = " ".join(
             [str(t.get("text", "")) for t in (text_items + annotations)]
         ).lower()
 
-        height_markers_present = any(k in all_text_lower for k in ["h=", "גובה", "height"])
-        segment_is_section_like = (primary_category == "SECTIONS") or height_markers_present
+        h_equals_present = "h=" in all_text_lower
+        generic_height_word_present = "height" in all_text_lower
+        hebrew_height_word_present = "גובה" in all_text_lower
+        mamad_label_present = ("ממ\"ד" in all_text_lower) or ("ממד" in all_text_lower)
+
+        # Stronger context markers that usually indicate ROOM/CEILING height (not an opening sill/jamb).
+        # Note: we intentionally do NOT treat a bare "H=..." as sufficient in non-section segments.
+        explicit_room_height_context_present = any(
+            k in all_text_lower
+            for k in [
+                "גובה חדר",
+                "גובה החלל",
+                "גובה נקי",
+                "גובה תקרה",
+                "גובה תקר",
+                "ceiling height",
+                "room height",
+                "clear height",
+            ]
+        )
+
+        # IMPORTANT: Prefer view signals over category when available.
+        # A crop can be misclassified (e.g., SECTIONS) while still being a clear floor-plan top view.
+        if is_top_view:
+            segment_is_section_like = False
+        elif is_side_section:
+            segment_is_section_like = True
+        else:
+            # Do not treat generic height markers (e.g., H=) as proof this is a section.
+            segment_is_section_like = primary_category in {"SECTIONS", "WALL_SECTION"}
         
         def _is_opening_height_dimension(d: Dict[str, Any]) -> bool:
             element = str(d.get("element", "")).lower()
@@ -1107,6 +1208,77 @@ class MamadValidator:
                 notes_he="לא נמצא מימד שמזוהה בבירור כגובה חדר.",
             )
             return False
+
+        # Hard gate: if this is a top-view (floor plan), height is not applicable.
+        # Even if a height-like value was injected into dimensions by a focused extractor, do not evaluate.
+        if is_top_view:
+            self._add_requirement_evaluation(
+                "2.1",
+                "not_checked",
+                reason_not_checked="segment_top_view",
+                evidence=[
+                    self._evidence_text(
+                        text="Segment classified as top view (floor plan); room height cannot be validated here.",
+                        element="view_type",
+                        raw={"view_type": view_type_raw, "primary_function": primary_function_raw, "primary_category": primary_category},
+                    )
+                ],
+                notes_he="הסגמנט מזוהה כמבט-על/תכנית (ולא חתך), ולכן לא נבדקה דרישת גובה הממ\"ד (2.1).",
+            )
+            self._add_requirement_evaluation(
+                "2.2",
+                "not_checked",
+                reason_not_checked="segment_top_view",
+                evidence=[
+                    self._evidence_text(
+                        text="Segment classified as top view (floor plan); room height exception cannot be validated here.",
+                        element="view_type",
+                        raw={"view_type": view_type_raw, "primary_function": primary_function_raw, "primary_category": primary_category},
+                    )
+                ],
+                notes_he="הסגמנט מזוהה כמבט-על/תכנית (ולא חתך), ולכן לא נבדק חריג 2.2.",
+            )
+            return False
+
+        # Guardrail: A numeric height can be extracted from floor plans (e.g., multiple H= markers).
+        # In non-section segments, only treat the extracted height as ROOM height if we have explicit
+        # room/ceiling context + a Mamad label. Otherwise, mark as not_checked to avoid false failures.
+        if primary_category not in {"SECTIONS", "WALL_SECTION"} and not (
+            explicit_room_height_context_present and mamad_label_present
+        ):
+            # Provide evidence so the UI can show what was found but why we didn't use it.
+            try:
+                candidate_height_m = self._extract_dimension_value(height_dims[0].get("value", ""), "m")
+            except Exception:
+                candidate_height_m = None
+            candidate_evidence = [
+                self._evidence_dimension(
+                    value=candidate_height_m,
+                    unit="m" if candidate_height_m is not None else str(height_dims[0].get("unit") or ""),
+                    element=str(height_dims[0].get("element") or "room_height_candidate"),
+                    location=str(height_dims[0].get("location") or ""),
+                    text=str(height_dims[0].get("value") or ""),
+                    raw=height_dims[0],
+                )
+            ]
+            self._add_requirement_evaluation(
+                "2.1",
+                "not_checked",
+                reason_not_checked="non_section_weak_height_evidence",
+                evidence=candidate_evidence,
+                notes_he=(
+                    "נמצא ערך גובה בסגמנט, אך הסגמנט אינו חתך ואין סימון מפורש שמדובר בגובה החדר/התקרה של הממ\"ד; "
+                    "כדי להימנע מפסילה שגויה (למשל גובה אדן/משקוף/אלמנט), דרישת הגובה לא נבדקה בסגמנט זה."
+                ),
+            )
+            self._add_requirement_evaluation(
+                "2.2",
+                "not_checked",
+                reason_not_checked="non_section_weak_height_evidence",
+                evidence=candidate_evidence,
+                notes_he="חריג 2.2 לא נבדק מאותה סיבה (אין ראיה חזקה לגובה חדר בממ\"ד בסגמנט שאינו חתך).",
+            )
+            return False
         
         # Get height value
         height_m = self._extract_dimension_value(height_dims[0].get("value", ""), "m")
@@ -1167,6 +1339,26 @@ class MamadValidator:
             )
         ]
 
+        # Global confidence guardrail: never fail height rules on a very low-confidence read.
+        # This preserves evidence-first behavior where uncertain measurements should be reported
+        # as not_checked rather than hard failures.
+        if dim_confidence < 0.60:
+            self._add_requirement_evaluation(
+                "2.1",
+                "not_checked",
+                reason_not_checked="low_confidence_room_height",
+                evidence=height_evidence,
+                notes_he="זוהה מימד גובה אך ברמת ביטחון נמוכה; כדי להימנע מפסילה שגויה דרישת הגובה לא נבדקה.",
+            )
+            self._add_requirement_evaluation(
+                "2.2",
+                "not_checked",
+                reason_not_checked="low_confidence_room_height",
+                evidence=height_evidence,
+                notes_he="זוהה מימד גובה אך ברמת ביטחון נמוכה; כדי להימנע מפסילה שגויה חריג 2.2 לא נבדק.",
+            )
+            return False
+
         # Room height in drawings is typically in the ~2.2–3.2m range. Anything below 1.5m is
         # almost certainly an unrelated dimension (opening / sill / thickness / detail).
         if height_m < 1.50 or height_m > 6.00:
@@ -1186,23 +1378,22 @@ class MamadValidator:
             )
             return False
 
-        # If the extracted height is below the exception threshold and extraction confidence is low,
-        # and the segment doesn't contain explicit height markers, treat it as not_checked to avoid
-        # false failures from noisy crops.
-        if height_m < 2.20 and dim_confidence < 0.60 and not height_markers_present:
+        # If extraction confidence is low on a non-section segment, avoid failing height rules.
+        # This prevents false failures from noisy crops where a nearby H= marker is misread.
+        if primary_category != "SECTIONS" and dim_confidence < 0.75:
             self._add_requirement_evaluation(
                 "2.1",
                 "not_checked",
                 reason_not_checked="low_confidence_room_height",
                 evidence=height_evidence,
-                notes_he="זוהה מימד גובה נמוך אך ברמת ביטחון נמוכה וללא סימון גובה ברור (H=/גובה), לכן לא סומן כגובה חדר.",
+                notes_he="זוהה מימד גובה אך ברמת ביטחון נמוכה בסגמנט שאינו חתך; כדי להימנע מפסילה שגויה דרישת הגובה לא נבדקה.",
             )
             self._add_requirement_evaluation(
                 "2.2",
                 "not_checked",
                 reason_not_checked="low_confidence_room_height",
                 evidence=height_evidence,
-                notes_he="זוהה מימד גובה נמוך אך ברמת ביטחון נמוכה וללא סימון גובה ברור (H=/גובה), לכן לא סומן כגובה חדר.",
+                notes_he="זוהה מימד גובה אך ברמת ביטחון נמוכה בסגמנט שאינו חתך; כדי להימנע מפסילה שגויה חריג 2.2 לא נבדק.",
             )
             return False
         
@@ -1243,6 +1434,121 @@ class MamadValidator:
             return True
 
         # 2.20 <= height < 2.50: standard fails; exception depends on basement/addition + volume.
+        # Evaluate exception conditions (AND logic): basement/addition AND volume >= 22.5m^3.
+        # If conditions are not met, the standard height requirement applies and fails.
+        exc_markers = [
+            "מרתף",
+            "במרתף",
+            "תוספת",
+            "תוספת בניה",
+            "בניין קיים",
+            "existing building",
+            "basement",
+            "addition",
+        ]
+        has_exception_context = any(m in all_text_lower for m in [x.lower() for x in exc_markers])
+
+        # Parse explicit volume evidence if present.
+        def _extract_volume_m3() -> Optional[float]:
+            dims = data.get("dimensions")
+            if isinstance(dims, list):
+                for d in dims:
+                    if not isinstance(d, dict):
+                        continue
+                    unit = str(d.get("unit") or "").strip().lower()
+                    element = str(d.get("element") or "").lower()
+                    loc = str(d.get("location") or "").lower()
+                    if unit in {"m3", "m^3", "m³", "מ\"ק"} or ("מ\"ק" in element) or ("נפח" in element) or ("volume" in element):
+                        v = self._extract_dimension_value(d.get("value"), "m3")
+                        if v is not None:
+                            return v
+                        # Some producers store the numeric value directly.
+                        try:
+                            raw = d.get("value")
+                            if isinstance(raw, (int, float)):
+                                return float(raw)
+                            if isinstance(raw, str) and raw.strip():
+                                return float(raw.strip())
+                        except Exception:
+                            pass
+                    # Heuristic: free-text location/element contains "נפח" and a number.
+                    s = f"{element} {loc}"
+                    if "נפח" in s or "volume" in s:
+                        m = re.search(r"(?<!\d)(\d{1,3}(?:\.\d+)?)\s*(?:m3|m\^3|m³|מ\"ק)\b", s, flags=re.IGNORECASE)
+                        if m:
+                            try:
+                                return float(m.group(1))
+                            except Exception:
+                                pass
+
+            # Look in text items/annotations.
+            m = re.search(r"(?i)(?:נפח|volume|v\s*=)\s*[:=]?\s*(\d{1,3}(?:\.\d+)?)\s*(?:m3|m\^3|m³|מ\"ק)", all_text_lower)
+            if m:
+                try:
+                    return float(m.group(1))
+                except Exception:
+                    return None
+            return None
+
+        volume_m3 = _extract_volume_m3()
+
+        # If we have evidence that the exception context applies, validate the volume condition.
+        if has_exception_context:
+            if volume_m3 is None:
+                self._add_requirement_evaluation(
+                    "2.1",
+                    "failed",
+                    evidence=height_evidence
+                    + [self._evidence_dimension(value=2.50, unit="m", element="required_min_height")],
+                    notes_he="גובה החדר נמוך מ-2.50 מ' ולכן אינו עומד בדרישה הסטנדרטית (וחריג 2.2 לא אומת עקב חסר בנפח).",
+                )
+                self._add_requirement_evaluation(
+                    "2.2",
+                    "not_checked",
+                    reason_not_checked="missing_exception_volume",
+                    evidence=height_evidence + [self._evidence_dimension(value=22.5, unit="m3", element="required_min_volume")],
+                    notes_he="זוהו סימנים למרתף/תוספת בניה אך לא נמצא נפח חדר מפורש (נדרש ≥22.5 מ\"ק) כדי לאשר חריג 2.2.",
+                )
+                return True
+
+            volume_evidence = [
+                self._evidence_dimension(value=volume_m3, unit="m3", element="room_volume", location=""),
+                self._evidence_dimension(value=22.5, unit="m3", element="required_min_volume"),
+            ]
+
+            if volume_m3 >= 22.5:
+                # Exception satisfied: treat as compliant for height.
+                self._add_requirement_evaluation(
+                    "2.2",
+                    "passed",
+                    evidence=height_evidence + volume_evidence,
+                    notes_he="החריג (2.2) חל: הסגמנט מצביע על מרתף/תוספת בניה ונפח ≥22.5 מ\"ק, ולכן גובה 2.20–2.50 מ' מותר.",
+                )
+                self._add_requirement_evaluation(
+                    "2.1",
+                    "passed",
+                    evidence=height_evidence + [self._evidence_dimension(value=2.50, unit="m", element="required_min_height")],
+                    notes_he="גובה החדר נמוך מ-2.50 מ' אך החריג 2.2 חל, ולכן דרישת הגובה מתקיימת.",
+                )
+                return True
+
+            # Exception context exists and volume is explicitly too small -> explicit exception failure.
+            self._add_requirement_evaluation(
+                "2.1",
+                "failed",
+                evidence=height_evidence
+                + [self._evidence_dimension(value=2.50, unit="m", element="required_min_height")],
+                notes_he="גובה החדר נמוך מ-2.50 מ' ולכן אינו עומד בדרישה הסטנדרטית.",
+            )
+            self._add_requirement_evaluation(
+                "2.2",
+                "failed",
+                evidence=height_evidence + volume_evidence,
+                notes_he="החריג (2.2) אינו חל: זוהה מרתף/תוספת בניה אך נפח החדר קטן מ-22.5 מ\"ק, ולכן גובה מתחת 2.50 מ' אינו מותר.",
+            )
+            return True
+
+        # No evidence that exception context exists -> exception is not applicable.
         self._add_requirement_evaluation(
             "2.1",
             "failed",
@@ -1252,9 +1558,289 @@ class MamadValidator:
         self._add_requirement_evaluation(
             "2.2",
             "not_checked",
-            reason_not_checked="missing_exception_context_or_volume",
-            evidence=height_evidence + [self._evidence_dimension(value=22.5, unit="m3", element="required_min_volume")],
-            notes_he="כדי לאשר חריג 2.20 מ' נדרשות ראיות למרתף/תוספת בניה ונפח ≥ 22.5 מ\"ק.",
+            reason_not_checked="not_applicable_no_exception_context",
+            evidence=height_evidence,
+            notes_he="לא נמצאו ראיות לכך שהממ\"ד במרתף/תוספת בניה; לכן החריג (2.2) אינו רלוונטי והגובה חייב לעמוד ב-2.50 מ'.",
+        )
+        return True
+
+
+    def _validate_external_wall_count(self, data: Dict[str, Any]) -> bool:
+        """Rule 1.1: External wall count must be between 1 and 4.
+
+        This is a pre-calculation dependency for wall thickness (1.2).
+        In the segment-based flow, we only validate this when the extractor explicitly
+        provides `external_wall_count` with sufficient context.
+        """
+        raw = data.get("external_wall_count")
+        if not isinstance(raw, int):
+            self._add_requirement_evaluation(
+                "1.1",
+                "not_checked",
+                reason_not_checked="external_wall_count_not_provided",
+                notes_he="לא סופק מספר קירות חיצוניים (1–4) מהחילוץ ולכן לא ניתן היה לבדוק דרישה 1.1 בסגמנט.",
+            )
+            return False
+
+        if 1 <= raw <= 4:
+            self._add_requirement_evaluation(
+                "1.1",
+                "passed",
+                evidence=[self._evidence_dimension(value=float(raw), unit="count", element="external_wall_count")],
+                notes_he=f"מספר הקירות החיצוניים שזוהה הוא {raw} (בתחום 1–4).",
+            )
+            return True
+
+        self._add_requirement_evaluation(
+            "1.1",
+            "failed",
+            evidence=[self._evidence_dimension(value=float(raw), unit="count", element="external_wall_count")],
+            notes_he=f"מספר הקירות החיצוניים שזוהה ({raw}) אינו בתחום 1–4.",
+        )
+        return True
+
+
+    def _validate_external_wall_classification(self, data: Dict[str, Any]) -> bool:
+        """Rule 1.3: Conditional external wall classification near exterior line.
+
+        Condition:
+        - There is evidence a wall is <2m from the building exterior line.
+
+        Validation (only if the plan is attempting to classify it as NOT external):
+        - A protective reinforced concrete wall (>=20cm) must exist.
+        """
+        text_items = data.get("text_items") or []
+        annotations = data.get("annotations") or []
+        all_text = " ".join([str(t.get("text", "")) for t in (text_items + annotations) if isinstance(t, dict)]).lower()
+
+        near_exterior = bool(
+            ("קו" in all_text and ("חיצונ" in all_text or "בנין" in all_text))
+            and re.search(r"(?<!\d)2\s*(?:m|מ')\b", all_text)
+        )
+        if not near_exterior:
+            self._add_requirement_evaluation(
+                "1.3",
+                "not_checked",
+                reason_not_checked="not_applicable_no_near_exterior_condition",
+                notes_he="לא נמצאו ראיות לכך שקיר נמצא במרחק קטן מ-2 מ' מהקו החיצוני של הבניין; חריג 1.3 אינו רלוונטי בסגמנט.",
+            )
+            return False
+
+        # Detect whether the plan is explicitly claiming the wall is NOT external.
+        claims_not_external = any(
+            p in all_text
+            for p in [
+                "לא נחשב קיר חיצוני",
+                "לא נחשב חיצוני",
+                "not external",
+                "is not external",
+            ]
+        )
+
+        protective_wall = ("קיר מגן" in all_text or "protective wall" in all_text) and bool(
+            re.search(r"(?<!\d)20\s*(?:cm|ס\"מ)\b", all_text)
+        )
+
+        evidence = []
+        evidence.append(self._evidence_text(text="זוהתה אינדיקציה לקיר במרחק <2 מ' מהקו החיצוני", element="near_exterior_line"))
+        if protective_wall:
+            evidence.append(self._evidence_text(text="זוהתה אינדיקציה לקיר מגן מבטון בעובי 20 ס\"מ", element="protective_wall"))
+
+        if not claims_not_external:
+            # We have the condition, but not enough to assert what classification the plan uses.
+            self._add_requirement_evaluation(
+                "1.3",
+                "not_checked",
+                reason_not_checked="classification_condition_detected",
+                evidence=evidence,
+                notes_he="זוהתה אינדיקציה לחריג 1.3 (קיר <2 מ' מהקו החיצוני), אך אין בסגמנט הצהרה/הקשר מספיק לגבי סיווג הקיר כחיצוני/לא חיצוני כדי לאמת את הכלל.",
+            )
+            return False
+
+        # The plan is attempting to treat it as not external -> protective wall becomes mandatory.
+        if protective_wall:
+            self._add_requirement_evaluation(
+                "1.3",
+                "passed",
+                evidence=evidence + [self._evidence_dimension(value=20.0, unit="cm", element="required_protective_wall_thickness")],
+                notes_he="החריג 1.3 נתמך: קיימת אינדיקציה לקיר <2 מ' מהקו החיצוני ובמקביל קיים קיר מגן מבטון בעובי ≥20 ס\"מ.",
+            )
+            return True
+
+        self._add_requirement_evaluation(
+            "1.3",
+            "failed",
+            evidence=evidence + [self._evidence_dimension(value=20.0, unit="cm", element="required_protective_wall_thickness")],
+            notes_he="החריג 1.3 אינו מתקיים: קיימת אינדיקציה לקיר <2 מ' מהקו החיצוני וכן ניסיון להתייחס אליו כלא-חיצוני, אך לא נמצאה ראיה לקיר מגן מבטון בעובי ≥20 ס\"מ.",
+        )
+        return True
+
+
+    def _validate_high_wall(self, data: Dict[str, Any]) -> bool:
+        """Rule 1.4: High wall definition and conditional extra checks.
+
+        Condition:
+        - A wall is "high" only if the clear concrete-to-concrete opening exceeds 2.8m.
+
+        In the segment-based deterministic flow we can often detect the condition,
+        but the reinforcement/engineering approval checks require additional structural context.
+        """
+        dims = data.get("dimensions")
+        if not isinstance(dims, list) or not dims:
+            self._add_requirement_evaluation(
+                "1.4",
+                "not_checked",
+                reason_not_checked="no_dimensions",
+                notes_he="לא נמצאו מידות בסגמנט ולכן לא ניתן לקבוע אם מדובר בקיר גבוה (1.4).",
+            )
+            return False
+
+        # Detect a candidate clear opening / wall height dimension.
+        best: Optional[Dict[str, Any]] = None
+        best_value: Optional[float] = None
+        for d in dims:
+            if not isinstance(d, dict):
+                continue
+            unit = str(d.get("unit") or "").lower().strip()
+            if unit not in {"m", "meter", "meters"}:
+                continue
+            v = self._extract_dimension_value(d.get("value"), "m")
+            if v is None:
+                continue
+            element = str(d.get("element") or "").lower()
+            loc = str(d.get("location") or "").lower()
+            # Prefer explicit wall-height / concrete-to-concrete wording.
+            if any(k in element or k in loc for k in ["בטון", "beton", "concrete", "קיר", "wall", "בטון-לבטון", "clear", "מפתח"]):
+                if best_value is None or v > best_value:
+                    best_value = v
+                    best = d
+
+        if best_value is None:
+            self._add_requirement_evaluation(
+                "1.4",
+                "not_checked",
+                reason_not_checked="no_high_wall_candidate",
+                notes_he="לא נמצאה מידה שניתן לקשור בבירור למפתח קיר (בטון-לבטון/גובה קיר) כדי לבדוק אם מדובר בקיר גבוה.",
+            )
+            return False
+
+        if best_value <= 2.80:
+            self._add_requirement_evaluation(
+                "1.4",
+                "not_checked",
+                reason_not_checked="not_applicable_not_high_wall",
+                evidence=[
+                    self._evidence_dimension(
+                        value=best_value,
+                        unit="m",
+                        element=str(best.get("element") or "high_wall_candidate"),
+                        location=str(best.get("location") or ""),
+                        raw=best,
+                    )
+                ],
+                notes_he="המפתח/גובה הקיר שנמצא אינו עולה על 2.8 מ' ולכן כללי 'קיר גבוה' (1.4) אינם חלים.",
+            )
+            return False
+
+        # Condition met: additional checks apply, but require structural/engineering context.
+        self._add_requirement_evaluation(
+            "1.4",
+            "not_checked",
+            reason_not_checked="high_wall_requires_structural_context",
+            evidence=[
+                self._evidence_dimension(
+                    value=best_value,
+                    unit="m",
+                    element=str(best.get("element") or "high_wall_candidate"),
+                    location=str(best.get("location") or ""),
+                    raw=best,
+                ),
+                self._evidence_dimension(value=2.8, unit="m", element="high_wall_threshold"),
+            ],
+            notes_he="זוהה מפתח בטון-לבטון >2.8 מ' ולכן מדובר בקיר גבוה. בדיקות חיזוק/זיון/אישור מהנדס נדרשות אך אינן ניתנות לאימות דטרמיניסטי מסגמנט זה.",
+        )
+        return False
+
+
+    def _validate_tower_continuity(self, data: Dict[str, Any]) -> bool:
+        """Rule 1.5: 70% continuity in a MAMAD tower.
+
+        Condition:
+        - Applies only if a MAMAD tower (stack of MAMADs across floors) exists.
+
+        Validation:
+        - Continuity must be >=70%. If <70%, it indicates a required alternative design path.
+        """
+        text_items = data.get("text_items") or []
+        annotations = data.get("annotations") or []
+        all_text = " ".join([str(t.get("text", "")) for t in (text_items + annotations) if isinstance(t, dict)]).lower()
+
+        tower_markers = [
+            "מגדל ממ\"דים",
+            "מגדל ממדים",
+            "ערימת ממ\"דים",
+            "tower",
+            "stack",
+        ]
+        has_tower_context = any(m in all_text for m in [x.lower() for x in tower_markers])
+        if not has_tower_context:
+            self._add_requirement_evaluation(
+                "1.5",
+                "not_checked",
+                reason_not_checked="not_applicable_no_tower_context",
+                notes_he="לא נמצאו ראיות שמדובר במגדל ממ""דים (ערימה בין קומות); כלל 70% (1.5) אינו רלוונטי בסגמנט.",
+            )
+            return False
+
+        # Parse continuity percentage if explicitly provided.
+        m = re.search(r"(?i)(?:רציפות|continuity)\s*[:=]?\s*(\d{1,3}(?:\.\d+)?)\s*%", all_text)
+        if not m:
+            # Fallback: explicit mention of 70% near continuity.
+            m = re.search(r"(?i)(?:רציפות|continuity)[^\n%]{0,40}(\d{1,3}(?:\.\d+)?)\s*%", all_text)
+
+        if not m:
+            self._add_requirement_evaluation(
+                "1.5",
+                "not_checked",
+                reason_not_checked="missing_continuity_percentage",
+                evidence=[self._evidence_text(text="זוהתה אינדיקציה למגדל ממ""דים אך לא נמצא אחוז רציפות", element="tower_continuity")],
+                notes_he="זוהתה אינדיקציה למגדל ממ""דים אך לא נמצא אחוז רציפות מפורש (נדרש ≥70%) כדי לאמת את דרישה 1.5.",
+            )
+            return False
+
+        try:
+            pct = float(m.group(1))
+        except Exception:
+            pct = None
+
+        if pct is None:
+            self._add_requirement_evaluation(
+                "1.5",
+                "not_checked",
+                reason_not_checked="unparseable_continuity_percentage",
+                notes_he="נמצא טקסט לגבי רציפות במגדל ממ""דים אך לא ניתן היה לפענח את האחוז.",
+            )
+            return False
+
+        evidence = [
+            self._evidence_dimension(value=pct, unit="%", element="tower_continuity_percent"),
+            self._evidence_dimension(value=70.0, unit="%", element="required_min_tower_continuity"),
+        ]
+
+        if pct >= 70.0:
+            self._add_requirement_evaluation(
+                "1.5",
+                "passed",
+                evidence=evidence,
+                notes_he="הרציפות במגדל ממ""דים עומדת בדרישה (≥70%).",
+            )
+            return True
+
+        self._add_requirement_evaluation(
+            "1.5",
+            "failed",
+            evidence=evidence,
+            notes_he="הרציפות במגדל ממ""דים נמוכה מ-70%. לפי האוגדן זה אינו רק כשל נקודתי אלא מעבר למסלול תכנון חלופי/חיזוקים מיוחדים.",
         )
         return True
     
