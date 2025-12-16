@@ -131,6 +131,56 @@ def test_wall_thickness_runs_even_when_classified_as_room_layout_if_evidence_exi
         _assert_no_passed_or_failed_without_evidence(evals)
 
 
+def test_wall_thickness_evidence_includes_external_wall_count_provenance() -> None:
+    from src.services.mamad_validator import MamadValidator
+
+    validator = MamadValidator()
+    analysis_data = {
+        "classification": {"primary_category": "WALL_SECTION"},
+        "text_items": [],
+        "dimensions": [],
+        "annotations": [],
+        "external_wall_count": 1,
+        "external_wall_count_source": "floor_plan_inference",
+        "external_wall_count_confidence": 0.9,
+        "external_wall_count_evidence": [
+            "תכנית קומה: הממ\"ד נוגע במעטפת בצד שמאל בלבד",
+            "סימון חלון על קיר שמאלי בחזית",
+        ],
+        "structural_elements": [
+            {"type": "wall", "thickness": "30cm", "unit": "cm", "location": "קיר חיצוני"},
+        ],
+    }
+
+    result = validator.validate_segment(
+        analysis_data,
+        demo_mode=True,
+        enabled_requirements={"1.2"},
+    )
+
+    evals = result.get("requirement_evaluations")
+    assert isinstance(evals, list)
+    ev_12 = next((e for e in evals if isinstance(e, dict) and e.get("requirement_id") == "1.2"), None)
+    assert ev_12 is not None
+
+    evidence = ev_12.get("evidence")
+    assert isinstance(evidence, list)
+
+    assert any(
+        isinstance(e, dict)
+        and e.get("evidence_type") == "dimension"
+        and e.get("element") == "external_wall_count"
+        and e.get("unit") == "count"
+        for e in evidence
+    )
+    assert any(
+        isinstance(e, dict)
+        and e.get("evidence_type") == "text"
+        and e.get("element") == "external_wall_count_evidence"
+        for e in evidence
+    )
+
+
 def test_wall_thickness_with_sliding_blast_window_requires_30cm_for_1_or_2_external_walls() -> None:
     from src.services.mamad_validator import MamadValidator
 

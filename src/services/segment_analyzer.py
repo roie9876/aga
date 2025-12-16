@@ -583,6 +583,81 @@ Return JSON:
             "notes_focus": extracted.get("notes_focus"),
             "notes_roi": extracted.get("notes_roi"),
         }
+
+    async def infer_mamad_external_wall_count(
+        self,
+        *,
+        floor_plan_blob_url: str,
+        floor_plan_description: str,
+        mamad_segment_blob_url: str,
+        mamad_segment_description: str,
+    ) -> Dict[str, Any]:
+        """Infer the number of external walls of the ממ"ד from a floor plan + a MAMAD reference crop.
+
+        This exists because many wall-thickness/detail crops do not include enough context
+        to determine whether a wall is internal vs. external; the floor plan provides
+        the building envelope context.
+        """
+        logger.info(
+            "Running focused external-wall-count inference",
+            floor_plan_description=floor_plan_description,
+            mamad_description=mamad_segment_description,
+        )
+
+        floor_plan_bytes = await self._download_segment_image(floor_plan_blob_url)
+        mamad_bytes = await self._download_segment_image(mamad_segment_blob_url)
+
+        prompt_text = f"""You are a strict extractor for Israeli ממ\"ד validation.
+Return ONLY valid JSON. No markdown. No explanations.
+
+Task: Determine how many walls of the ממ\"ד are EXTERNAL (touch the outside/facade of the building) vs INTERNAL.
+
+Inputs:
+- Image #1: FLOOR PLAN context (apartment / building outline + room placement)
+- Image #2: MAMAD DETAIL / reference (helps you locate the same room in the floor plan)
+
+Floor plan description: {floor_plan_description}
+MAMAD reference description: {mamad_segment_description}
+
+Rules:
+- External wall = a wall segment of the ממ\"ד that borders the outside/facade (the building envelope) in the floor plan.
+- Internal wall = borders interior spaces (other rooms, corridor, shafts) in the floor plan.
+- Count TOTAL external walls of the ממ\"ד as an integer in [1..4].
+- If you cannot determine confidently from these images, return null and set confidence < 0.6.
+
+Return JSON:
+{{
+  "external_wall_count": null,
+  "internal_wall_count": null,
+  "external_sides_hint": ["left", "right", "top", "bottom"],
+  "confidence": 0.0,
+  "evidence": ["short evidence strings (what you saw)"]
+}}"""
+
+        extracted = await self._run_focused_extraction(
+            image_bytes_list=[floor_plan_bytes, mamad_bytes],
+            prompt_text=prompt_text,
+        )
+        if not isinstance(extracted, dict):
+            return {
+                "external_wall_count": None,
+                "internal_wall_count": None,
+                "external_sides_hint": [],
+                "confidence": 0.0,
+                "evidence": ["invalid_response"],
+            }
+
+        # Normalize for safety
+        try:
+            count_raw = extracted.get("external_wall_count")
+            count = int(count_raw) if count_raw is not None else None
+            if count is not None and not (1 <= count <= 4):
+                count = None
+        except Exception:
+            count = None
+
+        extracted["external_wall_count"] = count
+        return extracted
     
     async def _download_segment_image(self, blob_url: str) -> bytes:
         """Download segment image from blob storage.

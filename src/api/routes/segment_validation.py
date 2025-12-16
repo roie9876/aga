@@ -12,6 +12,13 @@ from src.azure import get_cosmos_client, get_openai_client
 from src.services.segment_analyzer import get_segment_analyzer
 from src.services.mamad_validator import get_mamad_validator
 from src.services.requirements_coverage import get_coverage_tracker
+from src.services.external_wall_context import (
+    SegmentCandidate,
+    select_floor_plan_candidate,
+    select_mamad_reference_candidate,
+    infer_external_wall_context,
+    inject_external_wall_count,
+)
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -157,6 +164,11 @@ async def validate_segments(request: SegmentValidationRequest):
         # (i.e., don't restrict enabled_requirements) so we can cover materials/rebar/notes too.
         effective_check_groups = request.check_groups or LEGACY_DEFAULT_CHECK_GROUPS
 
+        # Prefer floor plan first so we can infer external wall count for REQ 1.2 early.
+        approved_segments.sort(key=lambda s: 0 if str(s.get("type")) == "floor_plan" else 1)
+        analysis_candidates: List[SegmentCandidate] = []
+        external_wall_ctx: Optional[Dict[str, Any]] = None
+
         for segment in approved_segments:
             try:
                 # Part 3: Analyze and classify segment with GPT (NO validation yet)
@@ -166,6 +178,47 @@ async def validate_segments(request: SegmentValidationRequest):
                     segment_type=segment["type"],
                     segment_description=segment["description"]
                 )
+
+                # Cross-segment wall-count inference: as soon as we have a floor plan + a MAMAD reference,
+                # infer the TOTAL external wall count and inject it into segments that don't have it.
+                if analysis_result.get("status") == "analyzed" and isinstance(analysis_result.get("analysis_data"), dict):
+                    analysis_candidates.append(
+                        SegmentCandidate(
+                            segment_id=str(segment.get("segment_id")),
+                            blob_url=str(segment.get("blob_url")),
+                            segment_type=str(segment.get("type")),
+                            description=str(segment.get("description") or ""),
+                            analysis_data=analysis_result.get("analysis_data") or {},
+                        )
+                    )
+
+                if external_wall_ctx is None and analysis_candidates:
+                    floor_plan = select_floor_plan_candidate(analysis_candidates)
+                    mamad_ref = select_mamad_reference_candidate(analysis_candidates)
+                    if floor_plan and mamad_ref and floor_plan.segment_id != mamad_ref.segment_id:
+                        try:
+                            external_wall_ctx = await infer_external_wall_context(
+                                analyzer=analyzer,
+                                floor_plan=floor_plan,
+                                mamad_reference=mamad_ref,
+                            )
+                        except Exception as e:
+                            logger.info(
+                                "External wall count inference failed; continuing without it",
+                                error=str(e),
+                            )
+
+                if (
+                    external_wall_ctx
+                    and isinstance(external_wall_ctx, dict)
+                    and isinstance(analysis_result.get("analysis_data"), dict)
+                    and external_wall_ctx.get("external_wall_count") is not None
+                ):
+                    inject_external_wall_count(
+                        analyzed_segments=[analysis_result],
+                        external_wall_count=int(external_wall_ctx.get("external_wall_count")),
+                        context=external_wall_ctx,
+                    )
                 
                 # Part 4: Validate ONLY if analysis was successful and has classification
                 if analysis_result["status"] == "analyzed":
@@ -851,6 +904,11 @@ async def validate_segments_stream(request: SegmentValidationRequest):
             }
         )
 
+        # Prefer floor plan first so we can infer external wall count for REQ 1.2 early.
+        approved_segments.sort(key=lambda s: 0 if str(s.get("type")) == "floor_plan" else 1)
+        analysis_candidates: List[SegmentCandidate] = []
+        external_wall_ctx: Optional[Dict[str, Any]] = None
+
         for idx, segment in enumerate(approved_segments, start=1):
             seg_id = segment.get("segment_id")
             yield _ndjson(
@@ -875,6 +933,47 @@ async def validate_segments_stream(request: SegmentValidationRequest):
 
                 if analysis_result.get("status") == "analyzed":
                     data = analysis_result.get("analysis_data") or {}
+
+                    # Cross-segment wall-count inference: as soon as we have a floor plan + a MAMAD reference,
+                    # infer the TOTAL external wall count and inject it into segments that don't have it.
+                    if isinstance(data, dict):
+                        analysis_candidates.append(
+                            SegmentCandidate(
+                                segment_id=str(segment.get("segment_id")),
+                                blob_url=str(segment.get("blob_url")),
+                                segment_type=str(segment.get("type")),
+                                description=str(segment.get("description") or ""),
+                                analysis_data=data,
+                            )
+                        )
+
+                    if external_wall_ctx is None and analysis_candidates:
+                        floor_plan = select_floor_plan_candidate(analysis_candidates)
+                        mamad_ref = select_mamad_reference_candidate(analysis_candidates)
+                        if floor_plan and mamad_ref and floor_plan.segment_id != mamad_ref.segment_id:
+                            try:
+                                external_wall_ctx = await infer_external_wall_context(
+                                    analyzer=analyzer,
+                                    floor_plan=floor_plan,
+                                    mamad_reference=mamad_ref,
+                                )
+                            except Exception as e:
+                                logger.info(
+                                    "External wall count inference failed; continuing without it",
+                                    error=str(e),
+                                )
+
+                    if (
+                        external_wall_ctx
+                        and isinstance(external_wall_ctx, dict)
+                        and isinstance(analysis_result.get("analysis_data"), dict)
+                        and external_wall_ctx.get("external_wall_count") is not None
+                    ):
+                        inject_external_wall_count(
+                            analyzed_segments=[analysis_result],
+                            external_wall_count=int(external_wall_ctx.get("external_wall_count")),
+                            context=external_wall_ctx,
+                        )
                     classification = data.get("classification", {}) if isinstance(data, dict) else {}
                     primary_category = str(classification.get("primary_category") or "")
                     secondary_categories = classification.get("secondary_categories") if isinstance(classification.get("secondary_categories"), list) else []

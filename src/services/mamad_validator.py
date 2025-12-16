@@ -766,6 +766,12 @@ class MamadValidator:
         if isinstance(external_wall_count_raw, int) and 1 <= external_wall_count_raw <= 4:
             num_external_known = external_wall_count_raw
 
+        external_wall_count_source = str(data.get("external_wall_count_source") or "").strip()
+        external_wall_count_confidence = data.get("external_wall_count_confidence")
+        external_wall_count_evidence = data.get("external_wall_count_evidence")
+        if not isinstance(external_wall_count_evidence, list):
+            external_wall_count_evidence = []
+
         # Check each wall thickness. We only apply requirement 1.2 to walls that are explicitly external.
         evidence: List[Dict[str, Any]] = []
         parsed_external_thicknesses: List[float] = []
@@ -848,6 +854,30 @@ class MamadValidator:
                     raw=wall,
                 )
             )
+
+        # If we have a known total external wall count (possibly inferred from a floor plan),
+        # attach it as evidence so the UI can explain why a specific minimum thickness was chosen.
+        if num_external_known is not None:
+            evidence.append(
+                self._evidence_dimension(
+                    value=float(num_external_known),
+                    unit="count",
+                    element="external_wall_count",
+                    location=external_wall_count_source or "external_wall_count",
+                    raw={
+                        "source": external_wall_count_source or None,
+                        "confidence": external_wall_count_confidence,
+                    },
+                )
+            )
+            for ev_text in [x for x in external_wall_count_evidence if isinstance(x, str) and x.strip()][:3]:
+                evidence.append(
+                    self._evidence_text(
+                        text=ev_text.strip(),
+                        element="external_wall_count_evidence",
+                        location=external_wall_count_source or "external_wall_count",
+                    )
+                )
 
         if not (parsed_external_thicknesses or parsed_internal_thicknesses or parsed_unknown_thicknesses):
             self._add_requirement_evaluation(
