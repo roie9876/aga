@@ -63,6 +63,26 @@
 - ✅ שיפור אנטי-buffering: הוספת אירוע `prelude` והוספת headers (כמו `X-Accel-Buffering: no`) כדי לצמצם buffering בפרוקסי/דפדפן
 - ✅ הפחתת רעש בלוגים: העלאת רמת לוגים לרכיבים “רועשים” (Azure HTTP logging policy / httpx / openai) ל-WARNING כדי למנוע מאות שורות לכל בקשה
 
+#### 4.3 **שיפורי דיוק + Applicability (15-16/12/2025)**
+- ✅ **REQ 1.2 – סמנטיקה נכונה**: שדרוג ל-30 ס"מ רק כאשר יש *חלון הדף נגרר* ("חלון הדף נגרר")
+- ✅ **View Type**: הוספת `classification.view_type` (למשל `top_view` מול `side_section`) כדי למנוע כשלי-שווא של דרישות גובה (2.1/2.2) בתוכניות-על
+  - במצב `top_view` דרישות 2.1/2.2 חוזרות כ-`not_checked` (ולא `failed`)
+
+#### 4.4 **Cross-Segment Inference לקירות חיצוניים + Robust MAMAD Discovery (15-16/12/2025)**
+- ✅ הוספת אינפרנס בין-סגמנטים כדי להסיק `external_wall_count` (מספר קירות חיצוניים מול קירות פנימיים) מתוך:
+  - תוכנית קומתית (floor plan)
+  - סגמנט ייחוס ממ"ד (reference crop)
+- ✅ חיזוק איתור ממ"ד בתוכניות קומתיות גדולות שבהן הכיתוב "ממ\"ד" קטן:
+  - Pass 1: איתור ROI משוער (locator) על גרסה מוקטנת וזולה
+  - Pass 2: חיתוך תקריבים ברזולוציה גבוהה (context + detail) מהמקור והרצה חוזרת לקבלת ספירה אמינה
+  - Fallback: אם ה-ROI נכשל, חוזרים לאינפרנס "פאס אחד" על התמונה המלאה
+
+#### 4.5 **Performance – מקביליות בטוחה גם בסטרים (15-16/12/2025)**
+- ✅ `/validate-segments` (לא סטרים): מקביליות מוגבלת (bounded concurrency) + caching לתמונות
+- ✅ `/validate-segments-stream` (סטרים ל-UI): הרצת שלבי הכנה (analysis + focused extraction + inference) במקביל, אבל:
+  - שמירה על סדר יציב של אירועי NDJSON (ה-UI עדיין יראה "לפי סדר")
+  - שלב הוולידציה נשאר סדרתי כדי לשמור על סמנטיקת skip דטרמיניסטית
+
 #### 5. **Requirements Catalog (66 דרישות) (NEW)**
 - ✅ `GET /api/v1/requirements` - קטלוג דרישות מלא מתוך requirements-mamad.md (סה"כ 66)
 - ✅ `GET /api/v1/requirements/summary` - ספירה לפי פרקים

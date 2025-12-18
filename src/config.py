@@ -32,6 +32,13 @@ class Settings(BaseSettings):
     azure_openai_max_retries: int = 6
     azure_openai_retry_base_seconds: float = 1.0
     azure_openai_retry_max_seconds: float = 30.0
+
+    # Performance / parallelism controls
+    # These are conservative defaults intended to improve throughput without
+    # increasing the risk of 429/NoCapacity or missing context.
+    validation_max_concurrent_llm_requests: int = 4
+    validation_max_concurrent_downloads: int = 12
+    segment_image_cache_max_items: int = 32
     
     # Azure Cosmos DB
     azure_cosmosdb_endpoint: str

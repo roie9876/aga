@@ -1729,7 +1729,14 @@ function App() {
                                         return (
                                           <div key={rid} className="bg-blue-50 border border-blue-200 rounded-lg p-3">
                                             <div className="flex items-start gap-2">
-                                              <Badge variant="neutral" size="sm">{rid}</Badge>
+                                              <button
+                                                type="button"
+                                                onClick={() => setRequirementInfoId(rid)}
+                                                className="focus:outline-none focus:ring-2 focus:ring-primary/30 rounded-full"
+                                                title="לחץ להסבר הבדיקה"
+                                              >
+                                                <Badge variant="neutral" size="sm">{rid}</Badge>
+                                              </button>
                                               <div className="flex-1">
                                                 <div className="text-xs text-blue-800 font-semibold">סטטוס: לא נבדק{reason ? ` (${reason})` : ''}</div>
                                                 {notesHe && <div className="text-xs text-blue-700 mt-1">{notesHe}</div>}

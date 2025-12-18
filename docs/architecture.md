@@ -24,6 +24,7 @@ The Mamad Validation App is a FastAPI-based microservice that validates Israeli 
 │  │  - /api/v1/decomposition/analyze (Upload & decompose)│  │
 │  │  - /api/v1/decomposition/{id} (Get decomposition)    │  │
 │  │  - /api/v1/segments/validate-segments (Validate segs)│  │
+│  │  - /api/v1/segments/validate-segments-stream (NDJSON)│  │
 │  │  - /api/v1/segments/validations (History list)       │  │
 │  │  - /api/v1/segments/validation/{id} (History detail) │  │
 │  │  - /api/v1/validate (Legacy: validate full plan)     │  │
@@ -225,6 +226,7 @@ credential = DefaultAzureCredential()
    ▼
 2. Backend analyzes each segment (GPT-5.1)
    - classification.primary_category
+   - classification.view_type (e.g., top_view vs side_section)
    - Hebrew description
    │
    ▼
@@ -237,9 +239,18 @@ credential = DefaultAzureCredential()
    ▼
 4. Backend computes coverage report
    - Maps internal rule_id → official requirement_id for correct attribution
+   - May enrich extracted data with cross-segment inference (e.g., external vs internal walls)
    │
    ▼
 5. Store segment_validation doc in Cosmos DB (type="segment_validation")
+
+### Segment Validation (Streaming NDJSON)
+
+The UI uses the streaming endpoint to display live progress.
+
+- Internally, segment "prepare" work (analysis + focused extraction + cross-segment inference) can run concurrently (bounded).
+- Streamed NDJSON events are emitted in a stable, original segment order to keep UX deterministic.
+- Final validation remains sequential to preserve deterministic "skip already passed" semantics.
 ```
 ```
 

@@ -1,6 +1,6 @@
 # Project Status - Mamad Validation App
 
-**Last Updated**: December 13, 2025  
+**Last Updated**: December 16, 2025  
 **Current Phase**: End-to-End Validation + Coverage Transparency (Testing Phase)  
 **Target Release**: Q1 2026
 
@@ -220,6 +220,15 @@ Building a FastAPI application that validates Israeli Home Front Command shelter
   - [x] Add optional “zoom-out context” support for door spacing:
     - [x] When `full_plan_blob_url` + `segment_bbox` are available, generate a padded context crop and pass BOTH images to the model
   - [ ] Expand door spacing to true multi-scale ROI selection (context → ROI proposals → re-extract per ROI)
+
+#### Phase 3.10: Validation Correctness + Applicability + Performance - COMPLETED ✨ (December 15-16, 2025)
+- [x] **REQ 1.2 semantics fix**: apply 30cm upgrade only when a *sliding blast window* ("חלון הדף נגרר") exists
+- [x] **Applicability gating**: add `classification.view_type` and gate height rules (2.1/2.2) so top-view drawings become `not_checked`
+- [x] **Cross-segment inference**: infer `external_wall_count` using floor-plan + dedicated MAMAD reference, inject with evidence/provenance
+- [x] **Robust MAMAD discovery on large floor plans**: ROI locator + high-resolution crops to handle tiny "ממ\"ד" labels
+- [x] **Performance (safe parallelization)**:
+  - [x] Parallelize non-stream `/validate-segments` with bounded concurrency + caching
+  - [x] Parallelize streaming `/validate-segments-stream` internally while preserving ordered NDJSON events (validation stays sequential for deterministic skip semantics)
 
 #### Phase 4: Modern UI/UX Design System - COMPLETED ✨
 - [x] **Design System Foundation**

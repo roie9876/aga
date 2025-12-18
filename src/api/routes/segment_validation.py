@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any, Literal
 
 from src.azure import get_cosmos_client, get_openai_client
+from src.config import settings
 from src.services.segment_analyzer import get_segment_analyzer
 from src.services.mamad_validator import get_mamad_validator
 from src.services.requirements_coverage import get_coverage_tracker
@@ -166,544 +167,578 @@ async def validate_segments(request: SegmentValidationRequest):
 
         # Prefer floor plan first so we can infer external wall count for REQ 1.2 early.
         approved_segments.sort(key=lambda s: 0 if str(s.get("type")) == "floor_plan" else 1)
-        analysis_candidates: List[SegmentCandidate] = []
-        external_wall_ctx: Optional[Dict[str, Any]] = None
 
-        for segment in approved_segments:
+        # Stage A: Base GPT analysis for all segments (parallel).
+        async def _safe_analyze(seg: Dict[str, Any]) -> Dict[str, Any]:
+            seg_id = str(seg.get("segment_id"))
             try:
-                # Part 3: Analyze and classify segment with GPT (NO validation yet)
-                analysis_result = await analyzer.analyze_segment(
-                    segment_id=segment["segment_id"],
-                    segment_blob_url=segment["blob_url"],
-                    segment_type=segment["type"],
-                    segment_description=segment["description"]
+                return await analyzer.analyze_segment(
+                    segment_id=seg_id,
+                    segment_blob_url=str(seg.get("blob_url")),
+                    segment_type=str(seg.get("type")),
+                    segment_description=str(seg.get("description") or ""),
                 )
+            except Exception as e:
+                logger.error(
+                    "Failed to analyze segment",
+                    segment_id=seg_id,
+                    error=str(e),
+                )
+                return {
+                    "segment_id": seg_id,
+                    "status": "error",
+                    "error": str(e),
+                }
 
-                # Cross-segment wall-count inference: as soon as we have a floor plan + a MAMAD reference,
-                # infer the TOTAL external wall count and inject it into segments that don't have it.
-                if analysis_result.get("status") == "analyzed" and isinstance(analysis_result.get("analysis_data"), dict):
-                    analysis_candidates.append(
-                        SegmentCandidate(
-                            segment_id=str(segment.get("segment_id")),
-                            blob_url=str(segment.get("blob_url")),
-                            segment_type=str(segment.get("type")),
-                            description=str(segment.get("description") or ""),
-                            analysis_data=analysis_result.get("analysis_data") or {},
-                        )
+        base_results: List[Dict[str, Any]] = await asyncio.gather(
+            *[_safe_analyze(seg) for seg in approved_segments]
+        )
+
+        analysis_by_id: Dict[str, Dict[str, Any]] = {}
+        for res in base_results:
+            if isinstance(res, dict) and isinstance(res.get("segment_id"), str):
+                analysis_by_id[res["segment_id"]] = res
+
+        # Stage B: Cross-segment external-wall inference (1.2 prerequisite) + injection.
+        analysis_candidates: List[SegmentCandidate] = []
+        for seg in approved_segments:
+            seg_id = str(seg.get("segment_id"))
+            res = analysis_by_id.get(seg_id)
+            if not isinstance(res, dict):
+                continue
+            if res.get("status") != "analyzed":
+                continue
+            data = res.get("analysis_data")
+            if not isinstance(data, dict):
+                continue
+            analysis_candidates.append(
+                SegmentCandidate(
+                    segment_id=seg_id,
+                    blob_url=str(seg.get("blob_url")),
+                    segment_type=str(seg.get("type")),
+                    description=str(seg.get("description") or ""),
+                    analysis_data=data,
+                )
+            )
+
+        external_wall_ctx: Optional[Dict[str, Any]] = None
+        if analysis_candidates:
+            floor_plan = select_floor_plan_candidate(analysis_candidates)
+            mamad_ref = select_mamad_reference_candidate(analysis_candidates)
+            if floor_plan and mamad_ref and floor_plan.segment_id != mamad_ref.segment_id:
+                try:
+                    external_wall_ctx = await infer_external_wall_context(
+                        analyzer=analyzer,
+                        floor_plan=floor_plan,
+                        mamad_reference=mamad_ref,
+                    )
+                except Exception as e:
+                    logger.info(
+                        "External wall count inference failed; continuing without it",
+                        error=str(e),
                     )
 
-                if external_wall_ctx is None and analysis_candidates:
-                    floor_plan = select_floor_plan_candidate(analysis_candidates)
-                    mamad_ref = select_mamad_reference_candidate(analysis_candidates)
-                    if floor_plan and mamad_ref and floor_plan.segment_id != mamad_ref.segment_id:
-                        try:
-                            external_wall_ctx = await infer_external_wall_context(
-                                analyzer=analyzer,
-                                floor_plan=floor_plan,
-                                mamad_reference=mamad_ref,
-                            )
-                        except Exception as e:
-                            logger.info(
-                                "External wall count inference failed; continuing without it",
-                                error=str(e),
-                            )
+        if (
+            external_wall_ctx
+            and isinstance(external_wall_ctx, dict)
+            and external_wall_ctx.get("external_wall_count") is not None
+        ):
+            inject_external_wall_count(
+                analyzed_segments=list(analysis_by_id.values()),
+                external_wall_count=int(external_wall_ctx.get("external_wall_count")),
+                context=external_wall_ctx,
+            )
 
-                if (
-                    external_wall_ctx
-                    and isinstance(external_wall_ctx, dict)
-                    and isinstance(analysis_result.get("analysis_data"), dict)
-                    and external_wall_ctx.get("external_wall_count") is not None
-                ):
-                    inject_external_wall_count(
-                        analyzed_segments=[analysis_result],
-                        external_wall_count=int(external_wall_ctx.get("external_wall_count")),
-                        context=external_wall_ctx,
-                    )
-                
-                # Part 4: Validate ONLY if analysis was successful and has classification
-                if analysis_result["status"] == "analyzed":
-                    group_to_requirements: Dict[str, List[str]] = {
-                        "walls": ["1.1", "1.2"],
-                        "heights": ["2.1", "2.2"],
-                        "doors": ["3.1"],
-                        "windows": ["3.2"],
-                        "notes": ["4.2"],
-                        "materials": ["6.1", "6.2"],
-                        "rebar": ["6.3"],
-                    }
+        # Stage C: Focused extraction passes (parallel, per segment).
+        async def _apply_focused_extraction(seg: Dict[str, Any], analysis_result: Dict[str, Any]) -> None:
+            if analysis_result.get("status") != "analyzed":
+                return
 
-                    # Only restrict enabled_requirements if the user explicitly selected a subset.
-                    # If they send the legacy default groups, treat it as "run everything relevant".
-                    restrict_by_groups = bool(request.check_groups) and (
-                        set(effective_check_groups) != set(LEGACY_DEFAULT_CHECK_GROUPS)
+            data = analysis_result.get("analysis_data")
+            if not isinstance(data, dict):
+                return
+
+            classification = data.get("classification", {}) if isinstance(data, dict) else {}
+            primary_category = str(classification.get("primary_category") or "")
+            secondary_categories = classification.get("secondary_categories") if isinstance(classification.get("secondary_categories"), list) else []
+            cat_joined = "|".join([primary_category] + [str(x) for x in secondary_categories])
+            cat_upper = cat_joined.upper()
+
+            # Doors
+            if ("doors" in effective_check_groups) or ("DOOR_DETAILS" in cat_upper):
+                try:
+                    focus = await analyzer.extract_door_spacing(
+                        segment_id=str(seg.get("segment_id")),
+                        segment_blob_url=str(seg.get("blob_url")),
+                        segment_type=str(seg.get("type") or "unknown"),
+                        segment_description=str(seg.get("description") or ""),
+                        full_plan_blob_url=full_plan_url,
+                        segment_bbox=seg.get("bounding_box"),
                     )
 
-                    enabled_requirements = None
-                    if restrict_by_groups:
-                        enabled_set: set[str] = set()
-                        for g in effective_check_groups:
-                            enabled_set.update(group_to_requirements.get(g, []))
-                        enabled_requirements = enabled_set
+                    base = analysis_result.get("analysis_data") or {}
+                    if isinstance(base, dict) and isinstance(focus, dict):
+                        base.setdefault("door_spacing_focus", focus.get("door_spacing_focus"))
+                        if focus.get("door_roi"):
+                            base.setdefault("door_roi", focus.get("door_roi"))
+                        base.setdefault("structural_elements", [])
+                        base.setdefault("dimensions", [])
+                        base.setdefault("text_items", [])
 
-                    classification = analysis_result.get("analysis_data", {}).get("classification", {}) if isinstance(analysis_result.get("analysis_data"), dict) else {}
-                    primary_category = str(classification.get("primary_category") or "")
-                    secondary_categories = classification.get("secondary_categories") if isinstance(classification.get("secondary_categories"), list) else []
-                    cat_joined = "|".join([primary_category] + [str(x) for x in secondary_categories])
-                    cat_upper = cat_joined.upper()
+                        focus_payload = focus.get("door_spacing_focus")
+                        if isinstance(focus_payload, dict):
+                            doors = focus_payload.get("doors")
+                            if isinstance(doors, list):
+                                for d in doors:
+                                    if not isinstance(d, dict):
+                                        continue
+                                    internal_cm = d.get("internal_clearance_cm")
+                                    external_cm = d.get("external_clearance_cm")
+                                    confidence = d.get("confidence")
+                                    location = d.get("location")
 
-                    # Focused extraction (accuracy-first): run narrow passes for the relevant checks.
-                    # Doors: always run when doors group enabled OR classification suggests door details.
-                    if ("doors" in effective_check_groups) or ("DOOR_DETAILS" in cat_upper):
-                        try:
-                            focus = await analyzer.extract_door_spacing(
-                                segment_id=segment["segment_id"],
-                                segment_blob_url=segment["blob_url"],
-                                segment_type=segment.get("type", "unknown"),
-                                segment_description=segment.get("description", ""),
-                                full_plan_blob_url=full_plan_url,
-                                segment_bbox=segment.get("bounding_box"),
-                            )
+                                    base["structural_elements"].append(
+                                        {
+                                            "type": "door",
+                                            "spacing_internal_cm": internal_cm,
+                                            "spacing_external_cm": external_cm,
+                                            "spacing_confidence": confidence,
+                                            "location": location,
+                                            "notes": "door_spacing_focus",
+                                            "evidence": d.get("evidence"),
+                                        }
+                                    )
 
-                            base = analysis_result.get("analysis_data") or {}
-                            if isinstance(base, dict) and isinstance(focus, dict):
-                                base.setdefault("door_spacing_focus", focus.get("door_spacing_focus"))
-                                if focus.get("door_roi"):
-                                    base.setdefault("door_roi", focus.get("door_roi"))
-                                base.setdefault("structural_elements", [])
-                                base.setdefault("dimensions", [])
-                                base.setdefault("text_items", [])
+                                    if internal_cm is not None:
+                                        base["dimensions"].append(
+                                            {
+                                                "value": internal_cm,
+                                                "unit": "cm",
+                                                "element": "door_spacing_internal",
+                                                "location": location or "",
+                                            }
+                                        )
+                                    if external_cm is not None:
+                                        base["dimensions"].append(
+                                            {
+                                                "value": external_cm,
+                                                "unit": "cm",
+                                                "element": "door_spacing_external",
+                                                "location": location or "",
+                                            }
+                                        )
 
-                                focus_payload = focus.get("door_spacing_focus")
-                                if isinstance(focus_payload, dict):
-                                    doors = focus_payload.get("doors")
-                                    if isinstance(doors, list):
-                                        for d in doors:
-                                            if not isinstance(d, dict):
+                                    ev_list = d.get("evidence")
+                                    if isinstance(ev_list, list):
+                                        for ev in ev_list[:6]:
+                                            if not isinstance(ev, str) or not ev.strip():
                                                 continue
-                                            internal_cm = d.get("internal_clearance_cm")
-                                            external_cm = d.get("external_clearance_cm")
-                                            confidence = d.get("confidence")
-                                            location = d.get("location")
-
-                                            base["structural_elements"].append(
+                                            base["text_items"].append(
                                                 {
-                                                    "type": "door",
-                                                    "spacing_internal_cm": internal_cm,
-                                                    "spacing_external_cm": external_cm,
-                                                    "spacing_confidence": confidence,
-                                                    "location": location,
-                                                    "notes": "door_spacing_focus",
-                                                    "evidence": d.get("evidence"),
+                                                    "text": ev.strip(),
+                                                    "language": "hebrew",
+                                                    "type": "dimension",
                                                 }
                                             )
 
-                                            if internal_cm is not None:
-                                                base["dimensions"].append(
-                                                    {
-                                                        "value": internal_cm,
-                                                        "unit": "cm",
-                                                        "element": "door_spacing_internal",
-                                                        "location": location or "",
-                                                    }
-                                                )
-                                            if external_cm is not None:
-                                                base["dimensions"].append(
-                                                    {
-                                                        "value": external_cm,
-                                                        "unit": "cm",
-                                                        "element": "door_spacing_external",
-                                                        "location": location or "",
-                                                    }
-                                                )
+                        analysis_result["analysis_data"] = base
+                except Exception as e:
+                    logger.warning(
+                        "Focused door-spacing extraction failed; continuing with base analysis",
+                        segment_id=str(seg.get("segment_id")),
+                        error=str(e),
+                    )
 
-                                            ev_list = d.get("evidence")
-                                            if isinstance(ev_list, list):
-                                                for ev in ev_list[:6]:
-                                                    if not isinstance(ev, str) or not ev.strip():
-                                                        continue
-                                                    base["text_items"].append(
-                                                        {
-                                                            "text": ev.strip(),
-                                                            "language": "hebrew",
-                                                            "type": "dimension",
-                                                        }
-                                                    )
+            # Walls
+            if ("walls" in effective_check_groups) or ("WALL_SECTION" in cat_upper):
+                try:
+                    wall_focus = await analyzer.extract_wall_thickness(
+                        segment_id=str(seg.get("segment_id")),
+                        segment_blob_url=str(seg.get("blob_url")),
+                        segment_type=str(seg.get("type") or "unknown"),
+                        segment_description=str(seg.get("description") or ""),
+                    )
+                    base = analysis_result.get("analysis_data") or {}
+                    if isinstance(base, dict) and isinstance(wall_focus, dict):
+                        base.setdefault("wall_thickness_focus", wall_focus.get("wall_thickness_focus"))
+                        if wall_focus.get("wall_roi"):
+                            base.setdefault("wall_roi", wall_focus.get("wall_roi"))
+                        base.setdefault("structural_elements", [])
+                        base.setdefault("dimensions", [])
+                        base.setdefault("text_items", [])
 
-                                analysis_result["analysis_data"] = base
-                        except Exception as e:
-                            logger.warning(
-                                "Focused door-spacing extraction failed; continuing with base analysis",
-                                segment_id=segment["segment_id"],
-                                error=str(e),
-                            )
-
-                    # Walls: run when wall group enabled OR classification suggests wall section.
-                    if ("walls" in effective_check_groups) or ("WALL_SECTION" in cat_upper):
-                        try:
-                            wall_focus = await analyzer.extract_wall_thickness(
-                                segment_id=segment["segment_id"],
-                                segment_blob_url=segment["blob_url"],
-                                segment_type=segment.get("type", "unknown"),
-                                segment_description=segment.get("description", ""),
-                            )
-                            base = analysis_result.get("analysis_data") or {}
-                            if isinstance(base, dict) and isinstance(wall_focus, dict):
-                                base.setdefault("wall_thickness_focus", wall_focus.get("wall_thickness_focus"))
-                                if wall_focus.get("wall_roi"):
-                                    base.setdefault("wall_roi", wall_focus.get("wall_roi"))
-                                base.setdefault("structural_elements", [])
-                                base.setdefault("dimensions", [])
-                                base.setdefault("text_items", [])
-
-                                payload = wall_focus.get("wall_thickness_focus")
-                                if isinstance(payload, dict) and isinstance(payload.get("walls"), list):
-                                    for w in payload.get("walls"):
-                                        if not isinstance(w, dict):
-                                            continue
-                                        thickness_cm = w.get("thickness_cm")
-                                        conf = w.get("confidence")
-                                        location = w.get("location")
-                                        evidence = w.get("evidence")
-                                        if thickness_cm is not None:
-                                            base["structural_elements"].append(
-                                                {
-                                                    "type": "wall",
-                                                    "thickness": f"{thickness_cm} cm",
-                                                    "location": location or "",
-                                                    "notes": "wall_thickness_focus",
-                                                    "confidence": conf,
-                                                    "evidence": evidence,
-                                                }
+                        payload = wall_focus.get("wall_thickness_focus")
+                        if isinstance(payload, dict) and isinstance(payload.get("walls"), list):
+                            for w in payload.get("walls"):
+                                if not isinstance(w, dict):
+                                    continue
+                                thickness_cm = w.get("thickness_cm")
+                                conf = w.get("confidence")
+                                location = w.get("location")
+                                evidence = w.get("evidence")
+                                if thickness_cm is not None:
+                                    base["structural_elements"].append(
+                                        {
+                                            "type": "wall",
+                                            "thickness": f"{thickness_cm} cm",
+                                            "location": location or "",
+                                            "notes": "wall_thickness_focus",
+                                            "confidence": conf,
+                                            "evidence": evidence,
+                                        }
+                                    )
+                                    base["dimensions"].append(
+                                        {
+                                            "value": thickness_cm,
+                                            "unit": "cm",
+                                            "element": "wall thickness",
+                                            "location": location or "",
+                                        }
+                                    )
+                                if isinstance(evidence, list):
+                                    for ev in evidence[:6]:
+                                        if isinstance(ev, str) and ev.strip():
+                                            base["text_items"].append(
+                                                {"text": ev.strip(), "language": "hebrew", "type": "dimension"}
                                             )
+                        analysis_result["analysis_data"] = base
+                except Exception as e:
+                    logger.warning(
+                        "Focused wall-thickness extraction failed; continuing with base analysis",
+                        segment_id=str(seg.get("segment_id")),
+                        error=str(e),
+                    )
+
+            # Heights
+            if ("heights" in effective_check_groups) or ("SECTIONS" in cat_upper) or ("ROOM_LAYOUT" in cat_upper):
+                try:
+                    height_focus = await analyzer.extract_room_height(
+                        segment_id=str(seg.get("segment_id")),
+                        segment_blob_url=str(seg.get("blob_url")),
+                        segment_type=str(seg.get("type") or "unknown"),
+                        segment_description=str(seg.get("description") or ""),
+                    )
+                    base = analysis_result.get("analysis_data") or {}
+                    if isinstance(base, dict) and isinstance(height_focus, dict):
+                        base.setdefault("room_height_focus", height_focus.get("room_height_focus"))
+                        if height_focus.get("height_roi"):
+                            base.setdefault("height_roi", height_focus.get("height_roi"))
+                        base.setdefault("dimensions", [])
+                        base.setdefault("text_items", [])
+
+                        payload = height_focus.get("room_height_focus")
+                        if isinstance(payload, dict) and isinstance(payload.get("heights"), list):
+                            for h in payload.get("heights"):
+                                if not isinstance(h, dict):
+                                    continue
+                                height_m = h.get("height_m")
+                                conf = h.get("confidence")
+                                location = h.get("location")
+                                evidence = h.get("evidence")
+                                if height_m is not None:
+                                    base["dimensions"].append(
+                                        {
+                                            "value": height_m,
+                                            "unit": "m",
+                                            "element": "room height",
+                                            "location": location or "",
+                                            "confidence": conf,
+                                        }
+                                    )
+                                if isinstance(evidence, list):
+                                    for ev in evidence[:6]:
+                                        if isinstance(ev, str) and ev.strip():
+                                            base["text_items"].append(
+                                                {"text": ev.strip(), "language": "hebrew", "type": "dimension"}
+                                            )
+                        analysis_result["analysis_data"] = base
+                except Exception as e:
+                    logger.warning(
+                        "Focused room-height extraction failed; continuing with base analysis",
+                        segment_id=str(seg.get("segment_id")),
+                        error=str(e),
+                    )
+
+            # Windows
+            if ("windows" in effective_check_groups) or ("WINDOW_DETAILS" in cat_upper):
+                try:
+                    window_focus = await analyzer.extract_window_spacing(
+                        segment_id=str(seg.get("segment_id")),
+                        segment_blob_url=str(seg.get("blob_url")),
+                        segment_type=str(seg.get("type") or "unknown"),
+                        segment_description=str(seg.get("description") or ""),
+                    )
+                    base = analysis_result.get("analysis_data") or {}
+                    if isinstance(base, dict) and isinstance(window_focus, dict):
+                        base.setdefault("window_spacing_focus", window_focus.get("window_spacing_focus"))
+                        if window_focus.get("window_roi"):
+                            base.setdefault("window_roi", window_focus.get("window_roi"))
+                        base.setdefault("text_items", [])
+                        base.setdefault("dimensions", [])
+
+                        payload = window_focus.get("window_spacing_focus")
+                        if isinstance(payload, dict):
+                            ev_texts = payload.get("evidence_texts")
+                            if isinstance(ev_texts, list):
+                                for ev in ev_texts[:10]:
+                                    if isinstance(ev, str) and ev.strip():
+                                        base["text_items"].append(
+                                            {"text": ev.strip(), "language": "hebrew", "type": "dimension"}
+                                        )
+
+                            windows_payload = payload.get("windows")
+                            if isinstance(windows_payload, list):
+                                for w in windows_payload[:6]:
+                                    if not isinstance(w, dict):
+                                        continue
+                                    conf = w.get("confidence")
+                                    location = w.get("location") or ""
+
+                                    def _add_dim(key: str, element: str) -> None:
+                                        val = w.get(key)
+                                        if isinstance(val, (int, float)):
                                             base["dimensions"].append(
                                                 {
-                                                    "value": thickness_cm,
+                                                    "value": float(val),
                                                     "unit": "cm",
-                                                    "element": "wall thickness",
-                                                    "location": location or "",
-                                                }
-                                            )
-                                        if isinstance(evidence, list):
-                                            for ev in evidence[:6]:
-                                                if isinstance(ev, str) and ev.strip():
-                                                    base["text_items"].append(
-                                                        {"text": ev.strip(), "language": "hebrew", "type": "dimension"}
-                                                    )
-                                analysis_result["analysis_data"] = base
-                        except Exception as e:
-                            logger.warning(
-                                "Focused wall-thickness extraction failed; continuing with base analysis",
-                                segment_id=segment["segment_id"],
-                                error=str(e),
-                            )
-
-                    # Heights: run when heights group enabled OR classification suggests sections.
-                    if ("heights" in effective_check_groups) or ("SECTIONS" in cat_upper) or ("ROOM_LAYOUT" in cat_upper):
-                        try:
-                            height_focus = await analyzer.extract_room_height(
-                                segment_id=segment["segment_id"],
-                                segment_blob_url=segment["blob_url"],
-                                segment_type=segment.get("type", "unknown"),
-                                segment_description=segment.get("description", ""),
-                            )
-                            base = analysis_result.get("analysis_data") or {}
-                            if isinstance(base, dict) and isinstance(height_focus, dict):
-                                base.setdefault("room_height_focus", height_focus.get("room_height_focus"))
-                                if height_focus.get("height_roi"):
-                                    base.setdefault("height_roi", height_focus.get("height_roi"))
-                                base.setdefault("dimensions", [])
-                                base.setdefault("text_items", [])
-
-                                payload = height_focus.get("room_height_focus")
-                                if isinstance(payload, dict) and isinstance(payload.get("heights"), list):
-                                    for h in payload.get("heights"):
-                                        if not isinstance(h, dict):
-                                            continue
-                                        height_m = h.get("height_m")
-                                        conf = h.get("confidence")
-                                        location = h.get("location")
-                                        evidence = h.get("evidence")
-                                        if height_m is not None:
-                                            base["dimensions"].append(
-                                                {
-                                                    "value": height_m,
-                                                    "unit": "m",
-                                                    "element": "room height",
-                                                    "location": location or "",
+                                                    "element": element,
+                                                    "location": location,
                                                     "confidence": conf,
                                                 }
                                             )
-                                        if isinstance(evidence, list):
-                                            for ev in evidence[:6]:
-                                                if isinstance(ev, str) and ev.strip():
-                                                    base["text_items"].append(
-                                                        {"text": ev.strip(), "language": "hebrew", "type": "dimension"}
-                                                    )
-                                analysis_result["analysis_data"] = base
-                        except Exception as e:
-                            logger.warning(
-                                "Focused room-height extraction failed; continuing with base analysis",
-                                segment_id=segment["segment_id"],
-                                error=str(e),
-                            )
 
-                    # Windows: run when windows group enabled OR classification suggests window details.
-                    if ("windows" in effective_check_groups) or ("WINDOW_DETAILS" in cat_upper):
-                        try:
-                            window_focus = await analyzer.extract_window_spacing(
-                                segment_id=segment["segment_id"],
-                                segment_blob_url=segment["blob_url"],
-                                segment_type=segment.get("type", "unknown"),
-                                segment_description=segment.get("description", ""),
-                            )
-                            base = analysis_result.get("analysis_data") or {}
-                            if isinstance(base, dict) and isinstance(window_focus, dict):
-                                base.setdefault("window_spacing_focus", window_focus.get("window_spacing_focus"))
-                                if window_focus.get("window_roi"):
-                                    base.setdefault("window_roi", window_focus.get("window_roi"))
-                                base.setdefault("text_items", [])
-                                base.setdefault("dimensions", [])
+                                    _add_dim("niche_to_niche_cm", "window niche spacing")
+                                    _add_dim("light_openings_spacing_cm", "window light openings spacing")
+                                    _add_dim("to_perpendicular_wall_cm", "window to perpendicular wall")
+                                    _add_dim("same_wall_door_separation_cm", "window-door separation")
+                                    _add_dim("door_height_cm", "door height")
+                                    _add_dim("concrete_wall_thickness_cm", "concrete wall thickness")
 
-                                payload = window_focus.get("window_spacing_focus")
-                                if isinstance(payload, dict):
-                                    # Back-compat: old extractor emitted evidence_texts.
-                                    ev_texts = payload.get("evidence_texts")
-                                    if isinstance(ev_texts, list):
-                                        for ev in ev_texts[:10]:
+                                    ev_list = w.get("evidence")
+                                    if isinstance(ev_list, list):
+                                        for ev in ev_list[:8]:
                                             if isinstance(ev, str) and ev.strip():
                                                 base["text_items"].append(
                                                     {"text": ev.strip(), "language": "hebrew", "type": "dimension"}
                                                 )
 
-                                    # New extractor: structured windows[] values.
-                                    windows_payload = payload.get("windows")
-                                    if isinstance(windows_payload, list):
-                                        for w in windows_payload[:6]:
-                                            if not isinstance(w, dict):
-                                                continue
-                                            conf = w.get("confidence")
-                                            location = w.get("location") or ""
-
-                                            def _add_dim(key: str, element: str) -> None:
-                                                val = w.get(key)
-                                                if isinstance(val, (int, float)):
-                                                    base["dimensions"].append(
-                                                        {
-                                                            "value": float(val),
-                                                            "unit": "cm",
-                                                            "element": element,
-                                                            "location": location,
-                                                            "confidence": conf,
-                                                        }
-                                                    )
-
-                                            _add_dim("niche_to_niche_cm", "window niche spacing")
-                                            _add_dim("light_openings_spacing_cm", "window light openings spacing")
-                                            _add_dim("to_perpendicular_wall_cm", "window to perpendicular wall")
-                                            _add_dim("same_wall_door_separation_cm", "window-door separation")
-                                            _add_dim("door_height_cm", "door height")
-                                            _add_dim("concrete_wall_thickness_cm", "concrete wall thickness")
-
-                                            ev_list = w.get("evidence")
-                                            if isinstance(ev_list, list):
-                                                for ev in ev_list[:8]:
-                                                    if isinstance(ev, str) and ev.strip():
-                                                        base["text_items"].append(
-                                                            {"text": ev.strip(), "language": "hebrew", "type": "dimension"}
-                                                        )
-
-                                            # Represent boolean hints as evidence text for downstream validators.
-                                            if w.get("has_concrete_wall_between_openings") is True:
-                                                base["text_items"].append(
-                                                    {
-                                                        "text": "קיים קיר בטון בין דלת לחלון (לפי זיהוי ממוקד)",
-                                                        "language": "hebrew",
-                                                        "type": "note",
-                                                    }
-                                                )
-                                analysis_result["analysis_data"] = base
-                        except Exception as e:
-                            logger.warning(
-                                "Focused window-spacing extraction failed; continuing with base analysis",
-                                segment_id=segment["segment_id"],
-                                error=str(e),
-                            )
-
-                    # Materials: run when classification suggests materials specs.
-                    if ("materials" in effective_check_groups) or ("MATERIALS_SPECS" in cat_upper):
-                        try:
-                            materials_focus = await analyzer.extract_materials_specs(
-                                segment_id=segment["segment_id"],
-                                segment_blob_url=segment["blob_url"],
-                                segment_type=segment.get("type", "unknown"),
-                                segment_description=segment.get("description", ""),
-                            )
-                            base = analysis_result.get("analysis_data") or {}
-                            if isinstance(base, dict) and isinstance(materials_focus, dict):
-                                base.setdefault("materials_focus", materials_focus.get("materials_focus"))
-                                if materials_focus.get("materials_roi"):
-                                    base.setdefault("materials_roi", materials_focus.get("materials_roi"))
-                                base.setdefault("materials", [])
-                                base.setdefault("text_items", [])
-
-                                payload = materials_focus.get("materials_focus")
-                                if isinstance(payload, dict) and isinstance(payload.get("materials"), list):
-                                    for m in payload.get("materials"):
-                                        if not isinstance(m, dict):
-                                            continue
-                                        base["materials"].append(
+                                    if w.get("has_concrete_wall_between_openings") is True:
+                                        base["text_items"].append(
                                             {
-                                                "type": m.get("type"),
-                                                "grade": m.get("grade"),
-                                                "notes": m.get("notes"),
-                                                "confidence": m.get("confidence"),
-                                                "evidence": m.get("evidence"),
+                                                "text": "קיים קיר בטון בין דלת לחלון (לפי זיהוי ממוקד)",
+                                                "language": "hebrew",
+                                                "type": "note",
                                             }
                                         )
-                                        ev_list = m.get("evidence")
-                                        if isinstance(ev_list, list):
-                                            for ev in ev_list[:6]:
-                                                if isinstance(ev, str) and ev.strip():
-                                                    base["text_items"].append(
-                                                        {"text": ev.strip(), "language": "hebrew", "type": "note"}
-                                                    )
-                                analysis_result["analysis_data"] = base
-                        except Exception as e:
-                            logger.warning(
-                                "Focused materials extraction failed; continuing with base analysis",
-                                segment_id=segment["segment_id"],
-                                error=str(e),
-                            )
+                        analysis_result["analysis_data"] = base
+                except Exception as e:
+                    logger.warning(
+                        "Focused window-spacing extraction failed; continuing with base analysis",
+                        segment_id=str(seg.get("segment_id")),
+                        error=str(e),
+                    )
 
-                    # Rebar: run when classification suggests rebar details.
-                    if ("rebar" in effective_check_groups) or ("REBAR_DETAILS" in cat_upper):
-                        try:
-                            rebar_focus = await analyzer.extract_rebar_specs(
-                                segment_id=segment["segment_id"],
-                                segment_blob_url=segment["blob_url"],
-                                segment_type=segment.get("type", "unknown"),
-                                segment_description=segment.get("description", ""),
-                            )
-                            base = analysis_result.get("analysis_data") or {}
-                            if isinstance(base, dict) and isinstance(rebar_focus, dict):
-                                base.setdefault("rebar_focus", rebar_focus.get("rebar_focus"))
-                                if rebar_focus.get("rebar_roi"):
-                                    base.setdefault("rebar_roi", rebar_focus.get("rebar_roi"))
-                                base.setdefault("rebar_details", [])
-                                base.setdefault("text_items", [])
+            # Materials
+            if ("materials" in effective_check_groups) or ("MATERIALS_SPECS" in cat_upper):
+                try:
+                    materials_focus = await analyzer.extract_materials_specs(
+                        segment_id=str(seg.get("segment_id")),
+                        segment_blob_url=str(seg.get("blob_url")),
+                        segment_type=str(seg.get("type") or "unknown"),
+                        segment_description=str(seg.get("description") or ""),
+                    )
+                    base = analysis_result.get("analysis_data") or {}
+                    if isinstance(base, dict) and isinstance(materials_focus, dict):
+                        base.setdefault("materials_focus", materials_focus.get("materials_focus"))
+                        if materials_focus.get("materials_roi"):
+                            base.setdefault("materials_roi", materials_focus.get("materials_roi"))
+                        base.setdefault("materials", [])
+                        base.setdefault("text_items", [])
 
-                                payload = rebar_focus.get("rebar_focus")
-                                if isinstance(payload, dict) and isinstance(payload.get("rebars"), list):
-                                    for r in payload.get("rebars"):
-                                        if not isinstance(r, dict):
-                                            continue
-                                        spacing_cm = r.get("spacing_cm")
-                                        location = r.get("location")
-                                        conf = r.get("confidence")
-                                        evidence = r.get("evidence")
-                                        if spacing_cm is not None:
-                                            base["rebar_details"].append(
-                                                {
-                                                    "spacing": f"{spacing_cm} cm",
-                                                    "location": location or "",
-                                                    "notes": "rebar_focus",
-                                                    "confidence": conf,
-                                                    "evidence": evidence,
-                                                }
-                                            )
-                                        if isinstance(evidence, list):
-                                            for ev in evidence[:6]:
-                                                if isinstance(ev, str) and ev.strip():
-                                                    base["text_items"].append(
-                                                        {"text": ev.strip(), "language": "hebrew", "type": "note"}
-                                                    )
-                                analysis_result["analysis_data"] = base
-                        except Exception as e:
-                            logger.warning(
-                                "Focused rebar extraction failed; continuing with base analysis",
-                                segment_id=segment["segment_id"],
-                                error=str(e),
-                            )
-
-                    # Notes: run when classification suggests general notes.
-                    if ("notes" in effective_check_groups) or ("GENERAL_NOTES" in cat_upper):
-                        try:
-                            notes_focus = await analyzer.extract_general_notes(
-                                segment_id=segment["segment_id"],
-                                segment_blob_url=segment["blob_url"],
-                                segment_type=segment.get("type", "unknown"),
-                                segment_description=segment.get("description", ""),
-                            )
-                            base = analysis_result.get("analysis_data") or {}
-                            if isinstance(base, dict) and isinstance(notes_focus, dict):
-                                base.setdefault("notes_focus", notes_focus.get("notes_focus"))
-                                if notes_focus.get("notes_roi"):
-                                    base.setdefault("notes_roi", notes_focus.get("notes_roi"))
-                                base.setdefault("text_items", [])
-
-                                payload = notes_focus.get("notes_focus")
-                                if isinstance(payload, dict) and isinstance(payload.get("evidence_texts"), list):
-                                    for ev in payload.get("evidence_texts")[:10]:
+                        payload = materials_focus.get("materials_focus")
+                        if isinstance(payload, dict) and isinstance(payload.get("materials"), list):
+                            for m in payload.get("materials"):
+                                if not isinstance(m, dict):
+                                    continue
+                                base["materials"].append(
+                                    {
+                                        "type": m.get("type"),
+                                        "grade": m.get("grade"),
+                                        "notes": m.get("notes"),
+                                        "confidence": m.get("confidence"),
+                                        "evidence": m.get("evidence"),
+                                    }
+                                )
+                                ev_list = m.get("evidence")
+                                if isinstance(ev_list, list):
+                                    for ev in ev_list[:6]:
                                         if isinstance(ev, str) and ev.strip():
                                             base["text_items"].append(
                                                 {"text": ev.strip(), "language": "hebrew", "type": "note"}
                                             )
-                                analysis_result["analysis_data"] = base
-                        except Exception as e:
-                            logger.warning(
-                                "Focused notes extraction failed; continuing with base analysis",
-                                segment_id=segment["segment_id"],
-                                error=str(e),
-                            )
-
-                    # Run targeted validation based on segment classification
-                    validation_result = validator.validate_segment(
-                        analysis_result.get("analysis_data", {}),
-                        demo_mode=request.demo_mode,
-                        enabled_requirements=enabled_requirements,
-                        skip_requirements=passed_requirements_global,
+                        analysis_result["analysis_data"] = base
+                except Exception as e:
+                    logger.warning(
+                        "Focused materials extraction failed; continuing with base analysis",
+                        segment_id=str(seg.get("segment_id")),
+                        error=str(e),
                     )
-                    analysis_result["validation"] = validation_result
 
-                    # Update global pass-state: once a requirement passed in any segment,
-                    # skip re-running it in later segments.
-                    for ev in (validation_result.get("requirement_evaluations") or []):
-                        if isinstance(ev, dict) and ev.get("status") == "passed":
-                            req_id = ev.get("requirement_id")
-                            if isinstance(req_id, str) and req_id:
-                                passed_requirements_global.add(req_id)
-                    
-                    # Log what was found vs what was checked
-                    classification = analysis_result.get("analysis_data", {}).get("classification", {})
-                    logger.info("Segment analyzed and validated",
-                               segment_id=segment["segment_id"],
-                               classification=classification.get("primary_category"),
-                               relevant_requirements=classification.get("relevant_requirements"),
-                               validation_passed=validation_result.get("passed", False))
-                else:
-                    # Analysis failed - no validation
-                    analysis_result["validation"] = {
-                        "status": "skipped",
-                        "passed": False,
-                        "violations": []
-                    }
-                
-                analyzed_segments.append(analysis_result)
-                
-            except Exception as e:
-                logger.error("Failed to analyze segment",
-                            segment_id=segment["segment_id"],
-                            error=str(e))
-                analyzed_segments.append({
-                    "segment_id": segment["segment_id"],
-                    "status": "error",
-                    "error": str(e),
-                    "validation": {
-                        "status": "error",
-                        "passed": False,
-                        "violations": []
-                    }
-                })
+            # Rebar
+            if ("rebar" in effective_check_groups) or ("REBAR_DETAILS" in cat_upper):
+                try:
+                    rebar_focus = await analyzer.extract_rebar_specs(
+                        segment_id=str(seg.get("segment_id")),
+                        segment_blob_url=str(seg.get("blob_url")),
+                        segment_type=str(seg.get("type") or "unknown"),
+                        segment_description=str(seg.get("description") or ""),
+                    )
+                    base = analysis_result.get("analysis_data") or {}
+                    if isinstance(base, dict) and isinstance(rebar_focus, dict):
+                        base.setdefault("rebar_focus", rebar_focus.get("rebar_focus"))
+                        if rebar_focus.get("rebar_roi"):
+                            base.setdefault("rebar_roi", rebar_focus.get("rebar_roi"))
+                        base.setdefault("rebar_details", [])
+                        base.setdefault("text_items", [])
+
+                        payload = rebar_focus.get("rebar_focus")
+                        if isinstance(payload, dict) and isinstance(payload.get("rebars"), list):
+                            for r in payload.get("rebars"):
+                                if not isinstance(r, dict):
+                                    continue
+                                spacing_cm = r.get("spacing_cm")
+                                location = r.get("location")
+                                conf = r.get("confidence")
+                                evidence = r.get("evidence")
+                                if spacing_cm is not None:
+                                    base["rebar_details"].append(
+                                        {
+                                            "spacing": f"{spacing_cm} cm",
+                                            "location": location or "",
+                                            "notes": "rebar_focus",
+                                            "confidence": conf,
+                                            "evidence": evidence,
+                                        }
+                                    )
+                                if isinstance(evidence, list):
+                                    for ev in evidence[:6]:
+                                        if isinstance(ev, str) and ev.strip():
+                                            base["text_items"].append(
+                                                {"text": ev.strip(), "language": "hebrew", "type": "note"}
+                                            )
+                        analysis_result["analysis_data"] = base
+                except Exception as e:
+                    logger.warning(
+                        "Focused rebar extraction failed; continuing with base analysis",
+                        segment_id=str(seg.get("segment_id")),
+                        error=str(e),
+                    )
+
+            # Notes
+            if ("notes" in effective_check_groups) or ("GENERAL_NOTES" in cat_upper):
+                try:
+                    notes_focus = await analyzer.extract_general_notes(
+                        segment_id=str(seg.get("segment_id")),
+                        segment_blob_url=str(seg.get("blob_url")),
+                        segment_type=str(seg.get("type") or "unknown"),
+                        segment_description=str(seg.get("description") or ""),
+                    )
+                    base = analysis_result.get("analysis_data") or {}
+                    if isinstance(base, dict) and isinstance(notes_focus, dict):
+                        base.setdefault("notes_focus", notes_focus.get("notes_focus"))
+                        if notes_focus.get("notes_roi"):
+                            base.setdefault("notes_roi", notes_focus.get("notes_roi"))
+                        base.setdefault("text_items", [])
+
+                        payload = notes_focus.get("notes_focus")
+                        if isinstance(payload, dict) and isinstance(payload.get("evidence_texts"), list):
+                            for ev in payload.get("evidence_texts")[:10]:
+                                if isinstance(ev, str) and ev.strip():
+                                    base["text_items"].append(
+                                        {"text": ev.strip(), "language": "hebrew", "type": "note"}
+                                    )
+                        analysis_result["analysis_data"] = base
+                except Exception as e:
+                    logger.warning(
+                        "Focused notes extraction failed; continuing with base analysis",
+                        segment_id=str(seg.get("segment_id")),
+                        error=str(e),
+                    )
+
+        await asyncio.gather(
+            *[
+                _apply_focused_extraction(seg, analysis_by_id[str(seg.get("segment_id"))])
+                for seg in approved_segments
+                if str(seg.get("segment_id")) in analysis_by_id
+            ]
+        )
+
+        # Stage D: Run validations in a deterministic order (keeps skip_requirements behavior stable).
+        group_to_requirements: Dict[str, List[str]] = {
+            "walls": ["1.1", "1.2"],
+            "heights": ["2.1", "2.2"],
+            "doors": ["3.1"],
+            "windows": ["3.2"],
+            "notes": ["4.2"],
+            "materials": ["6.1", "6.2"],
+            "rebar": ["6.3"],
+        }
+
+        restrict_by_groups = bool(request.check_groups) and (
+            set(effective_check_groups) != set(LEGACY_DEFAULT_CHECK_GROUPS)
+        )
+
+        enabled_requirements = None
+        if restrict_by_groups:
+            enabled_set: set[str] = set()
+            for g in effective_check_groups:
+                enabled_set.update(group_to_requirements.get(g, []))
+            enabled_requirements = enabled_set
+
+        analyzed_segments = []
+        for seg in approved_segments:
+            seg_id = str(seg.get("segment_id"))
+            analysis_result = analysis_by_id.get(seg_id) or {
+                "segment_id": seg_id,
+                "status": "error",
+                "error": "missing_analysis_result",
+            }
+
+            if analysis_result.get("status") == "analyzed":
+                validation_result = validator.validate_segment(
+                    analysis_result.get("analysis_data", {}),
+                    demo_mode=request.demo_mode,
+                    enabled_requirements=enabled_requirements,
+                    skip_requirements=passed_requirements_global,
+                )
+                analysis_result["validation"] = validation_result
+
+                for ev in (validation_result.get("requirement_evaluations") or []):
+                    if isinstance(ev, dict) and ev.get("status") == "passed":
+                        req_id = ev.get("requirement_id")
+                        if isinstance(req_id, str) and req_id:
+                            passed_requirements_global.add(req_id)
+
+                classification = (
+                    analysis_result.get("analysis_data", {}).get("classification", {})
+                    if isinstance(analysis_result.get("analysis_data"), dict)
+                    else {}
+                )
+                logger.info(
+                    "Segment analyzed and validated",
+                    segment_id=seg_id,
+                    classification=classification.get("primary_category") if isinstance(classification, dict) else None,
+                    relevant_requirements=classification.get("relevant_requirements") if isinstance(classification, dict) else None,
+                    validation_passed=validation_result.get("passed", False),
+                )
+            else:
+                analysis_result["validation"] = {
+                    "status": "skipped" if analysis_result.get("status") != "error" else "error",
+                    "passed": False,
+                    "violations": [],
+                }
+
+            analyzed_segments.append(analysis_result)
         
         # 4. Store analysis results in Cosmos DB
         validation_id = f"val-{uuid.uuid4()}"
@@ -907,105 +942,147 @@ async def validate_segments_stream(request: SegmentValidationRequest):
         # Prefer floor plan first so we can infer external wall count for REQ 1.2 early.
         approved_segments.sort(key=lambda s: 0 if str(s.get("type")) == "floor_plan" else 1)
         analysis_candidates: List[SegmentCandidate] = []
+        analysis_results_by_id: Dict[str, Dict[str, Any]] = {}
         external_wall_ctx: Optional[Dict[str, Any]] = None
+        external_wall_lock = asyncio.Lock()
 
-        for idx, segment in enumerate(approved_segments, start=1):
+        max_parallel_segments = max(1, int(settings.validation_max_concurrent_llm_requests or 1))
+        segment_semaphore = asyncio.Semaphore(max_parallel_segments)
+
+        async def _prepare_segment(segment: Dict[str, Any]) -> Dict[str, Any]:
+            """Run analysis + focused extractors for a segment.
+
+            Returns a dict with:
+            - analysis_result: the analyzed segment dict (without sequential validation applied)
+            - events: list of NDJSON bytes to emit AFTER analysis_start
+            - emit_segment_done: whether to emit segment_done (preserves legacy behavior)
+            """
+            nonlocal external_wall_ctx
             seg_id = segment.get("segment_id")
-            yield _ndjson(
-                {
-                    "event": "segment_start",
-                    "current": idx,
-                    "total": total,
-                    "segment_id": seg_id,
-                    "segment_type": segment.get("type"),
-                    "description": segment.get("description"),
-                }
-            )
+            events: List[bytes] = []
 
-            try:
-                yield _ndjson({"event": "analysis_start", "segment_id": seg_id})
-                analysis_result = await analyzer.analyze_segment(
-                    segment_id=seg_id,
-                    segment_blob_url=segment.get("blob_url"),
-                    segment_type=segment.get("type"),
-                    segment_description=segment.get("description"),
-                )
+            async with segment_semaphore:
+                try:
+                    analysis_result = await analyzer.analyze_segment(
+                        segment_id=seg_id,
+                        segment_blob_url=segment.get("blob_url"),
+                        segment_type=segment.get("type"),
+                        segment_description=segment.get("description"),
+                    )
 
-                if analysis_result.get("status") == "analyzed":
+                    if analysis_result.get("status") != "analyzed":
+                        analysis_result["validation"] = {"status": "skipped", "passed": False, "violations": []}
+                        events.append(_ndjson({"event": "segment_error", "segment_id": seg_id, "message": "analysis_failed"}))
+                        return {"analysis_result": analysis_result, "events": events, "emit_segment_done": True}
+
                     data = analysis_result.get("analysis_data") or {}
 
                     # Cross-segment wall-count inference: as soon as we have a floor plan + a MAMAD reference,
                     # infer the TOTAL external wall count and inject it into segments that don't have it.
                     if isinstance(data, dict):
-                        analysis_candidates.append(
-                            SegmentCandidate(
-                                segment_id=str(segment.get("segment_id")),
-                                blob_url=str(segment.get("blob_url")),
-                                segment_type=str(segment.get("type")),
-                                description=str(segment.get("description") or ""),
-                                analysis_data=data,
-                            )
+                        candidate = SegmentCandidate(
+                            segment_id=str(segment.get("segment_id")),
+                            blob_url=str(segment.get("blob_url")),
+                            segment_type=str(segment.get("type")),
+                            description=str(segment.get("description") or ""),
+                            analysis_data=data,
                         )
+                    else:
+                        candidate = None
 
-                    if external_wall_ctx is None and analysis_candidates:
-                        floor_plan = select_floor_plan_candidate(analysis_candidates)
-                        mamad_ref = select_mamad_reference_candidate(analysis_candidates)
-                        if floor_plan and mamad_ref and floor_plan.segment_id != mamad_ref.segment_id:
+                    async with external_wall_lock:
+                        analysis_results_by_id[str(seg_id)] = analysis_result
+                        if candidate is not None:
+                            analysis_candidates.append(candidate)
+
+                        if external_wall_ctx is None and analysis_candidates:
+                            floor_plan = select_floor_plan_candidate(analysis_candidates)
+                            mamad_ref = select_mamad_reference_candidate(analysis_candidates)
+                            if floor_plan and mamad_ref and floor_plan.segment_id != mamad_ref.segment_id:
+                                try:
+                                    inferred = await infer_external_wall_context(
+                                        analyzer=analyzer,
+                                        floor_plan=floor_plan,
+                                        mamad_reference=mamad_ref,
+                                    )
+                                    if isinstance(inferred, dict) and inferred.get("external_wall_count") is not None:
+                                        external_wall_ctx = inferred
+                                except Exception as e:
+                                    logger.info(
+                                        "External wall count inference failed; continuing without it",
+                                        error=str(e),
+                                    )
+
+                        if (
+                            external_wall_ctx
+                            and isinstance(external_wall_ctx, dict)
+                            and external_wall_ctx.get("external_wall_count") is not None
+                        ):
+                            # Inject into all completed analysis results so far.
                             try:
-                                external_wall_ctx = await infer_external_wall_context(
-                                    analyzer=analyzer,
-                                    floor_plan=floor_plan,
-                                    mamad_reference=mamad_ref,
-                                )
+                                for _seg_id, _res in list(analysis_results_by_id.items()):
+                                    if not isinstance(_res.get("analysis_data"), dict):
+                                        continue
+                                    inject_external_wall_count(
+                                        analyzed_segments=[_res],
+                                        external_wall_count=int(external_wall_ctx.get("external_wall_count")),
+                                        context=external_wall_ctx,
+                                    )
                             except Exception as e:
                                 logger.info(
-                                    "External wall count inference failed; continuing without it",
+                                    "External wall count injection failed; continuing without it",
                                     error=str(e),
                                 )
 
-                    if (
-                        external_wall_ctx
-                        and isinstance(external_wall_ctx, dict)
-                        and isinstance(analysis_result.get("analysis_data"), dict)
-                        and external_wall_ctx.get("external_wall_count") is not None
-                    ):
-                        inject_external_wall_count(
-                            analyzed_segments=[analysis_result],
-                            external_wall_count=int(external_wall_ctx.get("external_wall_count")),
-                            context=external_wall_ctx,
-                        )
                     classification = data.get("classification", {}) if isinstance(data, dict) else {}
                     primary_category = str(classification.get("primary_category") or "")
-                    secondary_categories = classification.get("secondary_categories") if isinstance(classification.get("secondary_categories"), list) else []
+                    secondary_categories = (
+                        classification.get("secondary_categories")
+                        if isinstance(classification.get("secondary_categories"), list)
+                        else []
+                    )
                     cat_joined = "|".join([primary_category] + [str(x) for x in secondary_categories])
                     cat_upper = cat_joined.upper()
-                    yield _ndjson(
-                        {
-                            "event": "analysis_done",
-                            "segment_id": seg_id,
-                            "text_items": len(data.get("text_items", []) or []),
-                            "dimensions": len(data.get("dimensions", []) or []),
-                            "structural_elements": len(data.get("structural_elements", []) or []),
-                            "tokens_used": data.get("tokens_used"),
-                        }
+
+                    events.append(
+                        _ndjson(
+                            {
+                                "event": "analysis_done",
+                                "segment_id": seg_id,
+                                "text_items": len(data.get("text_items", []) or []) if isinstance(data, dict) else 0,
+                                "dimensions": len(data.get("dimensions", []) or []) if isinstance(data, dict) else 0,
+                                "structural_elements": len(data.get("structural_elements", []) or [])
+                                if isinstance(data, dict)
+                                else 0,
+                                "tokens_used": data.get("tokens_used") if isinstance(data, dict) else None,
+                            }
+                        )
                     )
 
                     # Emit a user-facing (non-CoT) summary to display in real time.
                     evidence_list = classification.get("evidence") if isinstance(classification, dict) else None
-                    yield _ndjson(
-                        {
-                            "event": "analysis_summary",
-                            "segment_id": seg_id,
-                            "primary_category": primary_category,
-                            "description_he": classification.get("description") if isinstance(classification, dict) else None,
-                            "explanation_he": classification.get("explanation_he") if isinstance(classification, dict) else None,
-                            "relevant_requirements": classification.get("relevant_requirements") if isinstance(classification, dict) else None,
-                            "evidence": [e for e in (evidence_list or []) if isinstance(e, str) and e.strip()][:4],
-                        }
+                    events.append(
+                        _ndjson(
+                            {
+                                "event": "analysis_summary",
+                                "segment_id": seg_id,
+                                "primary_category": primary_category,
+                                "description_he": classification.get("description")
+                                if isinstance(classification, dict)
+                                else None,
+                                "explanation_he": classification.get("explanation_he")
+                                if isinstance(classification, dict)
+                                else None,
+                                "relevant_requirements": classification.get("relevant_requirements")
+                                if isinstance(classification, dict)
+                                else None,
+                                "evidence": [e for e in (evidence_list or []) if isinstance(e, str) and e.strip()][:4],
+                            }
+                        )
                     )
 
                     if ("doors" in effective_check_groups) or ("DOOR_DETAILS" in cat_upper):
-                        yield _ndjson({"event": "door_focus_start", "segment_id": seg_id})
+                        events.append(_ndjson({"event": "door_focus_start", "segment_id": seg_id}))
                         try:
                             focus = await analyzer.extract_door_spacing(
                                 segment_id=seg_id,
@@ -1032,7 +1109,12 @@ async def validate_segments_stream(request: SegmentValidationRequest):
                                     doors = focus_payload.get("doors")
                                     if isinstance(doors, list):
                                         door_count = len([d for d in doors if isinstance(d, dict)])
-                                        confidences = [d.get("confidence") for d in doors if isinstance(d, dict) and isinstance(d.get("confidence"), (int, float))]
+                                        confidences = [
+                                            d.get("confidence")
+                                            for d in doors
+                                            if isinstance(d, dict)
+                                            and isinstance(d.get("confidence"), (int, float))
+                                        ]
                                         best_conf = max(confidences) if confidences else None
 
                                         for d in doors:
@@ -1089,13 +1171,15 @@ async def validate_segments_stream(request: SegmentValidationRequest):
 
                                 analysis_result["analysis_data"] = base
 
-                            yield _ndjson(
-                                {
-                                    "event": "door_focus_done",
-                                    "segment_id": seg_id,
-                                    "doors_found": door_count,
-                                    "best_confidence": best_conf,
-                                }
+                            events.append(
+                                _ndjson(
+                                    {
+                                        "event": "door_focus_done",
+                                        "segment_id": seg_id,
+                                        "doors_found": door_count,
+                                        "best_confidence": best_conf,
+                                    }
+                                )
                             )
 
                             # Emit compact best-door summary for UX.
@@ -1114,28 +1198,32 @@ async def validate_segments_stream(request: SegmentValidationRequest):
                                         evidence = [e for e in evs if isinstance(e, str) and e.strip()][:4]
 
                             if isinstance(best_door, dict):
-                                yield _ndjson(
-                                    {
-                                        "event": "door_focus_summary",
-                                        "segment_id": seg_id,
-                                        "internal_clearance_cm": best_door.get("internal_clearance_cm"),
-                                        "external_clearance_cm": best_door.get("external_clearance_cm"),
-                                        "confidence": best_door.get("confidence"),
-                                        "inside_outside_hint": inside_outside_hint,
-                                        "evidence": evidence,
-                                    }
+                                events.append(
+                                    _ndjson(
+                                        {
+                                            "event": "door_focus_summary",
+                                            "segment_id": seg_id,
+                                            "internal_clearance_cm": best_door.get("internal_clearance_cm"),
+                                            "external_clearance_cm": best_door.get("external_clearance_cm"),
+                                            "confidence": best_door.get("confidence"),
+                                            "inside_outside_hint": inside_outside_hint,
+                                            "evidence": evidence,
+                                        }
+                                    )
                                 )
                         except Exception as e:
-                            yield _ndjson(
-                                {
-                                    "event": "door_focus_error",
-                                    "segment_id": seg_id,
-                                    "message": str(e),
-                                }
+                            events.append(
+                                _ndjson(
+                                    {
+                                        "event": "door_focus_error",
+                                        "segment_id": seg_id,
+                                        "message": str(e),
+                                    }
+                                )
                             )
 
                     if ("walls" in effective_check_groups) or ("WALL_SECTION" in cat_upper):
-                        yield _ndjson({"event": "wall_focus_start", "segment_id": seg_id})
+                        events.append(_ndjson({"event": "wall_focus_start", "segment_id": seg_id}))
                         try:
                             wall_focus = await analyzer.extract_wall_thickness(
                                 segment_id=seg_id,
@@ -1145,6 +1233,7 @@ async def validate_segments_stream(request: SegmentValidationRequest):
                             )
 
                             base = analysis_result.get("analysis_data") or {}
+                            wall_count = 0
                             if isinstance(base, dict) and isinstance(wall_focus, dict):
                                 base.setdefault("wall_thickness_focus", wall_focus.get("wall_thickness_focus"))
                                 if wall_focus.get("wall_roi"):
@@ -1154,7 +1243,6 @@ async def validate_segments_stream(request: SegmentValidationRequest):
                                 base.setdefault("text_items", [])
 
                                 payload = wall_focus.get("wall_thickness_focus")
-                                wall_count = 0
                                 if isinstance(payload, dict) and isinstance(payload.get("walls"), list):
                                     for w in payload.get("walls"):
                                         if not isinstance(w, dict):
@@ -1191,12 +1279,12 @@ async def validate_segments_stream(request: SegmentValidationRequest):
                                                     )
                                 analysis_result["analysis_data"] = base
 
-                            yield _ndjson({"event": "wall_focus_done", "segment_id": seg_id, "walls_found": wall_count})
+                            events.append(_ndjson({"event": "wall_focus_done", "segment_id": seg_id, "walls_found": wall_count}))
                         except Exception as e:
-                            yield _ndjson({"event": "wall_focus_error", "segment_id": seg_id, "message": str(e)})
+                            events.append(_ndjson({"event": "wall_focus_error", "segment_id": seg_id, "message": str(e)}))
 
                     if ("heights" in effective_check_groups) or ("SECTIONS" in cat_upper) or ("ROOM_LAYOUT" in cat_upper):
-                        yield _ndjson({"event": "height_focus_start", "segment_id": seg_id})
+                        events.append(_ndjson({"event": "height_focus_start", "segment_id": seg_id}))
                         try:
                             height_focus = await analyzer.extract_room_height(
                                 segment_id=seg_id,
@@ -1205,6 +1293,7 @@ async def validate_segments_stream(request: SegmentValidationRequest):
                                 segment_description=segment.get("description", ""),
                             )
                             base = analysis_result.get("analysis_data") or {}
+                            height_count = 0
                             if isinstance(base, dict) and isinstance(height_focus, dict):
                                 base.setdefault("room_height_focus", height_focus.get("room_height_focus"))
                                 if height_focus.get("height_roi"):
@@ -1213,7 +1302,6 @@ async def validate_segments_stream(request: SegmentValidationRequest):
                                 base.setdefault("text_items", [])
 
                                 payload = height_focus.get("room_height_focus")
-                                height_count = 0
                                 if isinstance(payload, dict) and isinstance(payload.get("heights"), list):
                                     for h in payload.get("heights"):
                                         if not isinstance(h, dict):
@@ -1241,12 +1329,12 @@ async def validate_segments_stream(request: SegmentValidationRequest):
                                                     )
                                 analysis_result["analysis_data"] = base
 
-                            yield _ndjson({"event": "height_focus_done", "segment_id": seg_id, "heights_found": height_count})
+                            events.append(_ndjson({"event": "height_focus_done", "segment_id": seg_id, "heights_found": height_count}))
                         except Exception as e:
-                            yield _ndjson({"event": "height_focus_error", "segment_id": seg_id, "message": str(e)})
+                            events.append(_ndjson({"event": "height_focus_error", "segment_id": seg_id, "message": str(e)}))
 
                     if ("windows" in effective_check_groups) or ("WINDOW_DETAILS" in cat_upper):
-                        yield _ndjson({"event": "window_focus_start", "segment_id": seg_id})
+                        events.append(_ndjson({"event": "window_focus_start", "segment_id": seg_id}))
                         try:
                             window_focus = await analyzer.extract_window_spacing(
                                 segment_id=seg_id,
@@ -1255,6 +1343,7 @@ async def validate_segments_stream(request: SegmentValidationRequest):
                                 segment_description=segment.get("description", ""),
                             )
                             base = analysis_result.get("analysis_data") or {}
+                            evidence_count = 0
                             if isinstance(base, dict) and isinstance(window_focus, dict):
                                 base.setdefault("window_spacing_focus", window_focus.get("window_spacing_focus"))
                                 if window_focus.get("window_roi"):
@@ -1263,7 +1352,6 @@ async def validate_segments_stream(request: SegmentValidationRequest):
                                 base.setdefault("dimensions", [])
 
                                 payload = window_focus.get("window_spacing_focus")
-                                evidence_count = 0
                                 if isinstance(payload, dict):
                                     ev_texts = payload.get("evidence_texts")
                                     if isinstance(ev_texts, list):
@@ -1322,12 +1410,12 @@ async def validate_segments_stream(request: SegmentValidationRequest):
                                                 )
                                 analysis_result["analysis_data"] = base
 
-                            yield _ndjson({"event": "window_focus_done", "segment_id": seg_id, "evidence_texts": evidence_count})
+                            events.append(_ndjson({"event": "window_focus_done", "segment_id": seg_id, "evidence_texts": evidence_count}))
                         except Exception as e:
-                            yield _ndjson({"event": "window_focus_error", "segment_id": seg_id, "message": str(e)})
+                            events.append(_ndjson({"event": "window_focus_error", "segment_id": seg_id, "message": str(e)}))
 
                     if ("materials" in effective_check_groups) or ("MATERIALS_SPECS" in cat_upper):
-                        yield _ndjson({"event": "materials_focus_start", "segment_id": seg_id})
+                        events.append(_ndjson({"event": "materials_focus_start", "segment_id": seg_id}))
                         try:
                             materials_focus = await analyzer.extract_materials_specs(
                                 segment_id=seg_id,
@@ -1367,12 +1455,12 @@ async def validate_segments_stream(request: SegmentValidationRequest):
                                                     )
                                 analysis_result["analysis_data"] = base
 
-                            yield _ndjson({"event": "materials_focus_done", "segment_id": seg_id, "materials_found": added})
+                            events.append(_ndjson({"event": "materials_focus_done", "segment_id": seg_id, "materials_found": added}))
                         except Exception as e:
-                            yield _ndjson({"event": "materials_focus_error", "segment_id": seg_id, "message": str(e)})
+                            events.append(_ndjson({"event": "materials_focus_error", "segment_id": seg_id, "message": str(e)}))
 
                     if ("rebar" in effective_check_groups) or ("REBAR_DETAILS" in cat_upper):
-                        yield _ndjson({"event": "rebar_focus_start", "segment_id": seg_id})
+                        events.append(_ndjson({"event": "rebar_focus_start", "segment_id": seg_id}))
                         try:
                             rebar_focus = await analyzer.extract_rebar_specs(
                                 segment_id=seg_id,
@@ -1416,12 +1504,12 @@ async def validate_segments_stream(request: SegmentValidationRequest):
                                                     )
                                 analysis_result["analysis_data"] = base
 
-                            yield _ndjson({"event": "rebar_focus_done", "segment_id": seg_id, "rebars_found": added})
+                            events.append(_ndjson({"event": "rebar_focus_done", "segment_id": seg_id, "rebars_found": added}))
                         except Exception as e:
-                            yield _ndjson({"event": "rebar_focus_error", "segment_id": seg_id, "message": str(e)})
+                            events.append(_ndjson({"event": "rebar_focus_error", "segment_id": seg_id, "message": str(e)}))
 
                     if ("notes" in effective_check_groups) or ("GENERAL_NOTES" in cat_upper):
-                        yield _ndjson({"event": "notes_focus_start", "segment_id": seg_id})
+                        events.append(_ndjson({"event": "notes_focus_start", "segment_id": seg_id}))
                         try:
                             notes_focus = await analyzer.extract_general_notes(
                                 segment_id=seg_id,
@@ -1446,10 +1534,51 @@ async def validate_segments_stream(request: SegmentValidationRequest):
                                             )
                                 analysis_result["analysis_data"] = base
 
-                            yield _ndjson({"event": "notes_focus_done", "segment_id": seg_id, "evidence_texts": added})
+                            events.append(_ndjson({"event": "notes_focus_done", "segment_id": seg_id, "evidence_texts": added}))
                         except Exception as e:
-                            yield _ndjson({"event": "notes_focus_error", "segment_id": seg_id, "message": str(e)})
+                            events.append(_ndjson({"event": "notes_focus_error", "segment_id": seg_id, "message": str(e)}))
 
+                    return {"analysis_result": analysis_result, "events": events, "emit_segment_done": True}
+                except Exception as e:
+                    logger.error("Failed to analyze segment (stream)", segment_id=seg_id, error=str(e))
+                    analysis_result = {
+                        "segment_id": seg_id,
+                        "status": "error",
+                        "error": str(e),
+                        "validation": {"status": "error", "passed": False, "violations": []},
+                    }
+                    events.append(_ndjson({"event": "segment_error", "segment_id": seg_id, "message": str(e)}))
+                    # Preserve legacy behavior: on exception we do NOT emit segment_done.
+                    return {"analysis_result": analysis_result, "events": events, "emit_segment_done": False}
+
+        # Kick off analysis+focus for all segments concurrently (bounded).
+        prep_tasks: Dict[str, asyncio.Task] = {}
+        for segment in approved_segments:
+            seg_id = str(segment.get("segment_id"))
+            prep_tasks[seg_id] = asyncio.create_task(_prepare_segment(segment))
+
+        try:
+            for idx, segment in enumerate(approved_segments, start=1):
+                seg_id = segment.get("segment_id")
+                yield _ndjson(
+                    {
+                        "event": "segment_start",
+                        "current": idx,
+                        "total": total,
+                        "segment_id": seg_id,
+                        "segment_type": segment.get("type"),
+                        "description": segment.get("description"),
+                    }
+                )
+
+                yield _ndjson({"event": "analysis_start", "segment_id": seg_id})
+
+                prepared = await prep_tasks[str(seg_id)]
+                analysis_result = prepared.get("analysis_result")
+                for ev in prepared.get("events") or []:
+                    yield ev
+
+                if isinstance(analysis_result, dict) and analysis_result.get("status") == "analyzed":
                     yield _ndjson({"event": "validation_start", "segment_id": seg_id})
                     validation_result = validator.validate_segment(
                         analysis_result.get("analysis_data", {}),
@@ -1492,23 +1621,16 @@ async def validate_segments_stream(request: SegmentValidationRequest):
                             else None,
                         }
                     )
-                else:
-                    analysis_result["validation"] = {"status": "skipped", "passed": False, "violations": []}
-                    yield _ndjson({"event": "segment_error", "segment_id": seg_id, "message": "analysis_failed"})
 
-                analyzed_segments.append(analysis_result)
-                yield _ndjson({"event": "segment_done", "current": idx, "total": total, "segment_id": seg_id})
-            except Exception as e:
-                logger.error("Failed to analyze segment (stream)", segment_id=seg_id, error=str(e))
-                analyzed_segments.append(
-                    {
-                        "segment_id": seg_id,
-                        "status": "error",
-                        "error": str(e),
-                        "validation": {"status": "error", "passed": False, "violations": []},
-                    }
-                )
-                yield _ndjson({"event": "segment_error", "segment_id": seg_id, "message": str(e)})
+                if isinstance(analysis_result, dict):
+                    analyzed_segments.append(analysis_result)
+
+                if prepared.get("emit_segment_done") is True:
+                    yield _ndjson({"event": "segment_done", "current": idx, "total": total, "segment_id": seg_id})
+        finally:
+            for t in prep_tasks.values():
+                if not t.done():
+                    t.cancel()
 
         # 4. Store results
         validation_id = f"val-{uuid.uuid4()}"

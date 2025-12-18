@@ -2,6 +2,7 @@
 import asyncio
 import base64
 import json
+from collections import OrderedDict
 from typing import Dict, Any, Optional, List
 from io import BytesIO
 
@@ -21,6 +22,23 @@ class SegmentAnalyzer:
         """Initialize the segment analyzer."""
         self.openai_client = get_openai_client()
         self.blob_client = get_blob_client()
+
+        # Global throttles (per process) to keep parallel work safe and stable.
+        self._llm_semaphore = asyncio.Semaphore(
+            max(1, int(getattr(settings, "validation_max_concurrent_llm_requests", 4)))
+        )
+        self._download_semaphore = asyncio.Semaphore(
+            max(1, int(getattr(settings, "validation_max_concurrent_downloads", 12)))
+        )
+
+        # Small bounded cache to avoid re-downloading the same segment image multiple
+        # times within the same request (base analysis + multiple focused passes).
+        self._image_cache_max_items = max(
+            0, int(getattr(settings, "segment_image_cache_max_items", 32))
+        )
+        self._image_cache: "OrderedDict[str, bytes]" = OrderedDict()
+        self._image_cache_lock = asyncio.Lock()
+
         logger.info("SegmentAnalyzer initialized")
     
     async def analyze_segment(
@@ -124,6 +142,106 @@ class SegmentAnalyzer:
             cropped.save(buf, format="PNG")
             return buf.getvalue()
 
+    def _resize_image_bytes_max_side(self, *, image_bytes: bytes, max_side_px: int) -> bytes:
+        """Resize image bytes so the larger side is <= max_side_px (keeps aspect ratio)."""
+        if max_side_px <= 0:
+            return image_bytes
+        with Image.open(BytesIO(image_bytes)) as img:
+            width, height = img.size
+            max_side = max(width, height)
+            if max_side <= max_side_px:
+                return image_bytes
+
+            scale = float(max_side_px) / float(max_side)
+            new_w = max(1, int(width * scale))
+            new_h = max(1, int(height * scale))
+            resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+            buf = BytesIO()
+            resized.save(buf, format="PNG")
+            return buf.getvalue()
+
+    async def _locate_mamad_roi_in_floor_plan(
+        self,
+        *,
+        floor_plan_bytes: bytes,
+        mamad_bytes: bytes,
+        floor_plan_description: str,
+        mamad_segment_description: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Try to locate the ממ"ד room ROI in the floor plan as a percent bbox.
+
+        Returns a bbox dict: {x,y,width,height,confidence,notes} in PERCENT (0-100),
+        or None if not found.
+        """
+        # Use a downscaled floor plan for the locator pass to reduce tokens.
+        locator_floor_plan = self._resize_image_bytes_max_side(
+            image_bytes=floor_plan_bytes,
+            max_side_px=2048,
+        )
+
+        prompt_text = f"""You are a strict locator for Israeli architectural plans.
+Return ONLY valid JSON. No markdown. No explanations.
+
+Task: Locate the ממ\"ד (mamad) room in the FLOOR PLAN.
+
+Inputs:
+- Image #1: FLOOR PLAN (may be zoomed-out)
+- Image #2: MAMAD reference/detail crop (helps match geometry/labels)
+
+Floor plan description: {floor_plan_description}
+MAMAD reference description: {mamad_segment_description}
+
+Guidance:
+- The word ממ\"ד / ממד may be very small in the floor plan. If you can read it, use it.
+- If you cannot read the label, try to match the room by geometry / adjacent walls / openings relative to the reference crop.
+- If you are not confident, return null with confidence < 0.5.
+
+Return JSON:
+{{
+  "mamad_roi": {{"x": 0.0, "y": 0.0, "width": 0.0, "height": 0.0, "confidence": 0.0, "notes": "brief"}},
+  "evidence": ["short evidence strings"]
+}}"""
+
+        extracted = await self._run_focused_extraction(
+            image_bytes_list=[locator_floor_plan, mamad_bytes],
+            prompt_text=prompt_text,
+        )
+        if not isinstance(extracted, dict):
+            return None
+        roi = extracted.get("mamad_roi")
+        if not isinstance(roi, dict):
+            return None
+
+        try:
+            x = float(roi.get("x"))
+            y = float(roi.get("y"))
+            w = float(roi.get("width"))
+            h = float(roi.get("height"))
+            conf = float(roi.get("confidence") or 0.0)
+        except Exception:
+            return None
+
+        if conf < 0.45:
+            return None
+        if w <= 0 or h <= 0:
+            return None
+        if not (0.0 <= x <= 100.0 and 0.0 <= y <= 100.0 and 0.0 < w <= 100.0 and 0.0 < h <= 100.0):
+            return None
+        # Clamp bbox to image bounds
+        if x + w > 100.0:
+            w = max(0.1, 100.0 - x)
+        if y + h > 100.0:
+            h = max(0.1, 100.0 - y)
+
+        return {
+            "x": x,
+            "y": y,
+            "width": w,
+            "height": h,
+            "confidence": conf,
+            "notes": str(roi.get("notes") or ""),
+        }
+
     def _build_user_message_with_images(
         self,
         *,
@@ -148,19 +266,20 @@ class SegmentAnalyzer:
         prompt_text: str,
     ) -> Dict[str, Any]:
         """Run a focused GPT pass and parse JSON response."""
-        response = await asyncio.to_thread(
-            self.openai_client.chat_completions_create,
-            model=settings.azure_openai_deployment_name,
-            messages=[
-                {
-                    "role": "user",
-                    "content": self._build_user_message_with_images(
-                        prompt_text=prompt_text,
-                        image_bytes_list=image_bytes_list,
-                    ),
-                }
-            ],
-        )
+        async with self._llm_semaphore:
+            response = await asyncio.to_thread(
+                self.openai_client.chat_completions_create,
+                model=settings.azure_openai_deployment_name,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": self._build_user_message_with_images(
+                            prompt_text=prompt_text,
+                            image_bytes_list=image_bytes_list,
+                        ),
+                    }
+                ],
+            )
         content = response.choices[0].message.content
         extracted = self._parse_gpt_response(content)
         if response.usage:
@@ -607,7 +726,78 @@ Return JSON:
         floor_plan_bytes = await self._download_segment_image(floor_plan_blob_url)
         mamad_bytes = await self._download_segment_image(mamad_segment_blob_url)
 
-        prompt_text = f"""You are a strict extractor for Israeli ממ\"ד validation.
+        # Two-step improvement:
+        # 1) Locate MAMAD ROI on a downscaled floor plan using the MAMAD reference.
+        # 2) Crop the ORIGINAL floor plan around that ROI (zoomed context + zoomed detail)
+        #    so small labels ("ממ\"ד") become readable.
+        roi = None
+        try:
+            roi = await self._locate_mamad_roi_in_floor_plan(
+                floor_plan_bytes=floor_plan_bytes,
+                mamad_bytes=mamad_bytes,
+                floor_plan_description=floor_plan_description,
+                mamad_segment_description=mamad_segment_description,
+            )
+        except Exception as e:
+            logger.info("MAMAD ROI locator failed; falling back to single-pass inference", error=str(e))
+            roi = None
+
+        if isinstance(roi, dict):
+            try:
+                detail_crop = self._crop_image_bytes_by_bbox_with_padding(
+                    image_bytes=floor_plan_bytes,
+                    bbox=roi,
+                    pad_ratio=0.35,
+                )
+                context_crop = self._crop_image_bytes_by_bbox_with_padding(
+                    image_bytes=floor_plan_bytes,
+                    bbox=roi,
+                    pad_ratio=1.5,
+                )
+
+                prompt_text = f"""You are a strict extractor for Israeli ממ\"ד validation.
+Return ONLY valid JSON. No markdown. No explanations.
+
+Task: Determine how many walls of the ממ\"ד are EXTERNAL (touch the outside/facade of the building) vs INTERNAL.
+
+Inputs:
+- Image #1: FLOOR PLAN context crop (zoomed around the ממ\"ד area; includes nearby building envelope)
+- Image #2: FLOOR PLAN detail crop (tighter zoom; should make small labels readable)
+- Image #3: MAMAD DETAIL / reference (helps confirm you're looking at the correct room)
+
+Floor plan description: {floor_plan_description}
+MAMAD reference description: {mamad_segment_description}
+
+Rules:
+- External wall = a wall segment of the ממ\"ד that borders the outside/facade (the building envelope) in the floor plan.
+- Internal wall = borders interior spaces (other rooms, corridor, shafts) in the floor plan.
+- Count TOTAL external walls of the ממ\"ד as an integer in [1..4].
+- If you cannot determine confidently from these images, return null and set confidence < 0.6.
+
+Return JSON:
+{{
+  "external_wall_count": null,
+  "internal_wall_count": null,
+  "external_sides_hint": ["left", "right", "top", "bottom"],
+  "confidence": 0.0,
+  "evidence": ["short evidence strings (what you saw)"]
+}}"""
+
+                extracted = await self._run_focused_extraction(
+                    image_bytes_list=[context_crop, detail_crop, mamad_bytes],
+                    prompt_text=prompt_text,
+                )
+            except Exception as e:
+                logger.info(
+                    "High-res ROI inference failed; falling back to single-pass inference",
+                    error=str(e),
+                )
+                extracted = None
+        else:
+            extracted = None
+
+        if extracted is None:
+            prompt_text = f"""You are a strict extractor for Israeli ממ\"ד validation.
 Return ONLY valid JSON. No markdown. No explanations.
 
 Task: Determine how many walls of the ממ\"ד are EXTERNAL (touch the outside/facade of the building) vs INTERNAL.
@@ -634,10 +824,10 @@ Return JSON:
   "evidence": ["short evidence strings (what you saw)"]
 }}"""
 
-        extracted = await self._run_focused_extraction(
-            image_bytes_list=[floor_plan_bytes, mamad_bytes],
-            prompt_text=prompt_text,
-        )
+            extracted = await self._run_focused_extraction(
+                image_bytes_list=[floor_plan_bytes, mamad_bytes],
+                prompt_text=prompt_text,
+            )
         if not isinstance(extracted, dict):
             return {
                 "external_wall_count": None,
@@ -668,9 +858,18 @@ Return JSON:
         Returns:
             Image bytes
         """
-        # NOTE: This runs as part of an async workflow (streaming validation).
-        # `requests.get` is blocking, so run it in a worker thread to avoid
-        # blocking the event loop and to allow streaming events to flush.
+        if not blob_url:
+            raise ValueError("blob_url is required")
+
+        if self._image_cache_max_items > 0:
+            async with self._image_cache_lock:
+                cached = self._image_cache.get(blob_url)
+                if cached is not None:
+                    # LRU refresh
+                    self._image_cache.move_to_end(blob_url)
+                    return cached
+
+        # NOTE: `requests.get` is blocking, so run it in a worker thread.
         import requests
 
         def _get() -> bytes:
@@ -678,7 +877,17 @@ Return JSON:
             response.raise_for_status()
             return response.content
 
-        return await asyncio.to_thread(_get)
+        async with self._download_semaphore:
+            image_bytes = await asyncio.to_thread(_get)
+
+        if self._image_cache_max_items > 0:
+            async with self._image_cache_lock:
+                self._image_cache[blob_url] = image_bytes
+                self._image_cache.move_to_end(blob_url)
+                while len(self._image_cache) > self._image_cache_max_items:
+                    self._image_cache.popitem(last=False)
+
+        return image_bytes
     
     async def _analyze_with_gpt(
         self,
@@ -874,22 +1083,23 @@ Additionally, determine the **VIEW TYPE**:
         # This is a potentially long-running, blocking network call. Run it in a
         # worker thread so the event loop can keep flushing NDJSON stream events.
         try:
-            response = await asyncio.to_thread(
-                self.openai_client.chat_completions_create,
-                model=settings.azure_openai_deployment_name,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": system_prompt + "\n\n" + user_prompt},
-                            {
-                                "type": "image_url",
-                                "image_url": {"url": f"data:image/png;base64,{image_base64}"},
-                            },
-                        ],
-                    }
-                ],
-            )
+            async with self._llm_semaphore:
+                response = await asyncio.to_thread(
+                    self.openai_client.chat_completions_create,
+                    model=settings.azure_openai_deployment_name,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": system_prompt + "\n\n" + user_prompt},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {"url": f"data:image/png;base64,{image_base64}"},
+                                },
+                            ],
+                        }
+                    ],
+                )
             
             content = response.choices[0].message.content
             tokens_used = response.usage.total_tokens if response.usage else 0
