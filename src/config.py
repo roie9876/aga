@@ -64,6 +64,10 @@ class Settings(BaseSettings):
     ocr_languages: str = "heb+eng"
     ocr_psm: int = 6
     ocr_oem: int = 1
+
+    # Preflight LLM settings (signature detection)
+    preflight_llm_signature_max_segments: int = 4
+    preflight_llm_signature_concurrency: int = 4
     
     # Optional Azure Identity
     azure_tenant_id: Optional[str] = None

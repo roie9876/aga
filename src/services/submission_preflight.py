@@ -427,20 +427,35 @@ async def run_submission_preflight(
 
     llm_debug: Dict[str, Any] = {}
     if run_llm_checks and decl_like:
-        # Try LLM on up to 2 likely declaration segments.
-        for seg in decl_like[:2]:
+        # Try LLM on a few likely declaration segments, in parallel.
+        max_segments = max(1, int(getattr(settings, "preflight_llm_signature_max_segments", 4)))
+        max_concurrency = max(1, int(getattr(settings, "preflight_llm_signature_concurrency", 4)))
+        semaphore = asyncio.Semaphore(max_concurrency)
+
+        async def _run_llm(seg: Dict[str, Any]) -> Optional[Tuple[str, _ArtifactSignals]]:
+            seg_id = str(seg.get("segment_id"))
             blob_url = str(seg.get("blob_url") or "")
-            img = await _download_image_bytes(blob_url)
-            if not img:
+            async with semaphore:
+                img = await _download_image_bytes(blob_url)
+                if not img:
+                    return None
+                signals = await _llm_detect_artifact(image_bytes=img, hint_text=_segment_text_blob(seg))
+                if not signals:
+                    return None
+                return seg_id, signals
+
+        candidates = decl_like[:max_segments]
+        results = await asyncio.gather(*[_run_llm(seg) for seg in candidates])
+        for res in results:
+            if not res:
                 continue
-            signals = await _llm_detect_artifact(image_bytes=img, hint_text=_segment_text_blob(seg))
-            if signals:
-                llm_debug[str(seg.get("segment_id"))] = {
-                    "artifact_type": signals.artifact_type,
-                    "signature_block_present": signals.signature_block_present,
-                    "signature_roles": signals.signature_roles,
-                    "detected_scale": signals.detected_scale,
-                }
+            seg_id, signals = res
+            llm_debug[seg_id] = {
+                "artifact_type": signals.artifact_type,
+                "signature_block_present": signals.signature_block_present,
+                "signature_roles": signals.signature_roles,
+                "detected_scale": signals.detected_scale,
+            }
 
     signature_present = any(
         isinstance(v, dict) and v.get("signature_block_present") is True for v in llm_debug.values()

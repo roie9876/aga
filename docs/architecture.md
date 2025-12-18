@@ -25,6 +25,18 @@ The Mamad Validation App is a FastAPI-based microservice that validates Israeli 
 │  │  - /api/v1/decomposition/analyze (Upload & decompose)│  │
 │  │  - /api/v1/decomposition/{id} (Get decomposition)    │  │
 │  │  - /api/v1/decomposition/{id}/segments/analyze (Analyze segments)│  │
+│  │  - /api/v1/decomposition/{id}/segments/analyze-stream (Analyze segments, streaming NDJSON progress)│  │
+### Realtime Segment Analysis Progress (Preflight Stage)
+
+To provide user feedback during the preflight (submission completeness) stage, the backend exposes a streaming endpoint:
+
+- `POST /api/v1/decomposition/{id}/segments/analyze-stream` (NDJSON)
+   - Streams per-segment progress events: which segment is being analyzed, status (pending/running/done/error), and completion.
+   - Enables the frontend to show a live progress list (X/Y), status per segment, and click-to-preview segment images while preflight is running.
+   - Bounded concurrency and per-segment timeout are enforced as in the regular analyze endpoint.
+
+Frontend renders:
+- “ניתוח סגמנטים בזמן אמת” box with progress bar/list, status per seg, and clickable segment IDs for preview.
 │  │  - /api/v1/preflight (Submission completeness)        │  │
 │  │  - /api/v1/segments/validate-segments (Validate segs)│  │
 │  │  - /api/v1/segments/validate-segments-stream (NDJSON)│  │
