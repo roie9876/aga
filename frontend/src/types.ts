@@ -118,6 +118,25 @@ export interface ExtractedData {
   reasoning?: string;
 }
 
+// Preflight (submission completeness)
+export type PreflightStatus = 'passed' | 'failed' | 'warning' | 'not_applicable' | 'error';
+
+export interface PreflightCheckResult {
+  check_id: string;
+  title: string;
+  explanation?: string;
+  source_pages: number[];
+  status: PreflightStatus;
+  details: string;
+  evidence_segment_ids: string[];
+}
+
+export interface SubmissionPreflightResponse {
+  passed: boolean;
+  summary: string;
+  checks: PreflightCheckResult[];
+}
+
 export interface ValidationResponse {
   validation_id: string;
   project_id: string;

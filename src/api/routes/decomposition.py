@@ -1,13 +1,15 @@
 """API endpoints for plan decomposition."""
+import asyncio
 import uuid
 import tempfile
 import os
+import json
 from datetime import datetime
 from pathlib import Path
 from io import BytesIO
 import anyio
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from typing import Optional
 
 from src.models.decomposition import (
@@ -558,27 +560,76 @@ async def analyze_decomposition_segments(
         analyzer = SegmentAnalyzer()
         segment_ids = set(request.segment_ids)
 
+        # This endpoint can be called with many segments (e.g., when uploading a folder of
+        # already-cropped images). Running GPT analysis strictly sequentially can take a
+        # very long time, so we parallelize with a small concurrency limit.
+        analysis_concurrency = max(1, int(os.getenv("SEGMENT_ANALYSIS_CONCURRENCY", "3")))
+        analysis_timeout_seconds = max(30, int(os.getenv("SEGMENT_ANALYSIS_TIMEOUT_SECONDS", "300")))
+        limiter = anyio.CapacityLimiter(analysis_concurrency)
+        update_lock = anyio.Lock()
         updated = 0
-        for seg_doc in decomp_data.get("segments", []):
-            seg_id = seg_doc.get("segment_id")
-            if not seg_id or seg_id not in segment_ids:
-                continue
 
-            result = await analyzer.analyze_segment(
-                segment_id=seg_id,
-                segment_blob_url=seg_doc.get("blob_url", ""),
-                segment_type=str(seg_doc.get("type", "unknown")),
-                segment_description=seg_doc.get("description", ""),
-            )
+        async def _analyze_one(seg_doc: dict) -> None:
+            nonlocal updated
+            seg_id = seg_doc.get("segment_id")
+            if not seg_id:
+                return
+
+            async with limiter:
+                try:
+                    with anyio.fail_after(analysis_timeout_seconds):
+                        result = await analyzer.analyze_segment(
+                            segment_id=seg_id,
+                            segment_blob_url=seg_doc.get("blob_url", ""),
+                            segment_type=str(seg_doc.get("type", "unknown")),
+                            segment_description=seg_doc.get("description", ""),
+                        )
+                except TimeoutError:
+                    result = {"status": "error", "error": f"Analysis timeout אחרי {analysis_timeout_seconds} שניות"}
+                except asyncio.CancelledError:
+                    # Preserve cancellation semantics
+                    raise
+                except Exception as e:
+                    result = {"status": "error", "error": str(e)}
 
             if result.get("status") == "analyzed" and result.get("analysis_data"):
                 seg_doc["analysis_data"] = result.get("analysis_data")
-                updated += 1
+
+                # Best-effort: if the analyzer inferred a primary drawing function,
+                # persist it into the segment `type` so preflight/validation can use it.
+                try:
+                    ad = seg_doc.get("analysis_data")
+                    summary = ad.get("summary") if isinstance(ad, dict) else None
+                    primary_fn = summary.get("primary_function") if isinstance(summary, dict) else None
+                    if isinstance(primary_fn, str):
+                        primary_fn_norm = primary_fn.strip().lower()
+                        if primary_fn_norm in {
+                            SegmentType.FLOOR_PLAN.value,
+                            SegmentType.SECTION.value,
+                            SegmentType.DETAIL.value,
+                            SegmentType.ELEVATION.value,
+                        }:
+                            current = str(seg_doc.get("type") or "unknown").strip().lower()
+                            if current == SegmentType.UNKNOWN.value:
+                                seg_doc["type"] = primary_fn_norm
+                except Exception:
+                    # Best-effort only: do not fail analysis if type mapping fails.
+                    pass
+
+                async with update_lock:
+                    updated += 1
             else:
                 seg_doc["analysis_data"] = {
                     "status": "error",
                     "error": result.get("error") or "Analysis failed",
                 }
+
+        async with anyio.create_task_group() as tg:
+            for seg_doc in decomp_data.get("segments", []):
+                seg_id = seg_doc.get("segment_id")
+                if not seg_id or seg_id not in segment_ids:
+                    continue
+                tg.start_soon(_analyze_one, seg_doc)
 
         decomp_data["updated_at"] = datetime.utcnow().isoformat()
         if updated > 0:
@@ -606,6 +657,170 @@ async def analyze_decomposition_segments(
             status_code=500,
             detail=f"שגיאה בניתוח סגמנטים: {str(e)}",
         )
+
+
+@router.post("/{decomposition_id}/segments/analyze-stream")
+async def analyze_decomposition_segments_stream(
+    decomposition_id: str,
+    request: AnalyzeSegmentsRequest,
+):
+    """Stream segment analysis progress as NDJSON.
+
+    This endpoint is designed for realtime UX feedback (e.g., preflight stage),
+    showing which segments are currently being analyzed and when they complete.
+
+    Events are NDJSON lines with a `type` field.
+    """
+
+    logger.info(
+        "Analyzing decomposition segments (stream)",
+        decomposition_id=decomposition_id,
+        segment_count=len(request.segment_ids),
+    )
+
+    async def _ndjson_streamer():
+        cosmos_client = get_cosmos_client()
+        query = """
+            SELECT * FROM c
+            WHERE c.id = @decomposition_id
+            AND c.type = 'decomposition'
+        """
+
+        items = await cosmos_client.query_items(
+            query=query,
+            parameters=[{"name": "@decomposition_id", "value": decomposition_id}],
+        )
+
+        if not items:
+            # Stream a terminal error event instead of raising (better UX).
+            yield json.dumps({"type": "error", "message": "פירוק לא נמצא"}, ensure_ascii=False) + "\n"
+            return
+
+        decomp_data = items[0]
+        analyzer = SegmentAnalyzer()
+        segment_ids = set(request.segment_ids or [])
+
+        targets: list[dict] = []
+        for seg_doc in decomp_data.get("segments", []):
+            seg_id = seg_doc.get("segment_id")
+            if not seg_id or (segment_ids and seg_id not in segment_ids):
+                continue
+            targets.append(seg_doc)
+
+        total = len(targets)
+        yield json.dumps({"type": "begin", "total": total}, ensure_ascii=False) + "\n"
+
+        analysis_concurrency = max(1, int(os.getenv("SEGMENT_ANALYSIS_CONCURRENCY", "3")))
+        analysis_timeout_seconds = max(30, int(os.getenv("SEGMENT_ANALYSIS_TIMEOUT_SECONDS", "300")))
+        limiter = anyio.CapacityLimiter(analysis_concurrency)
+        update_lock = anyio.Lock()
+
+        send_stream, receive_stream = anyio.create_memory_object_stream(1000)
+
+        updated = 0
+        errors = 0
+
+        async def _analyze_one(seg_doc: dict) -> None:
+            nonlocal updated, errors
+            seg_id = seg_doc.get("segment_id")
+            if not seg_id:
+                return
+
+            await send_stream.send({"type": "segment_start", "segment_id": seg_id})
+
+            async with limiter:
+                try:
+                    with anyio.fail_after(analysis_timeout_seconds):
+                        result = await analyzer.analyze_segment(
+                            segment_id=seg_id,
+                            segment_blob_url=seg_doc.get("blob_url", ""),
+                            segment_type=str(seg_doc.get("type", "unknown")),
+                            segment_description=seg_doc.get("description", ""),
+                        )
+                except TimeoutError:
+                    result = {"status": "error", "error": f"Analysis timeout אחרי {analysis_timeout_seconds} שניות"}
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    result = {"status": "error", "error": str(e)}
+
+            inferred_type: Optional[str] = None
+            if result.get("status") == "analyzed" and result.get("analysis_data"):
+                seg_doc["analysis_data"] = result.get("analysis_data")
+
+                # Best-effort: persist inferred primary function into segment type.
+                try:
+                    ad = seg_doc.get("analysis_data")
+                    summary = ad.get("summary") if isinstance(ad, dict) else None
+                    primary_fn = summary.get("primary_function") if isinstance(summary, dict) else None
+                    if isinstance(primary_fn, str):
+                        primary_fn_norm = primary_fn.strip().lower()
+                        if primary_fn_norm in {
+                            SegmentType.FLOOR_PLAN.value,
+                            SegmentType.SECTION.value,
+                            SegmentType.DETAIL.value,
+                            SegmentType.ELEVATION.value,
+                        }:
+                            current = str(seg_doc.get("type") or "unknown").strip().lower()
+                            if current == SegmentType.UNKNOWN.value:
+                                seg_doc["type"] = primary_fn_norm
+                                inferred_type = primary_fn_norm
+                except Exception:
+                    pass
+
+                async with update_lock:
+                    updated += 1
+            else:
+                seg_doc["analysis_data"] = {
+                    "status": "error",
+                    "error": result.get("error") or "Analysis failed",
+                }
+                async with update_lock:
+                    errors += 1
+
+            await send_stream.send(
+                {
+                    "type": "segment_done",
+                    "segment_id": seg_id,
+                    "status": "ok" if result.get("status") == "analyzed" else "error",
+                    "error": result.get("error") if result.get("status") != "analyzed" else None,
+                    "inferred_type": inferred_type,
+                }
+            )
+
+        async def _producer() -> None:
+            try:
+                async with anyio.create_task_group() as tg:
+                    for seg_doc in targets:
+                        tg.start_soon(_analyze_one, seg_doc)
+            finally:
+                await send_stream.aclose()
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(_producer)
+            async with receive_stream:
+                async for evt in receive_stream:
+                    yield json.dumps(evt, ensure_ascii=False) + "\n"
+
+        # Persist after streaming per-segment completions.
+        decomp_data["updated_at"] = datetime.utcnow().isoformat()
+        if updated > 0:
+            decomp_data["status"] = DecompositionStatus.REVIEW_NEEDED.value
+        await cosmos_client.upsert_item(decomp_data)
+
+        yield json.dumps(
+            {"type": "complete", "total": total, "updated_segments": updated, "errors": errors},
+            ensure_ascii=False,
+        ) + "\n"
+
+    return StreamingResponse(
+        _ndjson_streamer(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-store, max-age=0",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.patch("/{decomposition_id}/segments/{segment_id}")

@@ -1,6 +1,6 @@
 # Project Status - Mamad Validation App
 
-**Last Updated**: December 16, 2025  
+**Last Updated**: December 18, 2025  
 **Current Phase**: End-to-End Validation + Coverage Transparency (Testing Phase)  
 **Target Release**: Q1 2026
 
@@ -206,6 +206,18 @@ Building a FastAPI application that validates Israeli Home Front Command shelter
 - [x] **Explainability Fields (Per Segment)**
   - [x] Add deterministic `checked_requirements` and `decision_summary_he` in segment validation payloads
   - [x] Backfill these fields on read for older stored validations
+
+#### Phase 3.8.1: Submission Preflight (Threshold/Completeness Gate) - COMPLETED ✨ (December 18, 2025)
+- [x] Extract official submission PDF content (pages 1–17) + screenshots for traceability under `docs/mamad-submission-pdf/`
+- [x] Create completeness checklist document: `docs/mamad-submission-preflight.md` (PF-01..PF-12)
+- [x] Add Backend endpoint: `POST /api/v1/preflight` to run preflight checks on approved segments
+- [x] Add Frontend stage gate: Upload → Review → Preflight → Validate → Results (blocks validation until Pass)
+- [x] Add per-check explanations (`explanation`) and UI “מה זה?” expand/collapse for transparency
+- [x] Make evidence segment IDs clickable in UI to open the segment image (lightbox)
+- [x] Fix “no checks pass” edge case by auto-running segment analysis when needed and persisting inferred segment type from analysis
+- [x] Performance: run segment analysis concurrently (bounded) with per-segment timeout to avoid 20+ minute runs on many segments
+- [x] Observability: log preflight duration (`duration_ms`) per request for debugging and tuning
+- [x] Realtime segment analysis progress: new streaming endpoint (`POST /api/v1/decomposition/{id}/segments/analyze-stream`, NDJSON) lets the UI show which segments are being analyzed in real time during preflight (X/Y, status per seg, click to preview)
 
   #### Phase 3.9: Focused Extractors Stability + Multi-Scale Door Context - IN PROGRESS (December 13, 2025)
   - [x] Restore `src/services/segment_analyzer.py` to a valid, importable state after a syntax-corruption regression

@@ -9,9 +9,10 @@ The Mamad Validation App is a FastAPI-based microservice that validates Israeli 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                   React Frontend (Vite)                      │
-│  Multi-stage Workflow: Upload → Review → Validate → Results │
+│  Multi-stage Workflow: Upload → Review → Preflight → Validate → Results │
 │  - DecompositionUpload (drag & drop)                        │
 │  - DecompositionReview (segment approval)                   │
+│  - PreflightChecks (submission completeness gate)            │
 │  - ValidationResults (violation display)                    │
 └─────────────────────────┬───────────────────────────────────┘
                           │ HTTP/REST API
@@ -23,6 +24,8 @@ The Mamad Validation App is a FastAPI-based microservice that validates Israeli 
 │  │  - /health (Health check)                            │  │
 │  │  - /api/v1/decomposition/analyze (Upload & decompose)│  │
 │  │  - /api/v1/decomposition/{id} (Get decomposition)    │  │
+│  │  - /api/v1/decomposition/{id}/segments/analyze (Analyze segments)│  │
+│  │  - /api/v1/preflight (Submission completeness)        │  │
 │  │  - /api/v1/segments/validate-segments (Validate segs)│  │
 │  │  - /api/v1/segments/validate-segments-stream (NDJSON)│  │
 │  │  - /api/v1/segments/validations (History list)       │  │
@@ -35,6 +38,7 @@ The Mamad Validation App is a FastAPI-based microservice that validates Israeli 
 │  │  Business Logic Layer                                 │  │
 │  │  - Requirements Parser (25+ rules)                   │  │
 │  │  - Plan Decomposition Service (GPT-5.1)             │  │
+│  │  - Submission Preflight (completeness rules)         │  │
 │  │  - Plan Extraction Service (GPT-5.1)                 │  │
 │  │  - Validation Engine                                  │  │
 │  │  - Image Cropper (segment extraction)                │  │
@@ -160,9 +164,10 @@ credential = DefaultAzureCredential()
 - **HTTP Client**: Fetch API
 
 **Key Components:**
-- `App.tsx` - ✅ Main workflow orchestration (4 stages)
+- `App.tsx` - ✅ Main workflow orchestration (5 stages)
 - `DecompositionUpload.tsx` - ✅ File upload with progress indicator
 - `DecompositionReview.tsx` - ✅ Segment list, approval UI, confidence display
+- `PreflightChecks.tsx` - ✅ Submission completeness checks UI gate
 - `types.ts` - ✅ TypeScript interfaces matching backend models
 
 ## Data Flow
@@ -243,6 +248,16 @@ credential = DefaultAzureCredential()
    │
    ▼
 5. Store segment_validation doc in Cosmos DB (type="segment_validation")
+
+### Segment Analysis Endpoint (Preflight + Validation Assist)
+
+The system can optionally analyze approved segments ahead of preflight/validation to extract OCR text and a lightweight summary.
+
+- Endpoint: `POST /api/v1/decomposition/{id}/segments/analyze`
+- Purpose: populate per-segment `analysis_data` to improve:
+   - Preflight keyword detection (e.g., locating required submission tables/attachments)
+   - Segment type inference when segments are initially `unknown`
+- Performance: runs with bounded concurrency and per-segment timeout to prevent long “stuck” runs.
 
 ### Segment Validation (Streaming NDJSON)
 

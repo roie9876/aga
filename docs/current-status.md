@@ -112,13 +112,28 @@
 - ✅ Approve/Reject workflow
 
 #### 3. **Multi-Stage App** (`frontend/src/App.tsx`)
-- ✅ 4-stage workflow:
+- ✅ 5-stage workflow:
   1. **Upload**: File upload with progress
   2. **Decomposition Review**: User reviews and approves segments
-  3. **Validation**: Run checks on approved segments
-  4. **Results**: Show validation results
+  3. **Preflight**: בדיקת תנאי סף/שלמות מסמכי הגשה (Gate)
+  4. **Validation**: Run checks on approved segments
+  5. **Results**: Show validation results
 - ✅ Progress indicator in header
 - ✅ Clean state management
+
+#### 3.1 **בדיקת תנאי סף (Submission Preflight) (18/12/2025)**
+- ✅ מסמך בדיקות: `docs/mamad-submission-preflight.md` (PF-01..PF-12)
+- ✅ Backend:
+  - `POST /api/v1/preflight` להרצת הבדיקות על סגמנטים מאושרים
+  - לוגים עם `duration_ms` כדי למדוד זמני ריצה
+- ✅ UI:
+  - לכל בדיקה יש “מה זה?” (הסבר קצר למשתמש)
+  - ראיות מסוג `seg_00x` לחיצות ופותחות את תמונת הסגמנט (Lightbox)
+  - הוולידציה חסומה עד שסטטוס תנאי הסף הוא Pass
+
+#### 3.2 **ביצועים – ניתוח סגמנטים במקביל (18/12/2025)**
+- ✅ ניתוח סגמנטים (GPT) רץ במקביל עם הגבלת מקביליות (bounded concurrency)
+- ✅ Timeout פר-סגמנט כדי למנוע “תקיעה” של עשרות דקות בהרצות עם הרבה סגמנטים
 
 #### 4. **Results UX Improvements (NEW)**
 - ✅ טעינת בדיקות מהיסטוריה בלי להעלות קובץ מחדש

@@ -2,6 +2,8 @@
 import asyncio
 import base64
 import json
+import subprocess
+import tempfile
 from collections import OrderedDict
 from typing import Dict, Any, Optional, List
 from io import BytesIO
@@ -66,6 +68,9 @@ class SegmentAnalyzer:
         try:
             # 1. Download segment image from blob storage
             image_bytes = await self._download_segment_image(segment_blob_url)
+
+            # 1b. OCR pass for scanned/bitmap-heavy documents (best-effort).
+            ocr_items = self._run_ocr(image_bytes)
             
             # 2. Analyze with GPT-5.1
             extracted_data = await self._analyze_with_gpt(
@@ -73,6 +78,14 @@ class SegmentAnalyzer:
                 segment_type=segment_type,
                 segment_description=segment_description
             )
+
+            if ocr_items:
+                existing = extracted_data.get("text_items")
+                if not isinstance(existing, list):
+                    existing = []
+                merged = self._merge_text_items(existing, ocr_items)
+                extracted_data["text_items"] = merged
+                extracted_data.setdefault("ocr_text_items", ocr_items)
             
             logger.info("Segment analysis complete",
                        segment_id=segment_id,
@@ -94,6 +107,103 @@ class SegmentAnalyzer:
                 "status": "error",
                 "error": str(e)
             }
+
+    def _run_ocr(self, image_bytes: bytes) -> List[Dict[str, str]]:
+        """Run OCR on image bytes using Tesseract (best-effort)."""
+        if not getattr(settings, "ocr_enabled", True):
+            return []
+
+        ocr_cmd = str(getattr(settings, "ocr_tesseract_cmd", "tesseract"))
+        ocr_langs = str(getattr(settings, "ocr_languages", "heb+eng")).strip() or "eng"
+        ocr_psm = str(getattr(settings, "ocr_psm", 6))
+        ocr_oem = str(getattr(settings, "ocr_oem", 1))
+
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".png") as tmp:
+                with Image.open(BytesIO(image_bytes)) as img:
+                    img = img.convert("RGB")
+                    img.save(tmp.name, format="PNG")
+
+                cmd = [
+                    ocr_cmd,
+                    tmp.name,
+                    "stdout",
+                    "-l",
+                    ocr_langs,
+                    "--oem",
+                    ocr_oem,
+                    "--psm",
+                    ocr_psm,
+                ]
+                try:
+                    result = subprocess.run(
+                        cmd,
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                        timeout=60,
+                    )
+                    text = result.stdout or ""
+                except subprocess.CalledProcessError as e:
+                    logger.info("OCR failed; retrying with English only", error=str(e))
+                    cmd = [
+                        ocr_cmd,
+                        tmp.name,
+                        "stdout",
+                        "-l",
+                        "eng",
+                        "--oem",
+                        ocr_oem,
+                        "--psm",
+                        ocr_psm,
+                    ]
+                    result = subprocess.run(
+                        cmd,
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                        timeout=60,
+                    )
+                    text = result.stdout or ""
+        except Exception as e:
+            logger.info("OCR failed; continuing without OCR", error=str(e))
+            return []
+
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        if not lines:
+            return []
+
+        items: List[Dict[str, str]] = []
+        for line in lines[:200]:
+            items.append(
+                {
+                    "text": line,
+                    "language": "hebrew" if self._contains_hebrew(line) else "english",
+                    "type": "note",
+                }
+            )
+        return items
+
+    def _merge_text_items(
+        self, existing: List[Dict[str, Any]], ocr_items: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        seen = set()
+        merged: List[Dict[str, Any]] = []
+        for item in existing + ocr_items:
+            if not isinstance(item, dict):
+                continue
+            text = str(item.get("text") or "").strip()
+            if not text:
+                continue
+            key = text.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(item)
+        return merged
+
+    def _contains_hebrew(self, text: str) -> bool:
+        return any("\u0590" <= ch <= "\u05FF" for ch in text)
 
     def _crop_image_bytes_by_bbox_with_padding(
         self,

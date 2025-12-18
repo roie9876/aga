@@ -57,6 +57,13 @@ class Settings(BaseSettings):
     decomposition_filter_nested_frames_enabled: bool = True
     decomposition_nested_containment_threshold: float = 0.90
     decomposition_min_box_area_ratio: float = 0.005
+
+    # OCR (best-effort, for scanned/bitmap-heavy documents)
+    ocr_enabled: bool = True
+    ocr_tesseract_cmd: str = "tesseract"
+    ocr_languages: str = "heb+eng"
+    ocr_psm: int = 6
+    ocr_oem: int = 1
     
     # Optional Azure Identity
     azure_tenant_id: Optional[str] = None

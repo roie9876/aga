@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from src.config import settings
 from src.utils.logging import setup_logging, get_logger
-from src.api.routes import health, validation, decomposition, segment_validation, requirements
+from src.api.routes import health, validation, decomposition, segment_validation, requirements, preflight
 
 # Setup logging before anything else
 setup_logging()
@@ -58,6 +58,11 @@ app.include_router(
     requirements.router,
     prefix=f"/api/{settings.api_version}",
     tags=["Requirements"]
+)
+app.include_router(
+    preflight.router,
+    prefix=f"/api/{settings.api_version}",
+    tags=["Preflight"],
 )
 
 

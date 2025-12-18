@@ -16,10 +16,20 @@ import { DecompositionUpload } from './components/DecompositionUpload';
 import { DecompositionReview } from './components/DecompositionReview';
 import { RequirementItem } from './components/RequirementItem';
 import { RequirementsModal } from './components/RequirementsModal';
+import { PreflightChecks } from './components/PreflightChecks';
 import { Button, Card, StatCard, Badge, ProgressBar, EmptyState, FloatingActionButton } from './components/ui';
 import { StepIndicator } from './components/ValidationComponents';
+import type { SubmissionPreflightResponse } from './types';
 
-type WorkflowStage = 'upload' | 'decomposition_review' | 'validation' | 'results' | 'history';
+type SegmentAnalysisStatus = 'pending' | 'running' | 'done' | 'error';
+type SegmentAnalysisProgress = {
+  total: number;
+  done: number;
+  statusBySegmentId: Record<string, SegmentAnalysisStatus>;
+  errorBySegmentId: Record<string, string>;
+};
+
+type WorkflowStage = 'upload' | 'decomposition_review' | 'preflight' | 'validation' | 'results' | 'history';
 
 type RequirementStatus = 'passed' | 'failed' | 'not_checked';
 
@@ -329,6 +339,12 @@ function App() {
   const [imageLightbox, setImageLightbox] = useState<{ src: string; title: string } | null>(null);
   const [requirementInfoId, setRequirementInfoId] = useState<string | null>(null);
 
+  const [preflightLoading, setPreflightLoading] = useState(false);
+  const [preflightResult, setPreflightResult] = useState<SubmissionPreflightResponse | null>(null);
+  const [pendingApprovalParams, setPendingApprovalParams] = useState<{ mode: 'segments' | 'full_plan'; approvedSegments: string[]; check_groups: string[] } | null>(null);
+  const [preflightSegmentIndex, setPreflightSegmentIndex] = useState<Record<string, { src: string; title: string }>>({});
+  const [preflightAnalysisProgress, setPreflightAnalysisProgress] = useState<SegmentAnalysisProgress | null>(null);
+
   const overallRequirementStatus = useMemo(
     () => (validationResult ? computeOverallRequirementStatus(validationResult) : {}),
     [validationResult]
@@ -370,8 +386,8 @@ function App() {
     setDecompositionId(decompId);
     setStage('decomposition_review');
   };
-  
-  const handleApprovalComplete = async (params: { mode: 'segments' | 'full_plan'; approvedSegments: string[]; check_groups: string[] }) => {
+
+  const startValidation = async (params: { mode: 'segments' | 'full_plan'; approvedSegments: string[]; check_groups: string[] }) => {
     setStage('validation');
     setLastApprovedSegmentIds(params.approvedSegments || []);
 
@@ -681,6 +697,221 @@ function App() {
       console.error('Validation error:', error);
       alert('שגיאה בבדיקת הסגמנטים');
       setStage('decomposition_review');
+    }
+  };
+
+  const handleApprovalComplete = async (params: { mode: 'segments' | 'full_plan'; approvedSegments: string[]; check_groups: string[] }) => {
+    if (params.mode !== 'segments') {
+      // Preflight endpoint currently supports the segment workflow only.
+      await startValidation(params);
+      return;
+    }
+
+    if (!decompositionId) {
+      console.error('Missing decompositionId for preflight');
+      await startValidation(params);
+      return;
+    }
+
+    setPendingApprovalParams(params);
+    setStage('preflight');
+    setPreflightResult(null);
+    setPreflightLoading(true);
+    setPreflightSegmentIndex({});
+    setPreflightAnalysisProgress(null);
+
+    try {
+      // If the user uploaded already-cropped images, segments often start with type='unknown'.
+      // Preflight relies on segment types and/or extracted analysis_data, so we auto-run
+      // segment analysis once (best-effort) when needed.
+      try {
+        const decompResp = await fetch(`/api/v1/decomposition/${decompositionId}`, { method: 'GET' });
+        if (decompResp.ok) {
+          const decomp = await decompResp.json();
+
+          // Build an index for evidence clicks in the Preflight UI.
+          try {
+            const idx: Record<string, { src: string; title: string }> = {};
+            const segs: any[] = Array.isArray(decomp?.segments) ? decomp.segments : [];
+            for (const s of segs) {
+              const sid = String(s?.segment_id || '').trim();
+              const src = String(s?.blob_url || s?.thumbnail_url || '').trim();
+              if (!sid || !src) continue;
+              const title = String(s?.title || s?.description || sid);
+              idx[sid] = { src, title };
+            }
+            setPreflightSegmentIndex(idx);
+          } catch {
+            // ignore
+          }
+
+          const approvedSet = new Set(params.approvedSegments);
+          const approvedSegs: any[] = Array.isArray(decomp?.segments)
+            ? decomp.segments.filter((s: any) => approvedSet.has(String(s?.segment_id)))
+            : [];
+
+          const hasUsefulSignal = approvedSegs.some((s: any) => {
+            const t = String(s?.type || '').toLowerCase();
+            if (t && t !== 'unknown') return true;
+            return Boolean(s?.analysis_data?.classification || s?.analysis_data?.summary);
+          });
+
+          if (!hasUsefulSignal && params.approvedSegments.length > 0) {
+            // Stream progress so the user sees which segment is being analyzed.
+            setPreflightAnalysisProgress({
+              total: params.approvedSegments.length,
+              done: 0,
+              statusBySegmentId: Object.fromEntries(params.approvedSegments.map((id) => [id, 'pending' as SegmentAnalysisStatus])),
+              errorBySegmentId: {},
+            });
+
+            try {
+              const analyzeResp = await fetch(`/api/v1/decomposition/${decompositionId}/segments/analyze-stream`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ segment_ids: params.approvedSegments }),
+              });
+
+              if (!analyzeResp.ok || !analyzeResp.body) {
+                console.warn('Auto-analysis (stream) before preflight failed');
+              } else {
+                const reader = analyzeResp.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+
+                const applyEvt = (evt: any) => {
+                  const type = String(evt?.type || '');
+
+                  if (type === 'begin') {
+                    const total = Number(evt?.total);
+                    if (Number.isFinite(total) && total > 0) {
+                      setPreflightAnalysisProgress((prev) => (prev ? { ...prev, total } : prev));
+                    }
+                    return;
+                  }
+
+                  if (type === 'segment_start') {
+                    const sid = String(evt?.segment_id || '').trim();
+                    if (!sid) return;
+                    setPreflightAnalysisProgress((prev) => {
+                      if (!prev) return prev;
+                      if (!(sid in prev.statusBySegmentId)) return prev;
+                      return { ...prev, statusBySegmentId: { ...prev.statusBySegmentId, [sid]: 'running' } };
+                    });
+                    return;
+                  }
+
+                  if (type === 'segment_done') {
+                    const sid = String(evt?.segment_id || '').trim();
+                    if (!sid) return;
+                    const ok = String(evt?.status || '').toLowerCase() === 'ok';
+                    const st: SegmentAnalysisStatus = ok ? 'done' : 'error';
+                    const err = !ok && evt?.error ? String(evt.error) : '';
+
+                    setPreflightAnalysisProgress((prev) => {
+                      if (!prev) return prev;
+                      if (!(sid in prev.statusBySegmentId)) return prev;
+
+                      const nextStatusById = { ...prev.statusBySegmentId, [sid]: st };
+                      const nextErrorById = err ? { ...prev.errorBySegmentId, [sid]: err } : prev.errorBySegmentId;
+                      const done = Object.values(nextStatusById).filter((x) => x === 'done' || x === 'error').length;
+                      return { ...prev, done, statusBySegmentId: nextStatusById, errorBySegmentId: nextErrorById };
+                    });
+                    return;
+                  }
+
+                  if (type === 'complete') {
+                    const total = Number(evt?.total);
+                    const done = Number(evt?.updated_segments) + Number(evt?.errors);
+                    setPreflightAnalysisProgress((prev) => {
+                      if (!prev) return prev;
+                      const nextTotal = Number.isFinite(total) && total > 0 ? total : prev.total;
+                      const nextDone = Number.isFinite(done) && done >= 0 ? Math.min(done, nextTotal) : prev.done;
+                      return { ...prev, total: nextTotal, done: nextDone };
+                    });
+                  }
+                };
+
+                while (true) {
+                  const { value, done } = await reader.read();
+                  if (done) break;
+                  buffer += decoder.decode(value, { stream: true });
+                  let idx;
+                  while ((idx = buffer.indexOf('\n')) >= 0) {
+                    const line = buffer.slice(0, idx).trim();
+                    buffer = buffer.slice(idx + 1);
+                    if (!line) continue;
+                    try {
+                      applyEvt(JSON.parse(line));
+                    } catch {
+                      // ignore
+                    }
+                  }
+                }
+              }
+            } catch (e) {
+              console.warn('Auto-analysis (stream) before preflight errored', e);
+            }
+          }
+        }
+      } catch (e) {
+        console.warn('Preflight auto-analysis skipped due to error', e);
+      }
+
+      const resp = await fetch('/api/v1/preflight', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          decomposition_id: decompositionId,
+          approved_segment_ids: params.approvedSegments,
+          mode: 'segments',
+          strict: false,
+          run_llm_checks: true,
+        }),
+      });
+
+      if (!resp.ok) {
+        throw new Error('Preflight failed');
+      }
+
+      const data = await resp.json();
+      setPreflightResult(data);
+    } catch (e) {
+      console.error('Preflight error:', e);
+      // Fallback: allow user to continue, but warn.
+      setPreflightResult({
+        passed: false,
+        summary: 'שגיאה בהרצת תנאי סף – נסה שוב או המשך בזהירות',
+        checks: [],
+      });
+    } finally {
+      setPreflightLoading(false);
+    }
+  };
+
+  const openPreflightEvidenceSegment = async (segmentId: string) => {
+    const sid = String(segmentId || '').trim();
+    if (!sid) return;
+
+    const hit = preflightSegmentIndex[sid];
+    if (hit?.src) {
+      setImageLightbox({ src: hit.src, title: hit.title || sid });
+      return;
+    }
+
+    if (!decompositionId) return;
+    try {
+      const decompResp = await fetch(`/api/v1/decomposition/${decompositionId}`, { method: 'GET' });
+      if (!decompResp.ok) return;
+      const decomp = await decompResp.json();
+      const segs: any[] = Array.isArray(decomp?.segments) ? decomp.segments : [];
+      const s = segs.find((x: any) => String(x?.segment_id) === sid);
+      const src = String(s?.blob_url || s?.thumbnail_url || '').trim();
+      if (!src) return;
+      const title = String(s?.title || s?.description || sid);
+      setImageLightbox({ src, title });
+    } catch {
+      // ignore
     }
   };
 
@@ -1022,20 +1253,25 @@ function App() {
     setDecompositionId(null);
     setValidationResult(null);
     setValidationProgress(null);
+    setPreflightResult(null);
+    setPreflightLoading(false);
+    setPendingApprovalParams(null);
   };
 
   const steps = [
     { number: 1, title: 'העלאה', description: 'העלאת קובץ התכנית' },
     { number: 2, title: 'בחירה', description: 'בחירת אזורים בתכנית' },
-    { number: 3, title: 'בדיקה', description: 'וולידציה מול תקנים' },
-    { number: 4, title: 'תוצאות', description: 'דוח סופי' },
+    { number: 3, title: 'תנאי סף', description: 'בדיקת שלמות ההגשה' },
+    { number: 4, title: 'בדיקה', description: 'וולידציה מול תקנים' },
+    { number: 5, title: 'תוצאות', description: 'דוח סופי' },
   ];
 
   const currentStepNumber = 
     stage === 'upload' ? 1 :
     stage === 'decomposition_review' ? 2 :
-    stage === 'validation' ? 3 :
-    stage === 'results' ? 4 : 1;
+    stage === 'preflight' ? 3 :
+    stage === 'validation' ? 4 :
+    stage === 'results' ? 5 : 1;
 
   return (
     <div className="min-h-screen bg-background text-text-primary font-sans antialiased" dir="rtl">
@@ -1196,6 +1432,25 @@ function App() {
               </Button>
             </div>
           </div>
+        )}
+
+        {/* Preflight Stage */}
+        {stage === 'preflight' && (
+          <PreflightChecks
+            loading={preflightLoading}
+            result={preflightResult}
+            analysisProgress={preflightAnalysisProgress}
+            onBack={() => setStage('decomposition_review')}
+            onContinue={() => {
+              if (!pendingApprovalParams) return;
+              // Gate strictly on passed=true.
+              if (preflightResult?.passed) {
+                startValidation(pendingApprovalParams);
+              }
+            }}
+            continueEnabled={Boolean(preflightResult?.passed)}
+            onOpenEvidenceSegment={openPreflightEvidenceSegment}
+          />
         )}
 
         {/* Validation Progress Stage */}
