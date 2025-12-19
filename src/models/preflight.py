@@ -66,6 +66,14 @@ class SubmissionPreflightResponse(BaseModel):
     passed: bool = Field(..., description="Whether the submission meets the threshold")
     summary: str = Field(..., description="One-line Hebrew summary")
     checks: List[PreflightCheckResult] = Field(default_factory=list)
+    preflight_id: Optional[str] = Field(default=None, description="Preflight run identifier")
+    created_at: Optional[str] = Field(default=None, description="ISO timestamp when preflight ran")
+    decomposition_id: Optional[str] = Field(default=None, description="Decomposition ID")
+    approved_segment_ids: List[str] = Field(default_factory=list, description="Approved segment IDs")
+    strict: Optional[bool] = Field(default=None, description="Strict mode")
+    run_llm_checks: Optional[bool] = Field(default=None, description="Whether LLM checks ran")
+    segment_count: Optional[int] = Field(default=None, description="Segments count in decomposition")
+    plan_name: Optional[str] = Field(default=None, description="Plan name if available")
 
 
 class InlineSubmissionPreflightRequest(BaseModel):

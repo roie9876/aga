@@ -135,6 +135,14 @@ export interface SubmissionPreflightResponse {
   passed: boolean;
   summary: string;
   checks: PreflightCheckResult[];
+  preflight_id?: string;
+  created_at?: string;
+  decomposition_id?: string;
+  approved_segment_ids?: string[];
+  strict?: boolean;
+  run_llm_checks?: boolean;
+  segment_count?: number;
+  plan_name?: string;
 }
 
 export interface ValidationResponse {
@@ -187,4 +195,3 @@ export interface CoverageReport {
   by_category: Record<string, RequirementCoverage[]>;
   missing_segments_needed: MissingSegment[];
 }
-

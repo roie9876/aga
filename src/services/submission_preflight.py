@@ -309,6 +309,28 @@ def _extract_checkable_text_items(seg: Dict[str, Any]) -> List[str]:
     return items
 
 
+def _segment_text_corpus(seg: Dict[str, Any]) -> str:
+    parts = [_segment_text_blob(seg)]
+    parts.extend(_extract_checkable_text_items(seg))
+    return " ".join([p for p in parts if p])
+
+
+def _contains_scale_1_50(text: str) -> bool:
+    if not text:
+        return False
+    return bool(re.search(r"\b1\s*[:/]\s*50\b", text))
+
+
+def _has_area_table_signal(text: str) -> bool:
+    if not text:
+        return False
+    table_tokens = ["טבלה", "טבלת", "טבלא"]
+    area_tokens = ["שטח", "שטחים", "חישוב", "מיגון", "מ\"ר", "מ״ר"]
+    has_table = any(tok in text for tok in table_tokens)
+    has_area = any(tok in text for tok in area_tokens)
+    return has_table and has_area
+
+
 def _has_any_dimension(seg: Dict[str, Any]) -> bool:
     ad = seg.get("analysis_data")
     if not isinstance(ad, dict):
@@ -461,12 +483,12 @@ async def run_submission_preflight(
         isinstance(v, dict) and v.get("signature_block_present") is True for v in llm_debug.values()
     ) if llm_debug else False
 
-    # Heuristic fallback: if we have any declaration-like segment.
-    status = PreflightStatus.PASSED if (signature_present or decl_ids) else PreflightStatus.FAILED
+    # Require an actual detected signature block to pass.
+    status = PreflightStatus.PASSED if signature_present else PreflightStatus.FAILED
     details = (
-        'זוהתה הצהרה/דף חתימות, ובוצעה אינדיקציה לקיום אזור חתימה.'
+        'זוהה אזור חתימה בפועל במסמך.'
         if signature_present
-        else ('זוהה דף הצהרה/חתימות לפי כותרת/תיאור.' if decl_ids else 'לא זוהה דף הצהרה/חתימות.')
+        else 'לא זוהה אזור חתימה בפועל במסמך.'
     )
 
     checks.append(
@@ -481,19 +503,24 @@ async def run_submission_preflight(
         )
     )
 
-    # PF-07: mamad plan exists (best-effort)
+    # PF-07: mamad plan exists (best-effort) with 1:50 scale signal
     mamad_like: List[Dict[str, Any]] = []
+    mamad_scale_like: List[Dict[str, Any]] = []
     for seg in approved_segments:
-        blob = _segment_text_blob(seg)
-        if _match_keywords(blob, _HEBREW_KEYWORDS["mamad"]):
+        corpus = _segment_text_corpus(seg)
+        if _match_keywords(corpus, _HEBREW_KEYWORDS["mamad"]):
             mamad_like.append(seg)
-        else:
-            # If analyzed, check extracted text items
-            txt = " ".join(_extract_checkable_text_items(seg))
-            if _match_keywords(txt, _HEBREW_KEYWORDS["mamad"]):
-                mamad_like.append(seg)
+            if _contains_scale_1_50(corpus):
+                mamad_scale_like.append(seg)
+
     mamad_ids = list({str(s.get("segment_id")) for s in mamad_like if s.get("segment_id")})
-    mamad_status = PreflightStatus.PASSED if mamad_ids else (PreflightStatus.FAILED if strict else PreflightStatus.WARNING)
+    mamad_scale_ids = list({str(s.get("segment_id")) for s in mamad_scale_like if s.get("segment_id")})
+    if mamad_scale_ids:
+        mamad_status = PreflightStatus.PASSED
+    elif mamad_ids:
+        mamad_status = PreflightStatus.FAILED if strict else PreflightStatus.WARNING
+    else:
+        mamad_status = PreflightStatus.FAILED if strict else PreflightStatus.WARNING
     checks.append(
         _mk_result(
             check_id="PF-07",
@@ -501,11 +528,15 @@ async def run_submission_preflight(
             pages=[8, 9, 10],
             status=mamad_status,
             details=(
-                'זוהה לפחות סגמנט אחד שמזכיר/מציג מרחב מוגן.'
-                if mamad_ids
-                else 'לא זוהה בוודאות סגמנט מרחב מוגן. מומלץ לוודא שסימנת/קראת שם לסגמנט הממ"ד.'
+                'זוהה סגמנט מרחב מוגן עם קנ"מ 1:50.'
+                if mamad_scale_ids
+                else (
+                    'זוהה סגמנט שמזכיר מרחב מוגן, אך ללא אינדיקציה לקנ"מ 1:50.'
+                    if mamad_ids
+                    else 'לא זוהה בוודאות סגמנט מרחב מוגן. מומלץ לוודא שסימנת/קראת שם לסגמנט הממ"ד.'
+                )
             ),
-            evidence=mamad_ids[:10],
+            evidence=(mamad_scale_ids or mamad_ids)[:10],
         )
     )
 
@@ -523,17 +554,22 @@ async def run_submission_preflight(
     )
 
     # PF-09: area calculation table
-    area_table_like = _find_segments_by_keywords(approved_segments, "area_table")
-    # In practice, we accept any TABLE segment as candidate, plus explicit keyword hits.
-    area_candidates = by_type.get(SegmentType.TABLE, [])
-    area_ids = list({str(s.get("segment_id")) for s in (area_candidates + area_table_like) if s.get("segment_id")})
+    area_like: List[Dict[str, Any]] = []
+    for seg in approved_segments:
+        corpus = _segment_text_corpus(seg)
+        is_table = _safe_segment_type(seg.get("type")) == SegmentType.TABLE
+        if is_table and _has_area_table_signal(corpus):
+            area_like.append(seg)
+        elif _has_area_table_signal(corpus):
+            area_like.append(seg)
+    area_ids = list({str(s.get("segment_id")) for s in area_like if s.get("segment_id")})
     checks.append(
         _mk_result(
             check_id="PF-09",
             title='קיימת טבלת חישוב שטחי מיגון (אם נדרש)',
             pages=[8],
             status=PreflightStatus.PASSED if area_ids else (PreflightStatus.WARNING if not strict else PreflightStatus.FAILED),
-            details='נמצא סגמנט טבלה שיכול לכלול טבלת שטחים.' if area_ids else 'לא זוהתה טבלת שטחים. אם לא הועלתה עדיין טבלת שטחי מיגון – מומלץ להוסיף.',
+            details='נמצא סגמנט שמציג טבלת חישוב שטחים.' if area_ids else 'לא זוהתה טבלת שטחים. אם לא הועלתה עדיין טבלת שטחי מיגון – מומלץ להוסיף.',
             evidence=area_ids[:10],
         )
     )

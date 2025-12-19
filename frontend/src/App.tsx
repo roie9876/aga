@@ -332,6 +332,11 @@ function App() {
   const validationLogWrapRef = useRef<HTMLDivElement | null>(null);
   const [validationResult, setValidationResult] = useState<any>(null);
   const [validationHistory, setValidationHistory] = useState<any[]>([]);
+  const [preflightHistory, setPreflightHistory] = useState<any[]>([]);
+  const [historyTab, setHistoryTab] = useState<'validation' | 'preflight'>('validation');
+  const [preflightHistoryResult, setPreflightHistoryResult] = useState<SubmissionPreflightResponse | null>(null);
+  const [preflightHistoryMeta, setPreflightHistoryMeta] = useState<any | null>(null);
+  const [preflightHistorySegments, setPreflightHistorySegments] = useState<any[]>([]);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [showRequirementsModal, setShowRequirementsModal] = useState(false);
   const [requirementsFilter, setRequirementsFilter] = useState<'all' | 'passed' | 'failed' | 'not_checked'>('all');
@@ -341,6 +346,7 @@ function App() {
 
   const [preflightLoading, setPreflightLoading] = useState(false);
   const [preflightResult, setPreflightResult] = useState<SubmissionPreflightResponse | null>(null);
+  const [preflightRunMeta, setPreflightRunMeta] = useState<any | null>(null);
   const [pendingApprovalParams, setPendingApprovalParams] = useState<{ mode: 'segments' | 'full_plan'; approvedSegments: string[]; check_groups: string[] } | null>(null);
   const [preflightSegmentIndex, setPreflightSegmentIndex] = useState<Record<string, { src: string; title: string }>>({});
   const [preflightAnalysisProgress, setPreflightAnalysisProgress] = useState<SegmentAnalysisProgress | null>(null);
@@ -876,6 +882,18 @@ function App() {
 
       const data = await resp.json();
       setPreflightResult(data);
+      if (data?.preflight_id || data?.created_at) {
+        setPreflightRunMeta({
+          preflight_id: data.preflight_id,
+          created_at: data.created_at,
+          decomposition_id: data.decomposition_id || decompositionId,
+          approved_segment_ids: data.approved_segment_ids || params.approvedSegments,
+          strict: data.strict,
+          run_llm_checks: data.run_llm_checks,
+          segment_count: data.segment_count,
+          plan_name: data.plan_name,
+        });
+      }
     } catch (e) {
       console.error('Preflight error:', e);
       // Fallback: allow user to continue, but warn.
@@ -926,6 +944,10 @@ function App() {
   const downloadJsonReport = () => {
     if (!validationResult) return;
 
+    const preflightExport = preflightRunMeta
+      ? { meta: preflightRunMeta, result: preflightResult }
+      : (preflightHistoryMeta && preflightHistoryResult ? { meta: preflightHistoryMeta, result: preflightHistoryResult } : null);
+
     const report = {
       exported_at: new Date().toISOString(),
       demo_mode: Boolean(validationResult.demo_mode),
@@ -933,6 +955,7 @@ function App() {
       decomposition_id: decompositionId,
       selected_segment_ids: lastApprovedSegmentIds,
       decomposition: decompositionSnapshot,
+      preflight: preflightExport,
       validation_result: validationResult,
     };
 
@@ -944,6 +967,29 @@ function App() {
       .replace(/[^a-zA-Z0-9-_]/g, '_');
     a.href = url;
     a.download = `mamad-report-${safeId}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const downloadPreflightJsonReport = () => {
+    if (!preflightHistoryResult) return;
+    const report = {
+      exported_at: new Date().toISOString(),
+      preflight: {
+        meta: preflightHistoryMeta || null,
+        result: preflightHistoryResult,
+      },
+    };
+    const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const safeId = (preflightHistoryMeta?.preflight_id || preflightHistoryMeta?.id || 'preflight')
+      .toString()
+      .replace(/[^a-zA-Z0-9-_]/g, '_');
+    a.href = url;
+    a.download = `mamad-preflight-${safeId}.json`;
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -975,6 +1021,9 @@ function App() {
     const prettyJson = (obj: any) => esc(JSON.stringify(obj, null, 2));
 
     const coverage = validationResult.coverage || null;
+    const preflightExport = preflightRunMeta
+      ? { meta: preflightRunMeta, result: preflightResult }
+      : (preflightHistoryMeta && preflightHistoryResult ? { meta: preflightHistoryMeta, result: preflightHistoryResult } : null);
 
     const apiVersion = 'v1';
     const fullPlanUrl = decompositionId
@@ -985,6 +1034,40 @@ function App() {
       if (!decompositionId || !segmentId) return null;
       return `/api/${apiVersion}/decomposition/${encodeURIComponent(decompositionId)}/images/segments/${encodeURIComponent(segmentId)}`;
     };
+
+    const preflightMeta = preflightExport?.meta || null;
+    const preflightChecks = preflightExport?.result?.checks || [];
+    const preflightSection = preflightExport ? `
+  <div class="card">
+    <h2 style="margin:0 0 6px; font-size:16px;">תנאי סף (Preflight)</h2>
+    <div class="row">
+      ${preflightMeta?.preflight_id ? `<span class="pill">מזהה: ${esc(preflightMeta.preflight_id)}</span>` : ''}
+      ${preflightMeta?.created_at ? `<span class="pill">תאריך: ${esc(preflightMeta.created_at)}</span>` : ''}
+      ${preflightMeta?.decomposition_id ? `<span class="pill">מזהה פירוק: ${esc(preflightMeta.decomposition_id)}</span>` : ''}
+      ${typeof preflightMeta?.segment_count === 'number' ? `<span class="pill">סגמנטים: ${preflightMeta.segment_count}</span>` : ''}
+      ${preflightExport?.result?.passed ? `<span class="pill">סטטוס: עבר</span>` : `<span class="pill">סטטוס: נכשל</span>`}
+    </div>
+    ${preflightChecks.length ? `
+    <table>
+      <thead>
+        <tr>
+          <th>בדיקה</th>
+          <th>סטטוס</th>
+          <th>פרטים</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${preflightChecks.map((c: any) => `
+          <tr>
+            <td>${esc(`${c.check_id || ''} ${c.title || ''}`)}</td>
+            <td>${esc(c.status || '')}</td>
+            <td>${esc(c.details || '')}</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>` : `<div class="muted">אין תוצאות תנאי סף לשיתוף.</div>`}
+  </div>
+` : '';
 
     const html = `<!doctype html>
 <html lang="he" dir="rtl">
@@ -1149,6 +1232,8 @@ function App() {
     ${coverage ? `<pre>${prettyJson(coverage)}</pre>` : `<div class="muted">אין מידע כיסוי זמין.</div>`}
   </div>
 
+  ${preflightSection}
+
   <div class="card">
     <h2 style="margin:0 0 6px; font-size:16px;">Raw JSON (לשיתוף ולמידה)</h2>
     <pre>${prettyJson({
@@ -1156,7 +1241,142 @@ function App() {
       decomposition_id: decompositionId,
       selected_segment_ids: selectedIds,
       decomposition: decompositionSnapshot,
+      preflight: preflightExport,
       validation_result: validationResult,
+    })}</pre>
+  </div>
+</body>
+</html>`;
+
+    const w = window.open('', '_blank');
+    if (!w) return;
+    w.document.open();
+    w.document.write(html);
+    w.document.close();
+
+    window.setTimeout(() => {
+      try {
+        w.focus();
+        w.print();
+      } catch {
+        // ignore
+      }
+    }, 250);
+  };
+
+  const openPrintablePreflightReport = () => {
+    if (!preflightHistoryResult) return;
+
+    const esc = (v: any) => String(v ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
+
+    const prettyJson = (obj: any) => esc(JSON.stringify(obj, null, 2));
+
+    const meta = preflightHistoryMeta || {};
+    const checks = preflightHistoryResult.checks || [];
+    const segments = Array.isArray(preflightHistorySegments) ? preflightHistorySegments : [];
+    const getSegmentImageUrl = (segmentId: string) => {
+      if (!meta?.decomposition_id || !segmentId) return null;
+      return `/api/v1/decomposition/${encodeURIComponent(meta.decomposition_id)}/images/segments/${encodeURIComponent(segmentId)}`;
+    };
+
+    const html = `<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>דוח תנאי סף</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 24px; color: #111827; }
+    h1 { margin: 0 0 6px; font-size: 22px; }
+    .muted { color: #6b7280; font-size: 12px; }
+    .card { border: 1px solid #e5e7eb; border-radius: 12px; padding: 14px; margin: 12px 0; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; }
+    .pill { display: inline-block; padding: 6px 10px; border-radius: 999px; border: 1px solid #e5e7eb; background: #f9fafb; font-size: 12px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+    th, td { border: 1px solid #e5e7eb; padding: 8px; vertical-align: top; font-size: 12px; }
+    th { background: #f9fafb; text-align: right; }
+    pre { white-space: pre-wrap; word-break: break-word; background: #f9fafb; border: 1px solid #e5e7eb; padding: 10px; border-radius: 10px; font-size: 11px; }
+    @media print { body { margin: 12mm; } }
+  </style>
+</head>
+<body>
+  <h1>דוח תנאי סף</h1>
+  <div class="muted">נוצר: ${esc(new Date().toLocaleString('he-IL'))}</div>
+
+  <div class="card">
+    <div class="row">
+      ${meta.preflight_id ? `<span class="pill">מזהה: ${esc(meta.preflight_id)}</span>` : ''}
+      ${meta.created_at ? `<span class="pill">תאריך: ${esc(meta.created_at)}</span>` : ''}
+      ${meta.decomposition_id ? `<span class="pill">מזהה פירוק: ${esc(meta.decomposition_id)}</span>` : ''}
+      ${typeof meta.segment_count === 'number' ? `<span class="pill">סגמנטים: ${meta.segment_count}</span>` : ''}
+      ${preflightHistoryResult.passed ? `<span class="pill">סטטוס: עבר</span>` : `<span class="pill">סטטוס: נכשל</span>`}
+    </div>
+    ${meta.plan_name ? `<div class="muted" style="margin-top:8px;">תכנית: ${esc(meta.plan_name)}</div>` : ''}
+  </div>
+
+  <div class="card">
+    <h2 style="margin:0 0 6px; font-size:16px;">תוצאות תנאי סף</h2>
+    ${checks.length ? `
+    <table>
+      <thead>
+        <tr>
+          <th>בדיקה</th>
+          <th>סטטוס</th>
+          <th>פרטים</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${checks.map((c: any) => `
+          <tr>
+            <td>${esc(`${c.check_id || ''} ${c.title || ''}`)}</td>
+            <td>${esc(c.status || '')}</td>
+            <td>${esc(c.details || '')}</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>` : `<div class="muted">אין תוצאות תנאי סף לשיתוף.</div>`}
+  </div>
+
+  <div class="card">
+    <h2 style="margin:0 0 6px; font-size:16px;">סגמנטים שנבדקו</h2>
+    ${segments.length ? `
+    <table>
+      <thead>
+        <tr>
+          <th>segment_id</th>
+          <th>שם/כותרת</th>
+          <th>סוג</th>
+          <th>תיאור</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${segments.map((s: any) => `
+          <tr>
+            <td>${esc(s.segment_id || '')}</td>
+            <td>${esc(s.title || s.description || s.segment_id || '')}</td>
+            <td>${esc(s.type || '')}</td>
+            <td>${esc(s.description || '')}</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+    ${segments.map((s: any) => {
+      const imgUrl = getSegmentImageUrl(String(s.segment_id || ''));
+      return imgUrl ? `<div class="imgWrap"><img class="img" src="${esc(imgUrl)}" alt="segment ${esc(s.segment_id)}" loading="lazy" /></div>` : '';
+    }).join('')}
+    ` : `<div class="muted">אין מידע על סגמנטים שנבדקו.</div>`}
+  </div>
+
+  <div class="card">
+    <h2 style="margin:0 0 6px; font-size:16px;">Raw JSON (לשיתוף ולמידה)</h2>
+    <pre>${prettyJson({
+      exported_at: new Date().toISOString(),
+      preflight: { meta, result: preflightHistoryResult },
     })}</pre>
   </div>
 </body>
@@ -1180,15 +1400,66 @@ function App() {
   
   const loadHistory = async () => {
     try {
-      const response = await fetch('/api/v1/segments/validations');
-      if (!response.ok) throw new Error('Failed to load history');
-      const data = await response.json();
-      const latest = (data.validations || []).slice(0, 10);
-      setValidationHistory(latest);
+      const [validationResp, preflightResp] = await Promise.all([
+        fetch('/api/v1/segments/validations'),
+        fetch('/api/v1/preflight/history'),
+      ]);
+
+      if (!validationResp.ok) throw new Error('Failed to load history');
+      const validationData = await validationResp.json();
+      const latestValidations = (validationData.validations || []).slice(0, 10);
+      setValidationHistory(latestValidations);
+
+      if (preflightResp.ok) {
+        const preflightData = await preflightResp.json();
+        const latestPreflights = (preflightData.preflights || []).slice(0, 10);
+        setPreflightHistory(latestPreflights);
+      } else {
+        setPreflightHistory([]);
+      }
+
+      setHistoryTab('validation');
+      setPreflightHistoryResult(null);
+      setPreflightHistoryMeta(null);
       setStage('history');
     } catch (error) {
       console.error('History error:', error);
       alert('שגיאה בטעינת היסטוריה');
+    }
+  };
+
+  const loadPreflightResults = async (preflightId: string) => {
+    try {
+      setIsLoadingHistory(true);
+      const response = await fetch(`/api/v1/preflight/${preflightId}`);
+      if (!response.ok) throw new Error('Failed to load preflight');
+      const result = await response.json();
+      setPreflightHistoryMeta(result);
+      setPreflightHistoryResult({
+        passed: Boolean(result.passed),
+        summary: String(result.summary || ''),
+        checks: Array.isArray(result.checks) ? result.checks : [],
+      });
+      setPreflightHistorySegments([]);
+      if (result.decomposition_id) {
+        const decompResponse = await fetch(`/api/v1/decomposition/${result.decomposition_id}`);
+        if (decompResponse.ok) {
+          const decompData = await decompResponse.json();
+          const approvedIds: string[] = Array.isArray(result.approved_segment_ids)
+            ? result.approved_segment_ids
+            : [];
+          const segments = Array.isArray(decompData?.segments) ? decompData.segments : [];
+          const filtered = approvedIds.length
+            ? segments.filter((s: any) => approvedIds.includes(String(s?.segment_id)))
+            : segments;
+          setPreflightHistorySegments(filtered);
+        }
+      }
+    } catch (error) {
+      console.error('Preflight history error:', error);
+      alert('שגיאה בטעינת תנאי סף');
+    } finally {
+      setIsLoadingHistory(false);
     }
   };
   
@@ -2500,6 +2771,30 @@ function App() {
                 <p className="text-text-muted">
                   כל הבדיקות שבוצעו עד כה - לחץ על בדיקה כדי לראות את התוצאות
                 </p>
+                <div className="mt-4 flex items-center gap-2">
+                  <Button
+                    variant={historyTab === 'validation' ? 'primary' : 'ghost'}
+                    size="sm"
+                    onClick={() => {
+                      setHistoryTab('validation');
+                      setPreflightHistoryResult(null);
+                      setPreflightHistoryMeta(null);
+                    }}
+                  >
+                    וולידציה
+                  </Button>
+                  <Button
+                    variant={historyTab === 'preflight' ? 'primary' : 'ghost'}
+                    size="sm"
+                    onClick={() => {
+                      setHistoryTab('preflight');
+                      setPreflightHistoryResult(null);
+                      setPreflightHistoryMeta(null);
+                    }}
+                  >
+                    תנאי סף
+                  </Button>
+                </div>
               </div>
               <Button
                 variant="primary"
@@ -2519,7 +2814,52 @@ function App() {
               </Card>
             )}
             
-            {validationHistory.length === 0 ? (
+            {historyTab === 'preflight' && preflightHistoryResult ? (
+              <div className="space-y-6">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="text-sm text-text-muted">
+                    {preflightHistoryMeta?.plan_name || 'תכנית ללא שם'} ·{' '}
+                    {preflightHistoryMeta?.created_at
+                      ? new Date(preflightHistoryMeta.created_at).toLocaleDateString('he-IL', {
+                          year: 'numeric',
+                          month: 'long',
+                          day: 'numeric',
+                        })
+                      : ''}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      icon={<Download className="w-4 h-4" />}
+                      onClick={openPrintablePreflightReport}
+                      title="פותח חלון הדפסה (שמור כ-PDF)"
+                    >
+                      ייצוא PDF
+                    </Button>
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      icon={<Download className="w-4 h-4" />}
+                      onClick={downloadPreflightJsonReport}
+                      title="מוריד JSON מלא לשיתוף/למידה"
+                    >
+                      ייצוא JSON
+                    </Button>
+                  </div>
+                </div>
+                <PreflightChecks
+                  loading={false}
+                  result={preflightHistoryResult}
+                  onBack={() => {
+                    setPreflightHistoryResult(null);
+                    setPreflightHistoryMeta(null);
+                  }}
+                  onContinue={() => {}}
+                  continueEnabled={false}
+                />
+              </div>
+            ) : historyTab === 'validation' && validationHistory.length === 0 ? (
               <Card padding="lg">
                 <EmptyState
                   icon={<History className="w-8 h-8" />}
@@ -2531,6 +2871,69 @@ function App() {
                   }}
                 />
               </Card>
+            ) : historyTab === 'preflight' ? (
+              <div className="space-y-4">
+                {preflightHistory.length === 0 ? (
+                  <Card padding="lg">
+                    <EmptyState
+                      icon={<History className="w-8 h-8" />}
+                      title="אין תנאי סף קודמים"
+                      description="הרץ תנאי סף כדי לראות אותם כאן"
+                      action={{
+                        label: 'התחל בדיקה',
+                        onClick: resetWorkflow,
+                      }}
+                    />
+                  </Card>
+                ) : (
+                  preflightHistory.map((entry: any) => (
+                    <div
+                      key={entry.id || entry.preflight_id}
+                      onClick={() => loadPreflightResults(entry.id || entry.preflight_id)}
+                      className="cursor-pointer"
+                    >
+                      <Card
+                        hover
+                        padding="md"
+                        className="transition-all hover:shadow-lg hover:border-primary/30"
+                      >
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-4">
+                            <div className="w-12 h-12 bg-primary/10 rounded-lg flex items-center justify-center">
+                              <FileText className="w-6 h-6 text-primary" />
+                            </div>
+                            <div>
+                              <h3 className="font-semibold text-text-primary">
+                                {entry.plan_name || 'תכנית ללא שם'}
+                              </h3>
+                              <p className="text-sm text-text-muted">
+                                {entry.created_at
+                                  ? new Date(entry.created_at).toLocaleDateString('he-IL', {
+                                      year: 'numeric',
+                                      month: 'long',
+                                      day: 'numeric',
+                                    })
+                                  : ''}
+                              </p>
+                              <p className="text-xs text-text-muted/60 font-mono">
+                                ID: {(entry.id || entry.preflight_id || '').substring(0, 12)}...
+                              </p>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-3">
+                            <Badge variant={entry.passed ? 'success' : 'error'}>
+                              {entry.passed ? 'עבר' : 'נכשל'}
+                            </Badge>
+                            <span className="text-sm text-text-muted">
+                              {entry.segment_count || 0} סגמנטים
+                            </span>
+                          </div>
+                        </div>
+                      </Card>
+                    </div>
+                  ))
+                )}
+              </div>
             ) : (
               <div className="space-y-4">
                 {validationHistory.map((validation: any) => (

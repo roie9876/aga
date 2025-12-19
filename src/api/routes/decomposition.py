@@ -563,8 +563,8 @@ async def analyze_decomposition_segments(
         # This endpoint can be called with many segments (e.g., when uploading a folder of
         # already-cropped images). Running GPT analysis strictly sequentially can take a
         # very long time, so we parallelize with a small concurrency limit.
-        analysis_concurrency = max(1, int(os.getenv("SEGMENT_ANALYSIS_CONCURRENCY", "3")))
-        analysis_timeout_seconds = max(30, int(os.getenv("SEGMENT_ANALYSIS_TIMEOUT_SECONDS", "300")))
+        analysis_concurrency = max(1, int(getattr(settings, "segment_analysis_concurrency", 4)))
+        analysis_timeout_seconds = max(30, int(getattr(settings, "segment_analysis_timeout_seconds", 300)))
         limiter = anyio.CapacityLimiter(analysis_concurrency)
         update_lock = anyio.Lock()
         updated = 0
@@ -726,9 +726,8 @@ async def analyze_decomposition_segments_stream(
             if not seg_id:
                 return
 
-            await send_stream.send({"type": "segment_start", "segment_id": seg_id})
-
             async with limiter:
+                await send_stream.send({"type": "segment_start", "segment_id": seg_id})
                 try:
                     with anyio.fail_after(analysis_timeout_seconds):
                         result = await analyzer.analyze_segment(

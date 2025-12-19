@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime
+from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException
 
@@ -77,10 +79,53 @@ async def run_preflight(request: SubmissionPreflightRequest) -> SubmissionPrefli
         )
 
         summary = "כל תנאי הסף עברו בהצלחה" if passed else "חלק מתנאי הסף נכשלו – יש להשלים מסמכים/חתימות"
+
+        preflight_id = f"preflight_{uuid4().hex}"
+        created_at = datetime.utcnow().isoformat()
+        metadata = decomposition.get("metadata") if isinstance(decomposition, dict) else {}
+        plan_name = (
+            (metadata or {}).get("project_name")
+            or (metadata or {}).get("plan_number")
+            or f"תכנית {str(request.decomposition_id)[:8]}"
+        )
+
+        preflight_doc = {
+            "id": preflight_id,
+            "type": "submission_preflight",
+            "preflight_id": preflight_id,
+            "decomposition_id": request.decomposition_id,
+            "approved_segment_ids": list(request.approved_segment_ids or []),
+            "strict": bool(request.strict),
+            "run_llm_checks": bool(request.run_llm_checks),
+            "passed": bool(passed),
+            "summary": summary,
+            "checks": [c.model_dump() for c in checks],
+            "created_at": created_at,
+            "plan_name": plan_name,
+            "segment_count": segment_count,
+        }
+
+        try:
+            await cosmos_client.upsert_item(preflight_doc)
+        except Exception as e:
+            logger.error(
+                "Failed to persist preflight history",
+                decomposition_id=request.decomposition_id,
+                error=str(e),
+            )
+
         return SubmissionPreflightResponse(
             passed=passed,
             summary=summary,
             checks=checks,
+            preflight_id=preflight_id,
+            created_at=created_at,
+            decomposition_id=request.decomposition_id,
+            approved_segment_ids=list(request.approved_segment_ids or []),
+            strict=bool(request.strict),
+            run_llm_checks=bool(request.run_llm_checks),
+            segment_count=segment_count,
+            plan_name=plan_name,
         )
 
     except HTTPException:
@@ -111,7 +156,63 @@ async def run_preflight_inline(request: InlineSubmissionPreflightRequest) -> Sub
         )
 
         summary = "כל תנאי הסף עברו בהצלחה" if passed else "חלק מתנאי הסף נכשלו – יש להשלים מסמכים/חתימות"
-        return SubmissionPreflightResponse(passed=passed, summary=summary, checks=checks)
+        created_at = datetime.utcnow().isoformat()
+        preflight_id = f"preflight_inline_{uuid4().hex}"
+        return SubmissionPreflightResponse(
+            passed=passed,
+            summary=summary,
+            checks=checks,
+            preflight_id=preflight_id,
+            created_at=created_at,
+            approved_segment_ids=list(request.approved_segment_ids or []),
+            strict=bool(request.strict),
+            run_llm_checks=bool(request.run_llm_checks),
+        )
     except Exception as e:
         logger.error("Inline preflight failed", error=str(e))
         raise HTTPException(status_code=500, detail="שגיאה בהרצת בדיקת תנאי סף")
+
+
+@router.get("/history")
+async def list_preflight_history():
+    """List preflight history (newest first)."""
+    logger.info("Fetching preflight history")
+
+    try:
+        cosmos_client = get_cosmos_client()
+        query = """
+            SELECT c.id, c.preflight_id, c.decomposition_id, c.plan_name,
+                   c.segment_count, c.passed, c.summary, c.created_at
+            FROM c
+            WHERE c.type = 'submission_preflight'
+            ORDER BY c._ts DESC
+        """
+        results = await cosmos_client.query_items(query, [])
+        return {"total": len(results), "preflights": results}
+    except Exception as e:
+        logger.error("Failed to fetch preflight history", error=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to fetch preflight history: {str(e)}")
+
+
+@router.get("/{preflight_id}")
+async def get_preflight(preflight_id: str):
+    """Get detailed preflight results by ID."""
+    logger.info("Fetching preflight results", preflight_id=preflight_id)
+
+    try:
+        cosmos_client = get_cosmos_client()
+        query = """
+            SELECT * FROM c
+            WHERE c.id = @preflight_id
+            AND c.type = 'submission_preflight'
+        """
+        parameters = [{"name": "@preflight_id", "value": preflight_id}]
+        results = await cosmos_client.query_items(query, parameters)
+        if not results:
+            raise HTTPException(status_code=404, detail=f"Preflight not found: {preflight_id}")
+        return results[0]
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to fetch preflight results", error=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to fetch preflight results: {str(e)}")
