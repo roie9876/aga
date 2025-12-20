@@ -131,7 +131,7 @@ import { Button } from './components/ui';
 ```tsx
 <FileUploadZone
   onFileSelect={(file) => console.log(file)}
-  accept=".pdf,.png,.jpg"
+  accept=".pdf,.png,.jpg,.dwf,.dwfx"
   maxSize={50 * 1024 * 1024}
   loading={false}
 />

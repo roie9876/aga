@@ -2,6 +2,9 @@
 import json
 import time
 import uuid
+import os
+import tempfile
+import anyio
 from typing import List, Dict, Any, Optional, Tuple
 from io import BytesIO
 from PIL import Image
@@ -833,6 +836,83 @@ b) **Identify what's inside:**
                 img_w = int(decomposition.full_plan_width or 0)
                 img_h = int(decomposition.full_plan_height or 0)
 
+            crop_image_path = plan_image_path
+            scale_x = 1.0
+            scale_y = 1.0
+
+            # If source is PDF, render a high-res copy for cropping to preserve detail.
+            if (
+                getattr(decomposition, "source_file_type", None) == "pdf"
+                and getattr(decomposition, "source_file_url", None)
+                and int(getattr(settings, "pdf_crop_render_dpi", 0)) > 0
+            ):
+                try:
+                    import requests
+                    from pdf2image import convert_from_bytes
+                    import math
+
+                    def _get() -> bytes:
+                        r = requests.get(decomposition.source_file_url, timeout=60)
+                        r.raise_for_status()
+                        return r.content
+
+                    pdf_bytes = await anyio.to_thread.run_sync(_get)
+                    requested_dpi = int(getattr(settings, "pdf_crop_render_dpi", 600))
+                    min_dpi = 100
+                    max_pixels = int(getattr(settings, "pdf_crop_max_pixels", 120_000_000))
+
+                    def _render(dpi: int):
+                        return convert_from_bytes(pdf_bytes, dpi=dpi, fmt="png", use_pdftocairo=True)
+
+                    images = None
+                    effective_dpi = requested_dpi
+                    try:
+                        images = _render(requested_dpi)
+                    except Exception as e:
+                        msg = str(e).lower()
+                        if "decompression bomb" in msg:
+                            for dpi in [800, 600, 450, 300, 200, 150]:
+                                if dpi > requested_dpi:
+                                    continue
+                                if dpi < min_dpi:
+                                    break
+                                try:
+                                    images = _render(dpi)
+                                    effective_dpi = dpi
+                                    break
+                                except Exception as e2:
+                                    if "decompression bomb" in str(e2).lower():
+                                        continue
+                                    raise
+                        else:
+                            raise
+
+                    if images:
+                        image = images[0]
+                        pixel_count = int(image.width * image.height)
+                        if pixel_count > max_pixels:
+                            scale = math.sqrt(max_pixels / float(pixel_count))
+                            new_w = max(1, int(image.width * scale))
+                            new_h = max(1, int(image.height * scale))
+                            image = image.resize((new_w, new_h), resample=Image.Resampling.LANCZOS)
+
+                        hr_path = os.path.join(tempfile.mkdtemp(), "full_plan_hr.png")
+                        image.save(hr_path, format="PNG", optimize=True)
+                        crop_image_path = hr_path
+                        scale_x = float(image.width) / float(img_w or image.width)
+                        scale_y = float(image.height) / float(img_h or image.height)
+
+                        logger.info(
+                            "Using high-res PDF render for cropping",
+                            dpi=effective_dpi,
+                            original_dimensions=f"{img_w}x{img_h}",
+                            rendered_dimensions=f"{image.width}x{image.height}",
+                            scale_x=scale_x,
+                            scale_y=scale_y,
+                        )
+                except Exception as e:
+                    logger.warning("Failed to render high-res PDF for cropping", error=str(e))
+
             def _clamp_bbox(b: Dict[str, Any]) -> Dict[str, Any]:
                 if img_w <= 0 or img_h <= 0:
                     return b
@@ -858,6 +938,16 @@ b) **Identify what's inside:**
                 x2 = x2 + pad
                 y2 = y2 + pad
                 return _clamp_bbox({"x": x, "y": y, "width": x2 - x, "height": y2 - y})
+
+            def _scale_bbox(b: Dict[str, Any]) -> Dict[str, Any]:
+                if scale_x == 1.0 and scale_y == 1.0:
+                    return b
+                return {
+                    "x": float(b.get("x", 0)) * scale_x,
+                    "y": float(b.get("y", 0)) * scale_y,
+                    "width": float(b.get("width", 0)) * scale_x,
+                    "height": float(b.get("height", 0)) * scale_y,
+                }
 
             # Upload full plan first
             with open(plan_image_path, 'rb') as f:
@@ -932,9 +1022,10 @@ b) **Identify what's inside:**
                     pad = float(max(4.0, min(40.0, min(float(refined_bbox.get("width", 0)), float(refined_bbox.get("height", 0))) * 0.02)))
                     crop_bbox = _expand_bbox(refined_bbox, pad) if (img_w > 0 and img_h > 0) else refined_bbox
 
+                    crop_bbox_scaled = _scale_bbox(crop_bbox)
                     cropped_buffer, thumb_buffer = self.image_cropper.crop_and_create_thumbnail(
-                        image_path=plan_image_path,
-                        bounding_box=crop_bbox
+                        image_path=crop_image_path,
+                        bounding_box=crop_bbox_scaled
                     )
                     
                     # Upload cropped segment
@@ -989,4 +1080,3 @@ def get_decomposition_service() -> PlanDecompositionService:
     if _decomposition_service is None:
         _decomposition_service = PlanDecompositionService()
     return _decomposition_service
-

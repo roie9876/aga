@@ -49,7 +49,7 @@ async def validate_plan(
         if not is_supported_format(file.filename):
             raise HTTPException(
                 status_code=400,
-                detail=f"Unsupported file format: {file.filename}. Supported: PDF, PNG, JPG"
+                detail=f"Unsupported file format: {file.filename}. Supported: PDF, PNG, JPG, DWF, DWFX"
             )
         
         # Generate unique validation ID

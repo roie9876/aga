@@ -28,12 +28,14 @@ interface DecompositionReviewProps {
   decompositionId: string;
   onApprove: (params: { mode: 'segments' | 'full_plan'; approvedSegments: string[]; check_groups: string[] }) => void;
   onReject: () => void;
+  onOpenSegmentImage?: (segment: { segment_id: string; title?: string; thumbnail_url?: string; blob_url?: string }) => void;
 }
 
 export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
   decompositionId,
   onApprove,
   onReject,
+  onOpenSegmentImage,
 }) => {
   const [decomposition, setDecomposition] = useState<PlanDecomposition | null>(null);
   const [loading, setLoading] = useState(true);
@@ -120,7 +122,7 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
     const fitW = (containerW / naturalW) * 100;
     const fitH = (containerH / naturalH) * 100;
     const fit = Math.floor(Math.min(fitW, fitH, 100));
-    setZoom(Math.max(10, Math.min(200, fit || 20)));
+    setZoom(Math.max(10, Math.min(1000, fit || 20)));
     didAutoFitZoomRef.current = true;
   };
 
@@ -552,7 +554,7 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
                 <ZoomOut className="w-4 h-4" />
               </button>
               <span className="text-sm font-mono w-12 text-center text-text-primary">{zoom}%</span>
-              <button onClick={() => setZoom(Math.min(200, zoom + 10))} className="p-1.5 hover:bg-muted rounded-md text-text-muted hover:text-text-primary">
+              <button onClick={() => setZoom(Math.min(1000, zoom + 10))} className="p-1.5 hover:bg-muted rounded-md text-text-muted hover:text-text-primary">
                 <ZoomIn className="w-4 h-4" />
               </button>
             </div>
@@ -680,7 +682,12 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
           >
             <div className="p-4 flex items-start gap-4">
               {/* Thumbnail */}
-              <div className="shrink-0 w-32 h-24 rounded-lg border border-border bg-muted overflow-hidden relative group">
+              <button
+                type="button"
+                className="shrink-0 w-32 h-24 rounded-lg border border-border bg-muted overflow-hidden relative group focus:outline-none focus:ring-2 focus:ring-primary/40"
+                onClick={() => onOpenSegmentImage?.(segment)}
+                aria-label={`פתח תמונה של ${segment.title || segment.segment_id}`}
+              >
                 {segment.thumbnail_url ? (
                   <img
                     src={segment.thumbnail_url}
@@ -692,7 +699,7 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
                     <LayoutGrid className="w-8 h-8 opacity-20" />
                   </div>
                 )}
-              </div>
+              </button>
 
               {/* Content */}
               <div className="grow min-w-0">

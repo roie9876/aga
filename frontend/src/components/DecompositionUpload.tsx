@@ -270,7 +270,7 @@ export const DecompositionUpload: React.FC<DecompositionUploadProps> = ({
           id="file-input"
           type="file"
           className="hidden"
-          accept=".pdf,.png,.jpg,.jpeg"
+          accept=".pdf,.png,.jpg,.jpeg,.dwf,.dwfx"
           onChange={handleFileSelect}
         />
 
@@ -280,7 +280,7 @@ export const DecompositionUpload: React.FC<DecompositionUploadProps> = ({
           type="file"
           className="hidden"
           multiple
-          accept="image/*,.pdf"
+          accept="image/*,.pdf,.dwf,.dwfx"
           onChange={handleSegmentsFolderSelect}
         />
 
@@ -293,7 +293,7 @@ export const DecompositionUpload: React.FC<DecompositionUploadProps> = ({
           </div>
           <div>
             <h3 className="text-lg font-semibold text-text-primary">גרור קובץ לכאן או לחץ לבחירה</h3>
-            <p className="text-sm text-text-muted mt-1">פורמטים: PDF, PNG, JPG · עד 50MB</p>
+            <p className="text-sm text-text-muted mt-1">פורמטים: PDF, PNG, JPG, DWF, DWFX · עד 50MB</p>
           </div>
           <div className="flex flex-wrap items-center justify-center gap-2 text-xs text-text-muted mt-2">
             <span className="px-2.5 py-1 rounded-full bg-background border border-border">המרה אוטומטית ל-PNG</span>
@@ -321,7 +321,7 @@ export const DecompositionUpload: React.FC<DecompositionUploadProps> = ({
           <div className="flex items-start gap-3">
             <FileImage className="w-5 h-5 text-primary shrink-0 mt-0.5" />
             <div className="text-sm text-text-primary leading-relaxed">
-              <strong className="font-semibold">תמיכה בקבצים</strong>: המערכת מקבלת PDF או תמונה (PNG/JPG). קבצי CAD (כמו DWF/DWFX/DWG) אינם נתמכים.
+              <strong className="font-semibold">תמיכה בקבצים</strong>: המערכת מקבלת PDF, תמונה (PNG/JPG) וגם DWF/DWFX (בהמרה ל‑PNG).
             </div>
           </div>
         </div>

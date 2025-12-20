@@ -3,8 +3,9 @@ from fastapi.testclient import TestClient
 
 
 @pytest.mark.asyncio
-async def test_run_submission_preflight_passes_for_complete_package() -> None:
+async def test_run_submission_preflight_reports_for_complete_package() -> None:
     from src.services.submission_preflight import run_submission_preflight
+    from src.models.preflight import PreflightStatus
 
     decomposition = {
         "id": "decomp-1",
@@ -14,9 +15,9 @@ async def test_run_submission_preflight_passes_for_complete_package() -> None:
             {"segment_id": "s-sec-1", "type": "section", "title": "חתך א-א 1:100"},
             {"segment_id": "s-sec-2", "type": "section", "title": "חתך ב-ב 1:100"},
             {"segment_id": "s-elev", "type": "elevation", "title": "חזית צפונית 1:100"},
-            {"segment_id": "s-table", "type": "table", "title": "טבלה מרכזת פרטי בקשה"},
-            {"segment_id": "s-env", "type": "other", "title": "תשריט סביבה"},
-            {"segment_id": "s-site", "type": "other", "title": "מפה מצבית"},
+            {"segment_id": "s-table", "type": "table", "title": "טבלה מרכזת פרטי בקשה 123456"},
+            {"segment_id": "s-env", "type": "other", "title": "תשריט סביבה 1:250"},
+            {"segment_id": "s-site", "type": "other", "title": "מפה מצבית 1:250"},
             {"segment_id": "s-decl", "type": "other", "title": "הצהרה חתומה"},
             {
                 "segment_id": "s-mamad",
@@ -42,11 +43,15 @@ async def test_run_submission_preflight_passes_for_complete_package() -> None:
         run_llm_checks=False,
     )
 
-    assert passed is True
+    assert passed is False
     assert isinstance(checks, list)
     # Spot-check required preflight IDs exist
     check_ids = {c.check_id for c in checks}
-    assert {"PF-01", "PF-02", "PF-03", "PF-04", "PF-05", "PF-06", "PF-07"}.issubset(check_ids)
+    assert {"PF-01", "PF-02", "PF-03", "PF-04", "PF-05", "PF-06", "PF-07", "PF-13"}.issubset(check_ids)
+
+    pf03 = next((c for c in checks if c.check_id == "PF-03"), None)
+    assert pf03 is not None
+    assert pf03.status in {PreflightStatus.FAILED, PreflightStatus.ERROR}
 
 
 @pytest.mark.asyncio

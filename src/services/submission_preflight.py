@@ -96,6 +96,19 @@ _HEBREW_KEYWORDS = {
         "סימונים",
         "סימבולים",
     ],
+    "rishuy_zamin": [
+        "מערכת רישוי זמין",
+        "רישוי זמין",
+        "מנהל התכנון",
+        "ועדה מקומית",
+    ],
+    "decision_form": [
+        "טופס החלטה",
+        "החלטת רשות",
+        "החלטה",
+        "החלטת ועדה",
+        "פרוטוקול החלטה",
+    ],
     "mamad": ["ממ\"ד", "ממד", "מרחב מוגן", "ממ"],
     "wall_reduction": ["ירידת קירות", "ירידה", "קירות יורדים"],
     "structural": ["זיון", "ברזל", "ריתום", "פרטי פתחים", "פתח", "תקרה", "רצפה"],
@@ -115,6 +128,7 @@ _CHECK_EXPLANATIONS: Dict[str, str] = {
     "PF-10": "בודק האם צורף מקרא/טבלת הגדרות/סימונים לרכיבים, כדי להבין סימבולים והערות בתכניות.",
     "PF-11": "בודק (אם רלוונטי) האם צורפה תכנית/חישוב ירידת קירות.",
     "PF-12": "בודק (Best-effort) האם צורפו פרטים הנדסיים כמו זיון/ריתום/פתחים, או לפחות אותרו אינדיקציות לכך בניתוח.",
+    "PF-13": "בודק האם צורף טופס החלטה מרישוי זמין (מנהל התכנון/רשות מקומית) עם פרטי הבקשה והחלטה.",
 }
 
 
@@ -331,6 +345,50 @@ def _has_area_table_signal(text: str) -> bool:
     return has_table and has_area
 
 
+def _has_numeric_token(text: str, *, min_digits: int = 2) -> bool:
+    if not text:
+        return False
+    return bool(re.search(rf"\b\d{{{min_digits},}}\b", text))
+
+
+def _has_scale_token(text: str) -> bool:
+    if not text:
+        return False
+    return bool(re.search(r"\b1\s*[:/]\s*\d+\b", text)) or ("קנ\"מ" in text) or ("קנה מידה" in text)
+
+
+def _has_area_values(text: str) -> bool:
+    if not text:
+        return False
+    return bool(re.search(r"\b\d+(?:\.\d+)?\s*(?:מ\"ר|מ״ר|m2|m²)\b", text, re.IGNORECASE))
+
+
+def _has_request_table_signal(text: str) -> bool:
+    if not text:
+        return False
+    id_tokens = ["מספר", "בקשה", "תיק", "גוש", "חלקה", "מגרש"]
+    return _has_numeric_token(text, min_digits=3) and any(tok in text for tok in id_tokens)
+
+
+def _has_rebar_signal(text: str) -> bool:
+    if not text:
+        return False
+    return bool(
+        re.search(r"(Ø|Φ|ϕ|φ)\s*\d{2}", text)
+        or re.search(r"\b\d{2}\s*(?:מ\"מ|מ״מ|mm)\b", text)
+        or ("ברזל" in text and _has_numeric_token(text, min_digits=2))
+        or ("זיון" in text and _has_numeric_token(text, min_digits=2))
+    )
+
+
+def _has_rishuy_zamin_decision(text: str) -> bool:
+    if not text:
+        return False
+    has_system = _match_keywords(text, _HEBREW_KEYWORDS["rishuy_zamin"])
+    has_decision = _match_keywords(text, _HEBREW_KEYWORDS["decision_form"])
+    return has_system and has_decision
+
+
 def _has_any_dimension(seg: Dict[str, Any]) -> bool:
     ad = seg.get("analysis_data")
     if not isinstance(ad, dict):
@@ -407,26 +465,52 @@ async def run_submission_preflight(
         )
     )
 
-    # PF-01: request summary table
-    request_table = by_type.get(SegmentType.TABLE, []) + _find_segments_by_keywords(approved_segments, "request_table")
-    request_table_ids = list({str(s.get("segment_id")) for s in request_table if s.get("segment_id")})
+    # PF-01: request summary table (require table + identifiers)
+    request_table_candidates = by_type.get(SegmentType.TABLE, []) + _find_segments_by_keywords(approved_segments, "request_table")
+    request_table_strong: List[Dict[str, Any]] = []
+    request_table_weak: List[Dict[str, Any]] = []
+    for seg in request_table_candidates:
+        corpus = _segment_text_corpus(seg)
+        if _has_request_table_signal(corpus):
+            request_table_strong.append(seg)
+        else:
+            request_table_weak.append(seg)
+    request_table_ids = list({str(s.get("segment_id")) for s in request_table_strong if s.get("segment_id")})
+    weak_ids = list({str(s.get("segment_id")) for s in request_table_weak if s.get("segment_id")})
+    status = (
+        PreflightStatus.PASSED if request_table_ids
+        else (PreflightStatus.FAILED if strict else PreflightStatus.WARNING) if weak_ids
+        else PreflightStatus.FAILED
+    )
     checks.append(
         _mk_result(
             check_id="PF-01",
             title='קיימת טבלה מרכזת פרטי בקשה',
             pages=[5],
-            status=PreflightStatus.PASSED if request_table_ids else PreflightStatus.FAILED,
-            details='נמצא סגמנט שנראה כטבלת פרטי בקשה.' if request_table_ids else 'לא זוהתה טבלה/דף ריכוז פרטי בקשה.',
-            evidence=request_table_ids[:10],
+            status=status,
+            details=(
+                'נמצא סגמנט עם טבלת פרטי בקשה הכוללת מזהים/מספרים.'
+                if request_table_ids
+                else ('זוהה סגמנט טבלה אך ללא מזהים ברורים.' if weak_ids else 'לא זוהתה טבלה/דף ריכוז פרטי בקשה.')
+            ),
+            evidence=(request_table_ids or weak_ids)[:10],
         )
     )
 
-    # PF-02: environment sketch + site plan
+    # PF-02: environment sketch + site plan (require keywords + scale/numeric signal)
     env_like = _find_segments_by_keywords(approved_segments, "env_sketch")
     site_like = _find_segments_by_keywords(approved_segments, "site_plan")
-    env_ids = list({str(s.get("segment_id")) for s in env_like if s.get("segment_id")})
-    site_ids = list({str(s.get("segment_id")) for s in site_like if s.get("segment_id")})
-    status = PreflightStatus.PASSED if (env_ids and site_ids) else PreflightStatus.FAILED
+    env_strong = [s for s in env_like if _has_scale_token(_segment_text_corpus(s)) or _has_numeric_token(_segment_text_corpus(s), min_digits=2)]
+    site_strong = [s for s in site_like if _has_scale_token(_segment_text_corpus(s)) or _has_numeric_token(_segment_text_corpus(s), min_digits=2)]
+    env_ids = list({str(s.get("segment_id")) for s in env_strong if s.get("segment_id")})
+    site_ids = list({str(s.get("segment_id")) for s in site_strong if s.get("segment_id")})
+    weak_env_ids = list({str(s.get("segment_id")) for s in env_like if s.get("segment_id")})
+    weak_site_ids = list({str(s.get("segment_id")) for s in site_like if s.get("segment_id")})
+    status = (
+        PreflightStatus.PASSED if (env_ids and site_ids)
+        else (PreflightStatus.FAILED if strict else PreflightStatus.WARNING) if (weak_env_ids and weak_site_ids)
+        else PreflightStatus.FAILED
+    )
     checks.append(
         _mk_result(
             check_id="PF-02",
@@ -434,12 +518,16 @@ async def run_submission_preflight(
             pages=[5],
             status=status,
             details=(
-                'זוהו תשריט סביבה ומפה מצבית.'
+                'זוהו תשריט סביבה ומפה מצבית עם אינדיקציה לקנ\"מ/מידות.'
                 if status == PreflightStatus.PASSED
-                else f'חסר: ' + ('' if env_ids else 'תשריט סביבה ') + ('' if site_ids else 'מפה מצבית')
+                else (
+                    'זוהו תשריט סביבה ומפה מצבית אך ללא אינדיקציה לקנ\"מ/מידות.'
+                    if (weak_env_ids and weak_site_ids)
+                    else f'חסר: ' + ('' if weak_env_ids else 'תשריט סביבה ') + ('' if weak_site_ids else 'מפה מצבית')
+                )
             ).strip(),
-            evidence=(env_ids + site_ids)[:10],
-            debug={"env": env_ids, "site": site_ids},
+            evidence=(env_ids + site_ids or weak_env_ids + weak_site_ids)[:10],
+            debug={"env": env_ids, "site": site_ids, "env_weak": weak_env_ids, "site_weak": weak_site_ids},
         )
     )
 
@@ -503,6 +591,42 @@ async def run_submission_preflight(
         )
     )
 
+    # PF-13: decision form from "Rishuy Zamin" (best-effort unless strict)
+    rishuy_like: List[Dict[str, Any]] = []
+    rishuy_strong: List[Dict[str, Any]] = []
+    for seg in approved_segments:
+        corpus = _segment_text_corpus(seg)
+        if _match_keywords(corpus, _HEBREW_KEYWORDS["rishuy_zamin"]):
+            rishuy_like.append(seg)
+            if _has_rishuy_zamin_decision(corpus):
+                rishuy_strong.append(seg)
+
+    rishuy_ids = list({str(s.get("segment_id")) for s in rishuy_strong if s.get("segment_id")})
+    rishuy_weak_ids = list({str(s.get("segment_id")) for s in rishuy_like if s.get("segment_id")})
+    rishuy_status = (
+        PreflightStatus.PASSED if rishuy_ids
+        else (PreflightStatus.FAILED if strict else PreflightStatus.WARNING) if rishuy_weak_ids
+        else (PreflightStatus.FAILED if strict else PreflightStatus.WARNING)
+    )
+    checks.append(
+        _mk_result(
+            check_id="PF-13",
+            title='קיים טופס החלטה מרישוי זמין',
+            pages=[5],
+            status=rishuy_status,
+            details=(
+                'זוהה טופס החלטה מרישוי זמין (כולל אינדיקציה להחלטה).'
+                if rishuy_ids
+                else (
+                    'זוהה אזכור לרישוי זמין אך ללא אינדיקציה ברורה לטופס החלטה.'
+                    if rishuy_weak_ids
+                    else 'לא זוהה טופס החלטה מרישוי זמין.'
+                )
+            ),
+            evidence=(rishuy_ids or rishuy_weak_ids)[:10],
+        )
+    )
+
     # PF-07: mamad plan exists (best-effort) with 1:50 scale signal
     mamad_like: List[Dict[str, Any]] = []
     mamad_scale_like: List[Dict[str, Any]] = []
@@ -553,38 +677,51 @@ async def run_submission_preflight(
         )
     )
 
-    # PF-09: area calculation table
-    area_like: List[Dict[str, Any]] = []
+    # PF-09: area calculation table (require area values)
+    area_strong: List[Dict[str, Any]] = []
+    area_weak: List[Dict[str, Any]] = []
     for seg in approved_segments:
         corpus = _segment_text_corpus(seg)
-        is_table = _safe_segment_type(seg.get("type")) == SegmentType.TABLE
-        if is_table and _has_area_table_signal(corpus):
-            area_like.append(seg)
+        if _has_area_table_signal(corpus) and _has_area_values(corpus):
+            area_strong.append(seg)
         elif _has_area_table_signal(corpus):
-            area_like.append(seg)
-    area_ids = list({str(s.get("segment_id")) for s in area_like if s.get("segment_id")})
+            area_weak.append(seg)
+    area_ids = list({str(s.get("segment_id")) for s in area_strong if s.get("segment_id")})
+    area_weak_ids = list({str(s.get("segment_id")) for s in area_weak if s.get("segment_id")})
+    area_status = PreflightStatus.PASSED if area_ids else (PreflightStatus.WARNING if area_weak_ids else (PreflightStatus.WARNING if not strict else PreflightStatus.FAILED))
     checks.append(
         _mk_result(
             check_id="PF-09",
             title='קיימת טבלת חישוב שטחי מיגון (אם נדרש)',
             pages=[8],
-            status=PreflightStatus.PASSED if area_ids else (PreflightStatus.WARNING if not strict else PreflightStatus.FAILED),
-            details='נמצא סגמנט שמציג טבלת חישוב שטחים.' if area_ids else 'לא זוהתה טבלת שטחים. אם לא הועלתה עדיין טבלת שטחי מיגון – מומלץ להוסיף.',
-            evidence=area_ids[:10],
+            status=area_status,
+            details=(
+                'נמצאה טבלת שטחים עם ערכי מ\"ר.'
+                if area_ids
+                else ('זוהתה טבלת שטחים ללא ערכים ברורים.' if area_weak_ids else 'לא זוהתה טבלת שטחים. אם לא הועלתה עדיין טבלת שטחי מיגון – מומלץ להוסיף.')
+            ),
+            evidence=(area_ids or area_weak_ids)[:10],
         )
     )
 
     # PF-10: legend / verbal definitions
     legend_like = by_type.get(SegmentType.LEGEND, []) + _find_segments_by_keywords(approved_segments, "legend")
-    legend_ids = list({str(s.get("segment_id")) for s in legend_like if s.get("segment_id")})
+    legend_strong = [s for s in legend_like if _match_keywords(_segment_text_corpus(s), _HEBREW_KEYWORDS["legend"])]
+    legend_ids = list({str(s.get("segment_id")) for s in legend_strong if s.get("segment_id")})
+    legend_weak_ids = list({str(s.get("segment_id")) for s in legend_like if s.get("segment_id")})
+    legend_status = PreflightStatus.PASSED if legend_ids else (PreflightStatus.WARNING if legend_weak_ids else (PreflightStatus.WARNING if not strict else PreflightStatus.FAILED))
     checks.append(
         _mk_result(
             check_id="PF-10",
             title='קיים מקרא/טבלת הגדרות לרכיבי המרחב המוגן',
             pages=[10, 11],
-            status=PreflightStatus.PASSED if legend_ids else (PreflightStatus.WARNING if not strict else PreflightStatus.FAILED),
-            details='זוהה מקרא/טבלה.' if legend_ids else 'לא זוהה מקרא/טבלת הגדרות. מומלץ לכלול מקרא/טבלת רכיבים כנדרש במסמך.',
-            evidence=legend_ids[:10],
+            status=legend_status,
+            details=(
+                'זוהה מקרא/טבלת הגדרות עם טקסט מזוהה.'
+                if legend_ids
+                else ('זוהה סגמנט מקרא ללא טקסט מזוהה.' if legend_weak_ids else 'לא זוהה מקרא/טבלת הגדרות. מומלץ לכלול מקרא/טבלת רכיבים כנדרש במסמך.')
+            ),
+            evidence=(legend_ids or legend_weak_ids)[:10],
         )
     )
 
@@ -602,19 +739,27 @@ async def run_submission_preflight(
         )
     )
 
-    # PF-12: structural details
+    # PF-12: structural details (require rebar signals or analysis evidence)
     structural_like = _find_segments_by_keywords(approved_segments, "structural")
     structural_signal = any(_has_structural_signal(seg) for seg in approved_segments)
-    structural_ids = list({str(s.get("segment_id")) for s in structural_like if s.get("segment_id")})
+    structural_strong = [s for s in structural_like if _has_rebar_signal(_segment_text_corpus(s))]
+    structural_ids = list({str(s.get("segment_id")) for s in structural_strong if s.get("segment_id")})
     struct_ok = bool(structural_ids) or structural_signal
-    struct_status = PreflightStatus.PASSED if struct_ok else (PreflightStatus.FAILED if strict else PreflightStatus.WARNING)
+    struct_status = (
+        PreflightStatus.PASSED if struct_ok
+        else (PreflightStatus.FAILED if strict else PreflightStatus.WARNING)
+    )
     checks.append(
         _mk_result(
             check_id="PF-12",
             title='קיימים פרטים הנדסיים (זיון/ריתום/פתחים) (Best-effort)',
             pages=[14, 15, 16],
             status=struct_status,
-            details='זוהו פרטים הנדסיים (לפי כותרת/תיאור או לפי ניתוח).' if struct_ok else 'לא זוהו פרטים הנדסיים. מומלץ להוסיף סגמנט עם פרטי זיון/ריתום/פתחים כנדרש.',
+            details=(
+                'זוהו פרטים הנדסיים עם אינדיקציות זיון/ברזל.'
+                if struct_ok
+                else 'לא זוהו פרטים הנדסיים. מומלץ להוסיף סגמנט עם פרטי זיון/ריתום/פתחים כנדרש.'
+            ),
             evidence=structural_ids[:10],
             debug={"analysis_signal": structural_signal},
         )

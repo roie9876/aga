@@ -11,6 +11,7 @@ import anyio
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 from fastapi.responses import Response, StreamingResponse
 from typing import Optional
+from PIL import Image
 
 from src.models.decomposition import (
     PlanDecomposition,
@@ -28,6 +29,7 @@ from src.models.decomposition import (
     ManualRoi,
 )
 from src.services.segment_analyzer import SegmentAnalyzer
+from src.config import settings
 from src.services.plan_decomposition import get_decomposition_service
 from src.azure import get_cosmos_client
 from src.azure.blob_client import get_blob_client
@@ -303,7 +305,7 @@ async def get_segment_image(
 
 @router.post("/analyze", response_model=DecompositionResponse)
 async def decompose_plan(
-    file: UploadFile = File(..., description="Architectural plan file (PNG, JPG, PDF)"),
+    file: UploadFile = File(..., description="Architectural plan file (PNG, JPG, PDF, DWF, DWFX)"),
     project_id: str = Form(..., description="Project identifier"),
     validation_id: Optional[str] = Form(None, description="Optional validation ID"),
 ):
@@ -345,7 +347,10 @@ async def decompose_plan(
                    size_mb=f"{file_size_mb:.2f}")
         
         # Convert file to PNG if needed (DWF, PDF, etc.)
-        from src.utils.file_converter import convert_to_image_if_needed
+        from src.utils.file_converter import convert_to_image_if_needed, get_file_type
+        source_file_type = get_file_type(file.filename)
+        source_file_url = None
+        source_file_name = file.filename
         
         try:
             plan_image_bytes, processed_filename, was_converted = convert_to_image_if_needed(
@@ -369,6 +374,23 @@ async def decompose_plan(
                 status_code=500,
                 detail=f"שגיאה בלתי צפויה בהמרת קובץ: {str(conv_error)}"
             )
+
+        # Store original source file (PDF/DWF) for high-res cropping if available.
+        try:
+            if source_file_type in {"pdf", "dwf"}:
+                blob_client = get_blob_client()
+                source_blob = f"{validation_id}/source/{file.filename}"
+                source_file_url = await blob_client.upload_blob(
+                    blob_name=source_blob,
+                    data=BytesIO(file_content),
+                )
+                logger.info(
+                    "Source file uploaded",
+                    source_type=source_file_type,
+                    source_url=source_file_url[:100] + "...",
+                )
+        except Exception as src_error:
+            logger.warning("Failed to upload source file", error=str(src_error))
         
         # Save to temp file for processing
         temp_dir = tempfile.mkdtemp()
@@ -396,6 +418,9 @@ async def decompose_plan(
             full_plan_width=actual_width,
             full_plan_height=actual_height,
             file_size_mb=file_size_mb,
+            source_file_url=source_file_url,
+            source_file_type=source_file_type,
+            source_file_name=source_file_name,
             metadata=ProjectMetadata(),
             segments=[],
             processing_stats=ProcessingStats(
@@ -405,6 +430,84 @@ async def decompose_plan(
             ),
         )
         
+        # Optionally persist a local copy for troubleshooting
+        try:
+            export_dir = settings.full_plan_local_export_dir or str(Path.cwd() / "tmp" / "full_plan_exports")
+            os.makedirs(export_dir, exist_ok=True)
+            local_export_path = os.path.join(export_dir, f"{decomp_id}.png")
+            with open(local_export_path, "wb") as f:
+                f.write(plan_image_bytes)
+            logger.info(
+                "Saved local full plan copy",
+                decomposition_id=decomp_id,
+                local_path=local_export_path,
+            )
+
+            # Optional: tile the full-plan image into smaller PNGs for zoomed inspection.
+            if bool(settings.dwf_tiling_enabled):
+                tile_size = int(settings.dwf_tile_size)
+                overlap = int(settings.dwf_tile_overlap)
+                step = max(1, tile_size - overlap)
+                tiles_dir = os.path.join(export_dir, f"{decomp_id}_tiles")
+                os.makedirs(tiles_dir, exist_ok=True)
+
+                with Image.open(BytesIO(plan_image_bytes)) as img:
+                    crop_img = img
+                    if bool(settings.dwf_tile_crop_enabled):
+                        try:
+                            gray = img.convert("L")
+                            threshold = int(settings.dwf_tile_crop_threshold)
+                            mask = gray.point(lambda p: 255 if p < threshold else 0)
+                            bbox = mask.getbbox()
+                            if bbox:
+                                crop_img = img.crop(bbox)
+                                crop_path = os.path.join(export_dir, f"{decomp_id}_cropped.png")
+                                crop_img.save(crop_path, format="PNG", optimize=True)
+                                logger.info(
+                                    "Saved cropped full plan copy",
+                                    decomposition_id=decomp_id,
+                                    local_path=crop_path,
+                                    bbox=bbox,
+                                )
+                        except Exception as crop_error:
+                            logger.warning(
+                                "Failed to crop full plan image",
+                                decomposition_id=decomp_id,
+                                error=str(crop_error),
+                            )
+
+                    img = crop_img
+                    width, height = img.size
+                    row = 0
+                    for y in range(0, height, step):
+                        col = 0
+                        for x in range(0, width, step):
+                            box = (x, y, min(x + tile_size, width), min(y + tile_size, height))
+                            tile = img.crop(box)
+                            tile_path = os.path.join(tiles_dir, f"tile_r{row:03d}_c{col:03d}.png")
+                            tile.save(tile_path, format="PNG", optimize=True)
+                            col += 1
+                        row += 1
+
+                logger.info(
+                    "Saved tiled full plan copies",
+                    decomposition_id=decomp_id,
+                    tiles_dir=tiles_dir,
+                    tile_size=tile_size,
+                    overlap=overlap,
+                )
+            else:
+                logger.info(
+                    "Tiling disabled; only full plan saved",
+                    decomposition_id=decomp_id,
+                )
+        except Exception as export_error:
+            logger.warning(
+                "Failed to save local full plan copy",
+                decomposition_id=decomp_id,
+                error=str(export_error),
+            )
+
         # Upload full plan (no segments to crop)
         decomposition_service = get_decomposition_service()
         logger.info(
@@ -1019,6 +1122,83 @@ async def add_manual_segments(
             f.write(full_plan_bytes)
 
         try:
+            crop_image_path = temp_image_path
+            scale_x = 1.0
+            scale_y = 1.0
+
+            # If source is PDF, render a high-res copy for cropping to preserve detail.
+            if (
+                getattr(decomposition, "source_file_type", None) == "pdf"
+                and getattr(decomposition, "source_file_url", None)
+                and int(getattr(settings, "pdf_crop_render_dpi", 0)) > 0
+            ):
+                try:
+                    import math
+                    import requests
+                    from pdf2image import convert_from_bytes
+
+                    def _get() -> bytes:
+                        r = requests.get(decomposition.source_file_url, timeout=60)
+                        r.raise_for_status()
+                        return r.content
+
+                    pdf_bytes = await anyio.to_thread.run_sync(_get)
+                    requested_dpi = int(getattr(settings, "pdf_crop_render_dpi", 600))
+                    min_dpi = 100
+                    max_pixels = int(getattr(settings, "pdf_crop_max_pixels", 120_000_000))
+
+                    def _render(dpi: int):
+                        return convert_from_bytes(pdf_bytes, dpi=dpi, fmt="png", use_pdftocairo=True)
+
+                    images = None
+                    effective_dpi = requested_dpi
+                    try:
+                        images = _render(requested_dpi)
+                    except Exception as e:
+                        msg = str(e).lower()
+                        if "decompression bomb" in msg:
+                            for dpi in [800, 600, 450, 300, 200, 150]:
+                                if dpi > requested_dpi:
+                                    continue
+                                if dpi < min_dpi:
+                                    break
+                                try:
+                                    images = _render(dpi)
+                                    effective_dpi = dpi
+                                    break
+                                except Exception as e2:
+                                    if "decompression bomb" in str(e2).lower():
+                                        continue
+                                    raise
+                        else:
+                            raise
+
+                    if images:
+                        image = images[0]
+                        pixel_count = int(image.width * image.height)
+                        if pixel_count > max_pixels:
+                            scale = math.sqrt(max_pixels / float(pixel_count))
+                            new_w = max(1, int(image.width * scale))
+                            new_h = max(1, int(image.height * scale))
+                            image = image.resize((new_w, new_h), resample=Image.Resampling.LANCZOS)
+
+                        hr_path = os.path.join(tempfile.mkdtemp(), "full_plan_hr.png")
+                        image.save(hr_path, format="PNG", optimize=True)
+                        crop_image_path = hr_path
+                        scale_x = float(image.width) / float(decomposition.full_plan_width or image.width)
+                        scale_y = float(image.height) / float(decomposition.full_plan_height or image.height)
+
+                        logger.info(
+                            "Using high-res PDF render for manual cropping",
+                            dpi=effective_dpi,
+                            original_dimensions=f"{decomposition.full_plan_width}x{decomposition.full_plan_height}",
+                            rendered_dimensions=f"{image.width}x{image.height}",
+                            scale_x=scale_x,
+                            scale_y=scale_y,
+                        )
+                except Exception as e:
+                    logger.warning("Failed to render high-res PDF for manual cropping", error=str(e))
+
             # Lightweight crop/upload for manual ROIs: no OpenCV refinement and no full-plan re-upload.
             cropper = get_image_cropper()
 
@@ -1035,9 +1215,15 @@ async def add_manual_segments(
                     "height": min(float(decomposition.full_plan_height) - max(0.0, float(bbox.y) - pad), h + 2 * pad),
                 }
 
+                crop_bbox_scaled = {
+                    "x": crop_bbox["x"] * scale_x,
+                    "y": crop_bbox["y"] * scale_y,
+                    "width": crop_bbox["width"] * scale_x,
+                    "height": crop_bbox["height"] * scale_y,
+                }
                 cropped_buffer, thumb_buffer = cropper.crop_and_create_thumbnail(
-                    image_path=temp_image_path,
-                    bounding_box=crop_bbox,
+                    image_path=crop_image_path,
+                    bounding_box=crop_bbox_scaled,
                 )
 
                 segment_blob = f"{validation_id}/segments/{seg.segment_id}.png"

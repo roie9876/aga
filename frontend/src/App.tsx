@@ -1692,6 +1692,12 @@ function App() {
               decompositionId={decompositionId}
               onApprove={handleApprovalComplete}
               onReject={() => setStage('upload')}
+              onOpenSegmentImage={(segment) => {
+                const src = String(segment?.blob_url || segment?.thumbnail_url || '').trim();
+                if (!src) return;
+                const title = String(segment?.title || segment?.segment_id || 'סגמנט');
+                setImageLightbox({ src, title });
+              }}
             />
             
             <div className="mt-10 text-center">

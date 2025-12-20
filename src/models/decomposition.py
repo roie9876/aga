@@ -88,6 +88,9 @@ class PlanDecomposition(BaseModel):
     full_plan_width: int = Field(..., description="Full plan width in pixels")
     full_plan_height: int = Field(..., description="Full plan height in pixels")
     file_size_mb: float = Field(..., description="File size in MB")
+    source_file_url: Optional[str] = Field(None, description="Azure Blob URL for original source file (PDF/DWF)")
+    source_file_type: Optional[str] = Field(None, description="Original source file type (pdf/dwf/image)")
+    source_file_name: Optional[str] = Field(None, description="Original source filename")
     
     # Metadata
     metadata: ProjectMetadata = Field(..., description="Extracted project metadata")

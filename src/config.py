@@ -72,6 +72,18 @@ class Settings(BaseSettings):
     # Segment analysis streaming (preflight auto-analysis UX)
     segment_analysis_concurrency: int = 4
     segment_analysis_timeout_seconds: int = 300
+
+    # DWF tiling (local export troubleshooting)
+    full_plan_local_export_dir: Optional[str] = None
+    dwf_tiling_enabled: bool = False
+    dwf_tile_size: int = 3000
+    dwf_tile_overlap: int = 100
+    dwf_tile_crop_enabled: bool = True
+    dwf_tile_crop_threshold: int = 250
+
+    # PDF high-res cropping (manual ROI quality)
+    pdf_crop_render_dpi: int = 600
+    pdf_crop_max_pixels: int = 120_000_000
     
     # Optional Azure Identity
     azure_tenant_id: Optional[str] = None

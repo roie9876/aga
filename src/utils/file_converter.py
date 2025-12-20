@@ -1,10 +1,9 @@
 """File conversion utilities for architectural plans.
 
-This app accepts only:
+This app accepts:
 - Images: PNG, JPG, JPEG
 - Documents: PDF (converted to PNG)
-
-Autodesk/CAD formats (e.g., DWF/DWFX/DWG) are intentionally not supported.
+- CAD: DWF/DWFX (converted to PNG via Aspose.CAD if available)
 """
 import io
 import os
@@ -32,7 +31,7 @@ def is_supported_format(filename: str) -> bool:
     Returns:
         True if format is supported
     """
-    supported_extensions = {'.png', '.jpg', '.jpeg', '.pdf'}
+    supported_extensions = {'.png', '.jpg', '.jpeg', '.pdf', '.dwf', '.dwfx'}
     ext = Path(filename).suffix.lower()
     return ext in supported_extensions
 
@@ -52,6 +51,8 @@ def get_file_type(filename: str) -> str:
         return 'image'
     elif ext == '.pdf':
         return 'pdf'
+    elif ext in {'.dwf', '.dwfx'}:
+        return 'dwf'
     else:
         return 'unknown'
 
@@ -86,6 +87,12 @@ def convert_to_image_if_needed(
     elif file_type == 'pdf':
         logger.info("Converting PDF to PNG (high resolution)", filename=filename)
         image_bytes, new_filename = convert_pdf_to_image(file_bytes, filename)
+        return image_bytes, new_filename, True
+    
+    # DWF/DWFX - convert to high-res PNG via Aspose.CAD
+    elif file_type == 'dwf':
+        logger.info("Converting DWF/DWFX to PNG (high resolution)", filename=filename)
+        image_bytes, new_filename = convert_dwf_to_image(file_bytes, filename)
         return image_bytes, new_filename, True
     
     else:
@@ -228,15 +235,189 @@ def convert_pdf_to_image(pdf_bytes: bytes, filename: str) -> Tuple[bytes, str]:
         
         new_filename = filename.rsplit('.', 1)[0] + '.png'
         
-        logger.info("PDF → PNG conversion complete",
-                   original=filename,
-                   converted=new_filename,
-                   size_kb=len(png_bytes) / 1024,
-                   dimensions=f"{image.width}x{image.height}",
-                   dpi=effective_dpi)
-        
+        logger.info(
+            "PDF → PNG conversion complete",
+            original=filename,
+            converted=new_filename,
+            size_kb=len(png_bytes) / 1024,
+            dimensions=f"{image.width}x{image.height}",
+            dpi=effective_dpi,
+        )
+
         return png_bytes, new_filename
-        
     except Exception as e:
-        logger.error("PDF conversion failed", error=str(e))
-        raise ValueError(f"Failed to convert PDF: {str(e)}")
+        logger.error("PDF conversion failed", filename=filename, error=str(e))
+        raise ValueError(f"PDF conversion failed: {str(e)}")
+
+
+def convert_dwf_to_image(dwf_bytes: bytes, filename: str) -> Tuple[bytes, str]:
+    """Convert DWF/DWFX to high-resolution PNG using Aspose.CAD.
+
+    Requires: `aspose-cad` Python package.
+    """
+    try:
+        import aspose.cad as cad  # type: ignore
+        from aspose.cad.imageoptions import PngOptions, CadRasterizationOptions  # type: ignore
+    except Exception as e:
+        logger.error("Aspose.CAD not installed", error=str(e))
+        raise ValueError(
+            "DWF/DWFX conversion requires Aspose.CAD.\n"
+            "Install: pip install aspose-cad"
+        )
+
+    dpi = int(os.getenv("DWF_CONVERSION_DPI", "600"))
+
+    image = cad.Image.load(io.BytesIO(dwf_bytes))
+    raster = CadRasterizationOptions()
+
+    try:
+        layouts = []
+        if hasattr(image, "layouts") and image.layouts:
+            layouts = list(image.layouts)
+        elif hasattr(image, "get_layouts"):
+            layouts = list(image.get_layouts())  # type: ignore[attr-defined]
+        if layouts:
+            requested_layout = os.getenv("DWF_CONVERSION_LAYOUT", "").strip()
+            render_all = os.getenv("DWF_CONVERSION_RENDER_ALL_LAYOUTS", "0").lower() in {"1", "true", "yes"}
+            if requested_layout and requested_layout in layouts:
+                raster.layouts = [requested_layout]
+                logger.info(
+                    "DWF rendering single requested layout",
+                    filename=filename,
+                    layout=requested_layout,
+                )
+            elif render_all:
+                raster.layouts = layouts
+                logger.info(
+                    "DWF rendering all layouts",
+                    filename=filename,
+                    layout_count=len(layouts),
+                )
+            else:
+                raster.layouts = [layouts[0]]
+                logger.info(
+                    "DWF rendering first layout only",
+                    filename=filename,
+                    layout=layouts[0],
+                    layout_count=len(layouts),
+                )
+    except Exception:
+        pass
+
+    if hasattr(raster, "unit_type"):
+        try:
+            raster.unit_type = cad.UnitType.PIXEL  # type: ignore[attr-defined]
+        except Exception:
+            pass
+    page_width = float(getattr(image, "width", 5000) or 5000)
+    page_height = float(getattr(image, "height", 3500) or 3500)
+    override_w = os.getenv("DWF_CONVERSION_PAGE_WIDTH", "").strip()
+    override_h = os.getenv("DWF_CONVERSION_PAGE_HEIGHT", "").strip()
+    if override_w and override_h:
+        try:
+            page_width = float(override_w)
+            page_height = float(override_h)
+        except Exception:
+            pass
+    scale = float(os.getenv("DWF_CONVERSION_SCALE", "4.0"))
+    if scale > 1.0:
+        page_width *= scale
+        page_height *= scale
+
+    logger.info(
+        "DWF raster target size",
+        filename=filename,
+        page_width=page_width,
+        page_height=page_height,
+        scale=scale,
+    )
+    max_pixels = int(os.getenv("DWF_CONVERSION_MAX_PIXELS", str(40_000_000)))
+    pixel_count = page_width * page_height
+    if pixel_count > max_pixels and page_width > 0 and page_height > 0:
+        scale = math.sqrt(max_pixels / pixel_count)
+        page_width = max(1.0, page_width * scale)
+        page_height = max(1.0, page_height * scale)
+        logger.warning(
+            "DWF raster size exceeds pixel budget; downscaling",
+            filename=filename,
+            original_pixels=int(pixel_count),
+            max_pixels=max_pixels,
+            page_width=page_width,
+            page_height=page_height,
+        )
+
+    raster.page_width = page_width
+    raster.page_height = page_height
+    if hasattr(raster, "horizontal_resolution"):
+        try:
+            raster.horizontal_resolution = float(dpi)
+        except Exception:
+            pass
+    if hasattr(raster, "vertical_resolution"):
+        try:
+            raster.vertical_resolution = float(dpi)
+        except Exception:
+            pass
+
+    options = PngOptions()
+    options.vector_rasterization_options = raster
+    try:
+        color_enum = options.color_type.__class__
+        options.color_type = color_enum.TRUECOLOR  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
+    if hasattr(raster, "draw_type"):
+        try:
+            draw_enum = raster.draw_type.__class__
+            raster.draw_type = draw_enum.USE_OBJECT_COLOR  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+    if hasattr(raster, "background_color"):
+        try:
+            raster.background_color = cad.Color.from_argb(255, 255, 255, 255)
+        except Exception:
+            pass
+
+    if hasattr(raster, "automatic_layouts_scaling"):
+        try:
+            raster.automatic_layouts_scaling = False
+        except Exception:
+            pass
+    if hasattr(raster, "scale_method"):
+        try:
+            scale_enum = raster.scale_method.__class__
+            raster.scale_method = scale_enum.NONE  # type: ignore[attr-defined]
+        except Exception:
+            pass
+    if hasattr(raster, "relative_scale"):
+        try:
+            raster.relative_scale = float(os.getenv("DWF_CONVERSION_RELATIVE_SCALE", "1.0"))
+        except Exception:
+            pass
+    if hasattr(raster, "line_scale"):
+        try:
+            raster.line_scale = float(os.getenv("DWF_CONVERSION_LINE_SCALE", "1.2"))
+        except Exception:
+            pass
+
+    if hasattr(raster, "quality"):
+        try:
+            q = raster.quality
+            quality_enum = q.text.__class__
+            q.text = quality_enum.HIGH
+            q.arc = quality_enum.HIGH
+            q.hatch = quality_enum.HIGH
+            q.objects_precision = quality_enum.HIGH
+            if hasattr(q, "text_thickness_normalization"):
+                q.text_thickness_normalization = True
+            raster.quality = q
+        except Exception:
+            pass
+
+    out = io.BytesIO()
+    image.save(out, options)
+    png_bytes = out.getvalue()
+    new_filename = f"{Path(filename).stem}.png"
+    return png_bytes, new_filename
