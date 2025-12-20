@@ -68,6 +68,10 @@ class Settings(BaseSettings):
     # Preflight LLM settings (signature detection)
     preflight_llm_signature_max_segments: int = 4
     preflight_llm_signature_concurrency: int = 4
+    preflight_llm_area_table_max_segments: int = 4
+    preflight_llm_area_table_concurrency: int = 4
+    preflight_llm_check_max_segments: int = 4
+    preflight_llm_check_concurrency: int = 4
 
     # Segment analysis streaming (preflight auto-analysis UX)
     segment_analysis_concurrency: int = 4
