@@ -425,7 +425,7 @@ OCR text (may be noisy):
 
 Return ONLY valid JSON:
 {{
-  "doc_type": "environment_sketch|site_plan|other",
+  "doc_type": "environment_sketch|site_plan|both|other",
   "scale_or_dimensions_present": true|false,
   "confidence": 0.0-1.0,
   "evidence": ["short evidence strings in Hebrew"]
@@ -747,6 +747,24 @@ def _segment_text_corpus(seg: Dict[str, Any]) -> str:
     return " ".join([p for p in parts if p])
 
 
+def _is_site_plan_like(seg: Dict[str, Any]) -> bool:
+    return _match_keywords(_segment_text_corpus(seg), _HEBREW_KEYWORDS["site_plan"])
+
+
+def _is_manual_segment(seg: Dict[str, Any]) -> bool:
+    return str(seg.get("llm_reasoning") or "") == "MANUAL_ROI"
+
+
+def _is_drawing_like(seg: Dict[str, Any]) -> bool:
+    st = _safe_segment_type(seg.get("type"))
+    return st in {
+        SegmentType.FLOOR_PLAN,
+        SegmentType.SECTION,
+        SegmentType.DETAIL,
+        SegmentType.ELEVATION,
+    }
+
+
 def _has_table_token(text: str) -> bool:
     if not text:
         return False
@@ -853,11 +871,40 @@ async def run_submission_preflight(
     env_site_candidates = _unique_segments(env_like + site_like)
     decl_like = _find_segments_by_keywords(approved_segments, "declaration")
     decl_candidates = _unique_segments(decl_like)
-    floor_plan_candidates = _unique_segments(by_type.get(SegmentType.FLOOR_PLAN, []))
+    floor_plan_candidates = _unique_segments(
+        [s for s in by_type.get(SegmentType.FLOOR_PLAN, []) if not _is_site_plan_like(s)]
+    )
+    if not floor_plan_candidates:
+        fallback = [
+            s
+            for s in approved_segments
+            if _is_drawing_like(s) and not _is_site_plan_like(s)
+        ]
+        floor_plan_candidates = _unique_segments(fallback)
     section_candidates = _unique_segments(by_type.get(SegmentType.SECTION, []))
     elevation_candidates = _unique_segments(by_type.get(SegmentType.ELEVATION, []))
+    mamad_keyword = [
+        s
+        for s in approved_segments
+        if _match_keywords(_segment_text_corpus(s), _HEBREW_KEYWORDS["mamad"])
+    ]
+    mamad_scale = [
+        s
+        for s in approved_segments
+        if _contains_scale_1_50(_segment_text_corpus(s))
+    ]
+    mamad_manual = [
+        s
+        for s in approved_segments
+        if _is_manual_segment(s) and not _is_site_plan_like(s)
+    ]
+    mamad_drawings = [
+        s
+        for s in approved_segments
+        if _is_drawing_like(s) and not _is_site_plan_like(s)
+    ]
     mamad_candidates = _unique_segments(
-        [s for s in approved_segments if _match_keywords(_segment_text_corpus(s), _HEBREW_KEYWORDS["mamad"])]
+        mamad_keyword + mamad_scale + mamad_manual + mamad_drawings
     )
     legend_candidates = _unique_segments(
         by_type.get(SegmentType.LEGEND, []) + _find_segments_by_keywords(approved_segments, "legend")
@@ -877,12 +924,15 @@ async def run_submission_preflight(
     llm_results: Dict[str, Dict[str, Any]] = {}
     ocr_debug_all = _collect_ocr_debug(approved_segments)
     if run_llm_checks:
-        max_segments = max(1, int(getattr(settings, "preflight_llm_check_max_segments", 4)))
+        raw_max_segments = int(getattr(settings, "preflight_llm_check_max_segments", 4))
+        max_segments = None if raw_max_segments <= 0 else max(1, raw_max_segments)
         max_concurrency = max(1, int(getattr(settings, "preflight_llm_check_concurrency", 4)))
         semaphore = asyncio.Semaphore(max_concurrency)
 
         async def _run_llm_check(check_id: str, candidates: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
-            selected = _unique_segments(list(candidates) if candidates else approved_segments)[:max_segments]
+            selected = _unique_segments(list(candidates) if candidates else approved_segments)
+            if max_segments is not None:
+                selected = selected[:max_segments]
 
             async def _one(seg: Dict[str, Any]) -> Optional[Tuple[str, Dict[str, Any]]]:
                 seg_id = str(seg.get("segment_id"))
@@ -1142,29 +1192,62 @@ async def run_submission_preflight(
 
     llm_env = llm_results.get("PF-02", {})
     if llm_env:
+        seg_by_id = {
+            str(s.get("segment_id")): s
+            for s in approved_segments
+            if s.get("segment_id")
+        }
         env_llm_ids = [
             seg_id
             for seg_id, data in llm_env.items()
-            if data.get("doc_type") == "environment_sketch" and data.get("scale_or_dimensions_present") is True
+            if data.get("doc_type") in {"environment_sketch", "both"}
+            and data.get("scale_or_dimensions_present") is True
         ]
         site_llm_ids = [
             seg_id
             for seg_id, data in llm_env.items()
-            if data.get("doc_type") == "site_plan" and data.get("scale_or_dimensions_present") is True
+            if data.get("doc_type") in {"site_plan", "both"}
+            and data.get("scale_or_dimensions_present") is True
         ]
         env_llm_weak = [
-            seg_id for seg_id, data in llm_env.items() if data.get("doc_type") == "environment_sketch"
+            seg_id
+            for seg_id, data in llm_env.items()
+            if data.get("doc_type") in {"environment_sketch", "both"}
         ]
         site_llm_weak = [
-            seg_id for seg_id, data in llm_env.items() if data.get("doc_type") == "site_plan"
+            seg_id
+            for seg_id, data in llm_env.items()
+            if data.get("doc_type") in {"site_plan", "both"}
         ]
+        env_llm_ids = list(dict.fromkeys(env_llm_ids))
+        site_llm_ids = list(dict.fromkeys(site_llm_ids))
+        env_llm_weak = list(dict.fromkeys(env_llm_weak))
+        site_llm_weak = list(dict.fromkeys(site_llm_weak))
+
+        env_assumed_from_site = False
+        if not env_llm_ids:
+            env_from_site = [
+                seg_id
+                for seg_id, data in llm_env.items()
+                if data.get("doc_type") == "site_plan"
+                and _match_keywords(_segment_text_corpus(seg_by_id.get(seg_id, {})), _HEBREW_KEYWORDS["env_sketch"])
+            ]
+            if env_from_site:
+                env_llm_ids = list(dict.fromkeys(env_from_site))
+        if not env_llm_ids and len(site_llm_ids) >= 2:
+            env_llm_ids = [site_llm_ids[0]]
+            env_assumed_from_site = True
         status = (
             PreflightStatus.PASSED if (env_llm_ids and site_llm_ids)
             else (PreflightStatus.FAILED if strict else PreflightStatus.WARNING) if (env_llm_weak and site_llm_weak)
             else PreflightStatus.FAILED
         )
         details = (
-            'זוהו תשריט סביבה ומפה מצבית עם אינדיקציה לקנ\"מ/מידות (LLM).'
+            (
+                'זוהו תשריט סביבה ומפה מצבית עם אינדיקציה לקנ\"מ/מידות (LLM).'
+                if not env_assumed_from_site
+                else 'זוהו שתי מפות מצבית עם קנ\"מ/מידות; אחת נספרה כתשריט סביבה (Best-effort).'
+            )
             if status == PreflightStatus.PASSED
             else (
                 'זוהו תשריט סביבה ומפה מצבית אך ללא אינדיקציה לקנ\"מ/מידות (LLM).'
@@ -1172,7 +1255,7 @@ async def run_submission_preflight(
                 else f'חסר: ' + ('' if env_llm_weak else 'תשריט סביבה ') + ('' if site_llm_weak else 'מפה מצבית')
             )
         ).strip()
-        evidence = (env_llm_ids + site_llm_ids or env_llm_weak + site_llm_weak)[:10]
+        evidence = list(dict.fromkeys(env_llm_ids + site_llm_ids or env_llm_weak + site_llm_weak))[:10]
         debug = {
             "ocr": ocr_debug_all or None,
             "llm": llm_env,

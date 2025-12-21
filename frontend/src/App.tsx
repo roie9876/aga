@@ -933,6 +933,36 @@ function App() {
     }
   };
 
+  const openPreflightHistoryEvidenceSegment = async (segmentId: string) => {
+    const sid = String(segmentId || '').trim();
+    if (!sid) return;
+
+    const localHit = preflightHistorySegments.find((s: any) => String(s?.segment_id) === sid);
+    const localSrc = String(localHit?.blob_url || localHit?.thumbnail_url || '').trim();
+    if (localSrc) {
+      const title = String(localHit?.title || localHit?.description || sid);
+      setImageLightbox({ src: localSrc, title });
+      return;
+    }
+
+    const decompId = String(preflightHistoryMeta?.decomposition_id || '').trim();
+    if (!decompId) return;
+
+    try {
+      const decompResp = await fetch(`/api/v1/decomposition/${encodeURIComponent(decompId)}`, { method: 'GET' });
+      if (!decompResp.ok) return;
+      const decomp = await decompResp.json();
+      const segs: any[] = Array.isArray(decomp?.segments) ? decomp.segments : [];
+      const s = segs.find((x: any) => String(x?.segment_id) === sid);
+      const src = String(s?.blob_url || s?.thumbnail_url || '').trim();
+      if (!src) return;
+      const title = String(s?.title || s?.description || sid);
+      setImageLightbox({ src, title });
+    } catch {
+      // ignore
+    }
+  };
+
   useEffect(() => {
     return () => {
       if (abortValidationRef.current) {
@@ -1301,6 +1331,7 @@ function App() {
     th, td { border: 1px solid #e5e7eb; padding: 8px; vertical-align: top; font-size: 12px; }
     th { background: #f9fafb; text-align: right; }
     pre { white-space: pre-wrap; word-break: break-word; background: #f9fafb; border: 1px solid #e5e7eb; padding: 10px; border-radius: 10px; font-size: 11px; }
+    .imgCaption { font-size: 12px; color: #4b5563; margin: 6px 0 8px; }
     @media print { body { margin: 12mm; } }
   </style>
 </head>
@@ -1367,7 +1398,7 @@ function App() {
     </table>
     ${segments.map((s: any) => {
       const imgUrl = getSegmentImageUrl(String(s.segment_id || ''));
-      return imgUrl ? `<div class="imgWrap"><img class="img" src="${esc(imgUrl)}" alt="segment ${esc(s.segment_id)}" loading="lazy" /></div>` : '';
+      return imgUrl ? `<div class="imgWrap"><div class="imgCaption">segment_id: ${esc(s.segment_id || '')}</div><img class="img" src="${esc(imgUrl)}" alt="segment ${esc(s.segment_id)}" loading="lazy" /></div>` : '';
     }).join('')}
     ` : `<div class="muted">אין מידע על סגמנטים שנבדקו.</div>`}
   </div>
@@ -2863,6 +2894,7 @@ function App() {
                   }}
                   onContinue={() => {}}
                   continueEnabled={false}
+                  onOpenEvidenceSegment={openPreflightHistoryEvidenceSegment}
                 />
               </div>
             ) : historyTab === 'validation' && validationHistory.length === 0 ? (

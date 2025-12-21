@@ -52,11 +52,18 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
   const [drawCurrent, setDrawCurrent] = useState<{ x: number; y: number } | null>(null);
   const [savingManual, setSavingManual] = useState(false);
   const [editingSegmentId, setEditingSegmentId] = useState<string | null>(null);
+  const [pendingRois, setPendingRois] = useState<
+    Array<{ id: string; roi: { x: number; y: number; width: number; height: number } }>
+  >([]);
+  const [pendingEdits, setPendingEdits] = useState<
+    Record<string, { x: number; y: number; width: number; height: number }>
+  >({});
   const [roiQueue, setRoiQueue] = useState<
     Array<{
       kind: 'add' | 'update';
       segmentId?: string;
       roi: { x: number; y: number; width: number; height: number };
+      localId?: string;
     }>
   >([]);
   const [analyzingSegments, setAnalyzingSegments] = useState(false);
@@ -185,7 +192,19 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
         }
       } finally {
         roiInFlightRef.current = false;
-        if (!isCancelled) setSavingManual(false);
+        if (!isCancelled) {
+          setSavingManual(false);
+          if (next.kind === 'add' && next.localId) {
+            setPendingRois((prev) => prev.filter((r) => r.id !== next.localId));
+          }
+          if (next.kind === 'update' && next.segmentId) {
+            setPendingEdits((prev) => {
+              if (!prev[next.segmentId]) return prev;
+              const { [next.segmentId]: _removed, ...rest } = prev;
+              return rest;
+            });
+          }
+        }
         // Always advance the queue; otherwise a single failing ROI blocks all subsequent ROIs.
         setRoiQueue((q) => q.slice(1));
       }
@@ -315,6 +334,13 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
     };
   };
 
+  const relativeToPercent = (roi: { x: number; y: number; width: number; height: number }) => ({
+    x: roi.x * 100,
+    y: roi.y * 100,
+    width: roi.width * 100,
+    height: roi.height * 100,
+  });
+
   const getRelativePoint = (e: React.PointerEvent) => {
     const img = planImgRef.current;
     if (!img) return null;
@@ -328,10 +354,13 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
   };
 
   const enqueueManualRoiAdd = (roi: { x: number; y: number; width: number; height: number }) => {
-    setRoiQueue((q) => [...q, { kind: 'add', roi }]);
+    const localId = `pending-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+    setPendingRois((prev) => [...prev, { id: localId, roi }]);
+    setRoiQueue((q) => [...q, { kind: 'add', roi, localId }]);
   };
 
   const enqueueManualRoiUpdate = (segmentId: string, roi: { x: number; y: number; width: number; height: number }) => {
+    setPendingEdits((prev) => ({ ...prev, [segmentId]: roi }));
     setRoiQueue((q) => [...q, { kind: 'update', segmentId, roi }]);
   };
 
@@ -618,7 +647,8 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
 
               {decomposition.segments.map((segment) => (
                 (() => {
-                  const b = bboxToPercent(segment.bounding_box);
+                  const pending = pendingEdits[segment.segment_id];
+                  const b = pending ? relativeToPercent(pending) : bboxToPercent(segment.bounding_box);
                   return (
                 <div
                   key={segment.segment_id}
@@ -639,6 +669,11 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
                     updateSegmentApproval(segment.segment_id, !segment.approved_by_user);
                   }}
                 >
+                  {pending && (
+                    <div className="absolute -top-7 right-0 text-[10px] text-primary bg-white/90 border border-primary/20 rounded px-2 py-0.5 shadow">
+                      שומר…
+                    </div>
+                  )}
                   <div className="absolute -top-8 right-0 opacity-0 group-hover:opacity-100 transition-opacity z-10">
                     <div className="bg-popover text-popover-foreground text-xs px-2 py-1 rounded shadow-lg border border-border whitespace-nowrap font-medium">
                       {segment.title} ({(segment.confidence * 100).toFixed(0)}%)
@@ -648,6 +683,26 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
                   );
                 })()
               ))}
+              {pendingRois.map((pending) => {
+                const b = relativeToPercent(pending.roi);
+                return (
+                  <div
+                    key={pending.id}
+                    className="absolute border-2 border-success/70 bg-success/10 border-dashed z-20"
+                    style={{
+                      left: `${b.x}%`,
+                      top: `${b.y}%`,
+                      width: `${b.width}%`,
+                      height: `${b.height}%`,
+                      pointerEvents: 'none',
+                    }}
+                  >
+                    <div className="absolute -top-7 right-0 text-[10px] text-success bg-white/90 border border-success/20 rounded px-2 py-0.5 shadow">
+                      שומר…
+                    </div>
+                  </div>
+                );
+              })}
 
               {/* Current drawn rectangle */}
               {isDrawing && drawStart && drawCurrent && (
