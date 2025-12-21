@@ -26,7 +26,7 @@ const translateModelCategory = (category: string): string => {
 
 interface DecompositionReviewProps {
   decompositionId: string;
-  onApprove: (params: { mode: 'segments' | 'full_plan'; approvedSegments: string[]; check_groups: string[] }) => void;
+  onApprove: (params: { mode: 'segments' | 'full_plan'; approvedSegments: string[]; enabled_requirements: string[] }) => void;
   onReject: () => void;
   onOpenSegmentImage?: (segment: { segment_id: string; title?: string; thumbnail_url?: string; blob_url?: string }) => void;
 }
@@ -73,13 +73,113 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
   const [autoMode, setAutoMode] = useState<'cv' | 'llm'>('cv');
   const [autoTune, setAutoTune] = useState(true);
   const [autoVerify, setAutoVerify] = useState(true);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [advancedEnabled, setAdvancedEnabled] = useState(false);
+  const [ocrEnabled, setOcrEnabled] = useState(true);
+  const [deskewEnabled, setDeskewEnabled] = useState(false);
+  const [advancedFlags, setAdvancedFlags] = useState({
+    content_crop_enabled: true,
+    edge_refine_enabled: true,
+    refine_by_content: true,
+  });
+  const advancedHelp: Record<string, string> = {
+    target_segments: 'מספר יעד לסגמנטים באוטו-טיונינג. טווח מומלץ: 4–40.',
+    max_dim: 'גודל מקסימלי לצד הארוך של התמונה לעיבוד. טווח מומלץ: 2000–8000.',
+    min_area_ratio: 'יחס שטח מינימלי להצעה. נמוך יותר = יותר תיבות קטנות. טווח מומלץ: 0.001–0.02.',
+    max_area_ratio: 'יחס שטח מקסימלי להצעה. גבוה יותר = מאפשר תיבה גדולה יותר. טווח מומלץ: 0.2–0.9.',
+    merge_iou_threshold: 'סף IoU למיזוג תיבות חופפות. גבוה יותר = פחות מיזוג. טווח מומלץ: 0.05–0.5.',
+    ocr_enabled: 'הרצת OCR על כל אזור לזיהוי טקסט וסיווג.',
+    deskew: 'יישור (deskew) לפני זיהוי, עוזר לסריקות עקומות.',
+    adaptive_block_size: 'גודל בלוק לסף אדפטיבי. חייב להיות מספר אי-זוגי. טווח מומלץ: 11–61.',
+    adaptive_c: 'קבוע C לסף אדפטיבי. טווח מומלץ: 2–20.',
+    close_kernel: 'גודל kernel לסגירה מורפולוגית. טווח מומלץ: 3–9.',
+    close_iterations: 'מספר איטרציות לסגירה מורפולוגית. טווח מומלץ: 1–4.',
+    projection_density_threshold: 'סף צפיפות לקווי הקרנה (פיצול לפי לבן/שחור). טווח מומלץ: 0.003–0.03.',
+    projection_min_gap: 'רוחב מינימלי של רווח כדי לפצל. טווח מומלץ: 8–60.',
+    split_large_area_ratio: 'סף יחס שטח לפיצול תיבות גדולות. טווח מומלץ: 0.08–0.3.',
+    split_large_min_boxes: 'מספר מינימום של תיבות אחרי פיצול. טווח מומלץ: 2–4.',
+    line_kernel_scale: 'סקלת kernel לזיהוי קווים. קטן יותר = רגיש יותר לקווים קצרים. טווח מומלץ: 12–40.',
+    line_merge_iterations: 'איחוד קווים מקוטעים לפני מדידה. טווח מומלץ: 0–3.',
+    separator_line_density: 'סף צפיפות לקו הפרדה אנכי. נמוך יותר = מזהה קווים חלשים. טווח מומלץ: 0.3–0.9.',
+    separator_min_height_ratio: 'גובה מינימלי של קו הפרדה ביחס לגובה התוכן. טווח מומלץ: 0.4–0.9.',
+    separator_max_width: 'רוחב מקסימלי של קו הפרדה בפיקסלים. טווח מומלץ: 6–24.',
+    separator_min_gap: 'מרחק מינימלי בין קווי הפרדה. טווח מומלץ: 20–200.',
+    separator_min_line_width: 'רוחב מינימלי של קו הפרדה בפיקסלים. טווח מומלץ: 1–8.',
+    hough_threshold: 'סף Hough לזיהוי קווים (fallback). טווח מומלץ: 20–80.',
+    hough_min_line_length_ratio: 'אורך מינימלי של קו Hough יחסית לגובה. טווח מומלץ: 0.4–0.9.',
+    hough_max_line_gap: 'מרווח מקסימלי לחיבור קווים ב-Hough. טווח מומלץ: 5–40.',
+    hough_cluster_px: 'קיבוץ עמודות סמוכות לקו אחד. טווח מומלץ: 4–20.',
+    min_ink_ratio: 'יחס דיו מינימלי באזור. נמוך יותר = פחות סינון אזורים ריקים. טווח מומלץ: 0.0005–0.01.',
+    min_ink_pixels: 'מינימום פיקסלים שחורים באזור. טווח מומלץ: 50–1000.',
+    min_segment_width_ratio: 'רוחב מינימלי יחסית לדף לפני מיזוג. טווח מומלץ: 0.02–0.1.',
+    content_crop_enabled: 'חותך את התמונה לאזור עם תוכן לפני הסגמנטציה.',
+    content_crop_pad: 'פדינג סביב אזור התוכן. טווח מומלץ: 0–40.',
+    content_density_threshold: 'סף צפיפות לקביעת גבולות תוכן. טווח מומלץ: 0.001–0.01.',
+    content_min_span_ratio: 'מינימום רוחב/גובה של תוכן ביחס לדף. טווח מומלץ: 0.05–0.4.',
+    refine_by_content: 'מצמצם תיבה לפי תוכן בתוך האזור.',
+    refine_pad: 'פדינג אחרי צמצום לפי תוכן. טווח מומלץ: 0–20.',
+    edge_refine_enabled: 'מצמצם תיבה לפי קצוות (Canny).',
+    edge_refine_pad: 'פדינג אחרי צמצום לפי קצוות. טווח מומלץ: 0–20.',
+    advanced_enabled: 'כשפעיל, כל הפרמטרים כאן נשלחים לשרת.',
+    auto_sensitivity: 'מעלה רגישות בסיסית לפיצול אזורים.',
+    auto_mode: 'מצב סגמנטציה: CV רגיל או LLM.',
+    auto_tune: 'מנסה כמה סטים של פרמטרים ובוחר את הטוב ביותר.',
+    auto_verify: 'מאמת אזורים מול LLM ומסנן ריקים.',
+  };
+  const [advancedNums, setAdvancedNums] = useState({
+    target_segments: 12,
+    max_dim: 4200,
+    min_area_ratio: 0.005,
+    max_area_ratio: 0.55,
+    merge_iou_threshold: 0.2,
+    adaptive_block_size: 31,
+    adaptive_c: 10,
+    close_kernel: 5,
+    close_iterations: 2,
+    projection_density_threshold: 0.01,
+    projection_min_gap: 25,
+    split_large_area_ratio: 0.18,
+    split_large_min_boxes: 2,
+    line_kernel_scale: 30,
+    line_merge_iterations: 1,
+    separator_line_density: 0.6,
+    separator_min_line_width: 3,
+    separator_min_gap: 40,
+    separator_min_height_ratio: 0.65,
+    separator_max_width: 12,
+    hough_threshold: 40,
+    hough_min_line_length_ratio: 0.6,
+    hough_max_line_gap: 20,
+    hough_cluster_px: 12,
+    min_ink_ratio: 0.0015,
+    min_ink_pixels: 200,
+    min_segment_width_ratio: 0.04,
+    content_crop_pad: 10,
+    content_density_threshold: 0.0025,
+    content_min_span_ratio: 0.15,
+    edge_refine_pad: 6,
+    refine_pad: 6,
+  });
 
-  const [selectedCheckGroups, setSelectedCheckGroups] = useState<string[]>([
-    'walls',
-    'heights',
-    'doors',
-    'windows',
-  ]);
+  const requirementOptions = [
+    { id: '1.1', label: 'מספר קירות חיצוניים (1.1)', help: 'בדיקה שמספר הקירות החיצוניים בממ״ד בין 1 ל־4.' },
+    { id: '1.2', label: 'עובי קירות (1.2)', help: 'עובי קירות ממ״ד לפי מספר קירות חיצוניים (25–40 ס״מ).' },
+    { id: '1.3', label: 'חריג קיר <2 מ׳ (1.3)', help: 'בדיקה אם קיר קרוב לקו חוץ דורש קיר מגן בעובי ≥20 ס״מ.' },
+    { id: '1.4', label: 'קיר גבוה (1.4)', help: 'בדיקת מפתח קיר >2.8 מ׳ והשלכות תכן.' },
+    { id: '1.5', label: 'רציפות מגדל ממ״דים (1.5)', help: 'בדיקה של 70% רציפות קירות במגדל ממ״דים.' },
+    { id: '2.1', label: 'גובה מינימלי 2.50 מ׳ (2.1)', help: 'גובה חדר מינימלי 2.50 מ׳.' },
+    { id: '2.2', label: 'חריג גובה 2.20 מ׳ (2.2)', help: 'גובה 2.20 מ׳ מותר רק במרתף/תוספת + נפח ≥22.5 מ״ק.' },
+    { id: '2.3', label: 'שטח ממ״ד נטו 9 מ״ר (2.3)', help: 'שטח פנימי מינימלי של ממ״ד (ללא קירות) ≥ 9 מ״ר בקנ״מ 1:50.' },
+    { id: '3.1', label: 'ריווח דלת הדף (3.1)', help: 'מרחקים מינימליים סביב דלת הדף.' },
+    { id: '3.2', label: 'ריווח חלון הדף (3.2)', help: 'מרחקים מינימליים בין נישות/פתחים והגבלות חלון.' },
+    { id: '4.2', label: 'הערת אוורור (4.2)', help: 'חובה הערה: מערכות אוורור וסינון בהתאם לת״י 4570.' },
+    { id: '6.1', label: 'בטון B-30 (6.1)', help: 'דרגת בטון מינימלית B-30.' },
+    { id: '6.2', label: 'פלדה תקנית (6.2)', help: 'פלדה חמה/רתיכה בלבד (לא משוכה בקור).' },
+    { id: '6.3', label: 'ריווח זיון (6.3)', help: 'פסיעת זיון: חיצוני ≤20 ס״מ, פנימי ≤10 ס״מ.' },
+  ];
+  const [selectedRequirements, setSelectedRequirements] = useState<string[]>(
+    requirementOptions.map((r) => r.id)
+  );
 
   const fetchWithTimeout = async (
     url: string,
@@ -258,23 +358,53 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
     }
   };
 
+  const updateAdvancedNumber = (key: keyof typeof advancedNums) => (
+    event: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const value = event.target.value;
+    setAdvancedNums((prev) => ({
+      ...prev,
+      [key]: value === '' ? prev[key] : Number(value),
+    }));
+  };
+
+  const toggleAdvancedFlag = (key: keyof typeof advancedFlags) => {
+    setAdvancedFlags((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
+
+  const applySensitivePreset = () => {
+    setAdvancedNums((prev) => ({
+      ...prev,
+      max_area_ratio: 0.38,
+      min_area_ratio: 0.0025,
+      merge_iou_threshold: 0.12,
+      max_dim: 5200,
+    }));
+  };
+
   const runAutoSegmentation = async () => {
     setAutoSegmenting(true);
     setError(null);
     try {
-      const payload =
-        autoSensitivity === 'high'
-          ? {
-              mode: autoMode,
-              auto_tune: autoTune,
-              verify_with_llm: autoVerify,
-              replace_existing: true,
-              max_area_ratio: 0.38,
-              min_area_ratio: 0.0025,
-              merge_iou_threshold: 0.12,
-              max_dim: 5200,
-            }
-          : { mode: autoMode, auto_tune: autoTune, verify_with_llm: autoVerify, replace_existing: true };
+      const payload: Record<string, unknown> = {
+        mode: autoMode,
+        auto_tune: autoTune,
+        verify_with_llm: autoVerify,
+        replace_existing: true,
+        target_segments: advancedNums.target_segments,
+        ocr_enabled: ocrEnabled,
+        deskew: deskewEnabled,
+      };
+      if (advancedEnabled) {
+        Object.assign(payload, advancedNums, advancedFlags);
+      } else if (autoSensitivity === 'high') {
+        Object.assign(payload, {
+          max_area_ratio: 0.38,
+          min_area_ratio: 0.0025,
+          merge_iou_threshold: 0.12,
+          max_dim: 5200,
+        });
+      }
       const response = await fetchWithTimeout(
         `/api/v1/decomposition/${decompositionId}/auto-segments`,
         {
@@ -329,13 +459,13 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
       .filter(s => s.approved_by_user)
       .map(s => s.segment_id);
 
-    onApprove({ mode: 'segments', approvedSegments: approved, check_groups: selectedCheckGroups });
+    onApprove({ mode: 'segments', approvedSegments: approved, enabled_requirements: selectedRequirements });
   };
 
-  const toggleCheckGroup = (group: string) => {
-    setSelectedCheckGroups((prev) => {
-      if (prev.includes(group)) return prev.filter((g) => g !== group);
-      return [...prev, group];
+  const toggleRequirement = (reqId: string) => {
+    setSelectedRequirements((prev) => {
+      if (prev.includes(reqId)) return prev.filter((r) => r !== reqId);
+      return [...prev, reqId];
     });
   };
 
@@ -646,65 +776,14 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
               {autoSegmenting ? 'מפלח…' : 'סגמנטציה אוטומטית'}
             </Button>
 
-            <div className="inline-flex items-center gap-2 text-xs text-text-muted border border-border rounded-full px-3 py-1 bg-background">
-              <span>מצב רגיש</span>
-              <button
-                type="button"
-                onClick={() => setAutoSensitivity(autoSensitivity === 'high' ? 'normal' : 'high')}
-                className={`inline-flex items-center px-2 py-0.5 rounded-full border text-xs ${
-                  autoSensitivity === 'high'
-                    ? 'border-primary text-primary bg-primary/10'
-                    : 'border-border text-text-muted'
-                }`}
-                title="מעלה רגישות לפיצול אזורים"
-              >
-                {autoSensitivity === 'high' ? 'פעיל' : 'כבוי'}
-              </button>
-            </div>
-
-            <div className="inline-flex items-center gap-2 text-xs text-text-muted border border-border rounded-full px-3 py-1 bg-background">
-              <span>מצב LLM</span>
-              <button
-                type="button"
-                onClick={() => setAutoMode(autoMode === 'llm' ? 'cv' : 'llm')}
-                className={`inline-flex items-center px-2 py-0.5 rounded-full border text-xs ${
-                  autoMode === 'llm'
-                    ? 'border-primary text-primary bg-primary/10'
-                    : 'border-border text-text-muted'
-                }`}
-                title="מריץ סגמנטציה עם GPT-5.1"
-              >
-                {autoMode === 'llm' ? 'פעיל' : 'כבוי'}
-              </button>
-            </div>
-
-            <div className="inline-flex items-center gap-2 text-xs text-text-muted border border-border rounded-full px-3 py-1 bg-background">
-              <span>Auto-Tune</span>
-              <button
-                type="button"
-                onClick={() => setAutoTune(!autoTune)}
-                className={`inline-flex items-center px-2 py-0.5 rounded-full border text-xs ${
-                  autoTune ? 'border-primary text-primary bg-primary/10' : 'border-border text-text-muted'
-                }`}
-                title="מריץ כמה פרמטרים ובוחר תוצאה אוטומטית"
-              >
-                {autoTune ? 'פעיל' : 'כבוי'}
-              </button>
-            </div>
-
-            <div className="inline-flex items-center gap-2 text-xs text-text-muted border border-border rounded-full px-3 py-1 bg-background">
-              <span>LLM Verify</span>
-              <button
-                type="button"
-                onClick={() => setAutoVerify(!autoVerify)}
-                className={`inline-flex items-center px-2 py-0.5 rounded-full border text-xs ${
-                  autoVerify ? 'border-primary text-primary bg-primary/10' : 'border-border text-text-muted'
-                }`}
-                title="בודק כל סגמנט עם GPT ומסנן אזורים ריקים"
-              >
-                {autoVerify ? 'פעיל' : 'כבוי'}
-              </button>
-            </div>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => setAdvancedOpen(!advancedOpen)}
+              title="פתיחת פרמטרים מתקדמים"
+            >
+              פרמטרים מתקדמים {advancedOpen ? <ChevronUp className="inline w-4 h-4" /> : <ChevronDown className="inline w-4 h-4" />}
+            </Button>
 
             <Button
               size="sm"
@@ -729,6 +808,437 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
             </div>
           </div>
         </div>
+
+        {advancedOpen && (
+          <div className="mt-4 border-t border-border pt-4 text-sm">
+            <div className="flex flex-wrap items-center gap-3 mb-4">
+              <label className="inline-flex items-center gap-2" title={advancedHelp.advanced_enabled}>
+                <input
+                  type="checkbox"
+                  checked={advancedEnabled}
+                  onChange={(event) => setAdvancedEnabled(event.target.checked)}
+                />
+                <span>הפעל פרמטרים מתקדמים</span>
+              </label>
+              <div className="inline-flex items-center gap-2 text-xs text-text-muted border border-border rounded-full px-3 py-1 bg-background">
+                <span>מצב רגיש</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const next = autoSensitivity === 'high' ? 'normal' : 'high';
+                    setAutoSensitivity(next);
+                    if (next === 'high') {
+                      applySensitivePreset();
+                    }
+                  }}
+                  className={`inline-flex items-center px-2 py-0.5 rounded-full border text-xs ${
+                    autoSensitivity === 'high'
+                      ? 'border-primary text-primary bg-primary/10'
+                      : 'border-border text-text-muted'
+                  }`}
+                  title={advancedHelp.auto_sensitivity}
+                >
+                  {autoSensitivity === 'high' ? 'פעיל' : 'כבוי'}
+                </button>
+              </div>
+              <div className="inline-flex items-center gap-2 text-xs text-text-muted border border-border rounded-full px-3 py-1 bg-background">
+                <span>מצב LLM</span>
+                <button
+                  type="button"
+                  onClick={() => setAutoMode(autoMode === 'llm' ? 'cv' : 'llm')}
+                  className={`inline-flex items-center px-2 py-0.5 rounded-full border text-xs ${
+                    autoMode === 'llm'
+                      ? 'border-primary text-primary bg-primary/10'
+                      : 'border-border text-text-muted'
+                  }`}
+                  title={advancedHelp.auto_mode}
+                >
+                  {autoMode === 'llm' ? 'פעיל' : 'כבוי'}
+                </button>
+              </div>
+              <div className="inline-flex items-center gap-2 text-xs text-text-muted border border-border rounded-full px-3 py-1 bg-background">
+                <span>Auto-Tune</span>
+                <button
+                  type="button"
+                  onClick={() => setAutoTune(!autoTune)}
+                  className={`inline-flex items-center px-2 py-0.5 rounded-full border text-xs ${
+                    autoTune ? 'border-primary text-primary bg-primary/10' : 'border-border text-text-muted'
+                  }`}
+                  title={advancedHelp.auto_tune}
+                >
+                  {autoTune ? 'פעיל' : 'כבוי'}
+                </button>
+              </div>
+              <div className="inline-flex items-center gap-2 text-xs text-text-muted border border-border rounded-full px-3 py-1 bg-background">
+                <span>LLM Verify</span>
+                <button
+                  type="button"
+                  onClick={() => setAutoVerify(!autoVerify)}
+                  className={`inline-flex items-center px-2 py-0.5 rounded-full border text-xs ${
+                    autoVerify ? 'border-primary text-primary bg-primary/10' : 'border-border text-text-muted'
+                  }`}
+                  title={advancedHelp.auto_verify}
+                >
+                  {autoVerify ? 'פעיל' : 'כבוי'}
+                </button>
+              </div>
+            </div>
+
+            <div className="grid gap-4 md:grid-cols-3">
+              <div className="space-y-3">
+                <div className="text-xs uppercase tracking-wide text-text-muted">כללי</div>
+                <label className="flex items-center justify-between gap-3" title={advancedHelp.target_segments}>
+                  <span>Target Segments</span>
+                  <input
+                    type="number"
+                    value={advancedNums.target_segments}
+                    onChange={updateAdvancedNumber('target_segments')}
+                    className="w-24 border border-border rounded-md px-2 py-1"
+                  />
+                </label>
+                <label className="flex items-center justify-between gap-3" title={advancedHelp.max_dim}>
+                  <span>Max Dim</span>
+                  <input
+                    type="number"
+                    value={advancedNums.max_dim}
+                    onChange={updateAdvancedNumber('max_dim')}
+                    className="w-24 border border-border rounded-md px-2 py-1"
+                  />
+                </label>
+                <label className="flex items-center justify-between gap-3" title={advancedHelp.min_area_ratio}>
+                  <span>Min Area Ratio</span>
+                  <input
+                    type="number"
+                    step="0.001"
+                    value={advancedNums.min_area_ratio}
+                    onChange={updateAdvancedNumber('min_area_ratio')}
+                    className="w-24 border border-border rounded-md px-2 py-1"
+                  />
+                </label>
+                <label className="flex items-center justify-between gap-3" title={advancedHelp.max_area_ratio}>
+                  <span>Max Area Ratio</span>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={advancedNums.max_area_ratio}
+                    onChange={updateAdvancedNumber('max_area_ratio')}
+                    className="w-24 border border-border rounded-md px-2 py-1"
+                  />
+                </label>
+                <label className="flex items-center justify-between gap-3" title={advancedHelp.merge_iou_threshold}>
+                  <span>Merge IoU</span>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={advancedNums.merge_iou_threshold}
+                    onChange={updateAdvancedNumber('merge_iou_threshold')}
+                    className="w-24 border border-border rounded-md px-2 py-1"
+                  />
+                </label>
+                <label className="flex items-center justify-between gap-3" title={advancedHelp.ocr_enabled}>
+                  <span>OCR</span>
+                  <input
+                    type="checkbox"
+                    checked={ocrEnabled}
+                    onChange={() => setOcrEnabled(!ocrEnabled)}
+                  />
+                </label>
+                <label className="flex items-center justify-between gap-3" title={advancedHelp.deskew}>
+                  <span>Deskew</span>
+                  <input
+                    type="checkbox"
+                    checked={deskewEnabled}
+                    onChange={() => setDeskewEnabled(!deskewEnabled)}
+                  />
+                </label>
+              </div>
+
+              <div className="space-y-3">
+                <div className="text-xs uppercase tracking-wide text-text-muted">קווים והפרדות</div>
+                <label className="flex items-center justify-between gap-3" title={advancedHelp.line_kernel_scale}>
+                  <span>Line Kernel Scale</span>
+                  <input
+                    type="number"
+                    value={advancedNums.line_kernel_scale}
+                    onChange={updateAdvancedNumber('line_kernel_scale')}
+                    className="w-24 border border-border rounded-md px-2 py-1"
+                  />
+                </label>
+                <label className="flex items-center justify-between gap-3" title={advancedHelp.line_merge_iterations}>
+                  <span>Line Merge Iter</span>
+                  <input
+                    type="number"
+                    value={advancedNums.line_merge_iterations}
+                    onChange={updateAdvancedNumber('line_merge_iterations')}
+                    className="w-24 border border-border rounded-md px-2 py-1"
+                  />
+                </label>
+                <label className="flex items-center justify-between gap-3" title={advancedHelp.separator_line_density}>
+                  <span>Separator Density</span>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={advancedNums.separator_line_density}
+                    onChange={updateAdvancedNumber('separator_line_density')}
+                    className="w-24 border border-border rounded-md px-2 py-1"
+                  />
+                </label>
+                <label className="flex items-center justify-between gap-3" title={advancedHelp.separator_min_height_ratio}>
+                  <span>Separator Min Height</span>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={advancedNums.separator_min_height_ratio}
+                    onChange={updateAdvancedNumber('separator_min_height_ratio')}
+                    className="w-24 border border-border rounded-md px-2 py-1"
+                  />
+                </label>
+                <label className="flex items-center justify-between gap-3" title={advancedHelp.separator_max_width}>
+                  <span>Separator Max Width</span>
+                  <input
+                    type="number"
+                    value={advancedNums.separator_max_width}
+                    onChange={updateAdvancedNumber('separator_max_width')}
+                    className="w-24 border border-border rounded-md px-2 py-1"
+                  />
+                </label>
+                <label className="flex items-center justify-between gap-3" title={advancedHelp.separator_min_gap}>
+                  <span>Separator Min Gap</span>
+                  <input
+                    type="number"
+                    value={advancedNums.separator_min_gap}
+                    onChange={updateAdvancedNumber('separator_min_gap')}
+                    className="w-24 border border-border rounded-md px-2 py-1"
+                  />
+                </label>
+                <label className="flex items-center justify-between gap-3" title={advancedHelp.separator_min_line_width}>
+                  <span>Separator Min Width</span>
+                  <input
+                    type="number"
+                    value={advancedNums.separator_min_line_width}
+                    onChange={updateAdvancedNumber('separator_min_line_width')}
+                    className="w-24 border border-border rounded-md px-2 py-1"
+                  />
+                </label>
+                <label className="flex items-center justify-between gap-3" title={advancedHelp.hough_threshold}>
+                  <span>Hough Threshold</span>
+                  <input
+                    type="number"
+                    value={advancedNums.hough_threshold}
+                    onChange={updateAdvancedNumber('hough_threshold')}
+                    className="w-24 border border-border rounded-md px-2 py-1"
+                  />
+                </label>
+                <label className="flex items-center justify-between gap-3" title={advancedHelp.hough_min_line_length_ratio}>
+                  <span>Hough Min Len</span>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={advancedNums.hough_min_line_length_ratio}
+                    onChange={updateAdvancedNumber('hough_min_line_length_ratio')}
+                    className="w-24 border border-border rounded-md px-2 py-1"
+                  />
+                </label>
+                <label className="flex items-center justify-between gap-3" title={advancedHelp.hough_max_line_gap}>
+                  <span>Hough Max Gap</span>
+                  <input
+                    type="number"
+                    value={advancedNums.hough_max_line_gap}
+                    onChange={updateAdvancedNumber('hough_max_line_gap')}
+                    className="w-24 border border-border rounded-md px-2 py-1"
+                  />
+                </label>
+                <label className="flex items-center justify-between gap-3" title={advancedHelp.hough_cluster_px}>
+                  <span>Hough Cluster Px</span>
+                  <input
+                    type="number"
+                    value={advancedNums.hough_cluster_px}
+                    onChange={updateAdvancedNumber('hough_cluster_px')}
+                    className="w-24 border border-border rounded-md px-2 py-1"
+                  />
+                </label>
+              </div>
+
+              <div className="space-y-3">
+                <div className="text-xs uppercase tracking-wide text-text-muted">עיבוד ותוכן</div>
+                <label className="flex items-center justify-between gap-3" title={advancedHelp.adaptive_block_size}>
+                  <span>Adaptive Block</span>
+                  <input
+                    type="number"
+                    value={advancedNums.adaptive_block_size}
+                    onChange={updateAdvancedNumber('adaptive_block_size')}
+                    className="w-24 border border-border rounded-md px-2 py-1"
+                  />
+                </label>
+                <label className="flex items-center justify-between gap-3" title={advancedHelp.adaptive_c}>
+                  <span>Adaptive C</span>
+                  <input
+                    type="number"
+                    value={advancedNums.adaptive_c}
+                    onChange={updateAdvancedNumber('adaptive_c')}
+                    className="w-24 border border-border rounded-md px-2 py-1"
+                  />
+                </label>
+                <label className="flex items-center justify-between gap-3" title={advancedHelp.close_kernel}>
+                  <span>Close Kernel</span>
+                  <input
+                    type="number"
+                    value={advancedNums.close_kernel}
+                    onChange={updateAdvancedNumber('close_kernel')}
+                    className="w-24 border border-border rounded-md px-2 py-1"
+                  />
+                </label>
+                <label className="flex items-center justify-between gap-3" title={advancedHelp.close_iterations}>
+                  <span>Close Iter</span>
+                  <input
+                    type="number"
+                    value={advancedNums.close_iterations}
+                    onChange={updateAdvancedNumber('close_iterations')}
+                    className="w-24 border border-border rounded-md px-2 py-1"
+                  />
+                </label>
+                <label className="flex items-center justify-between gap-3" title={advancedHelp.projection_density_threshold}>
+                  <span>Projection Density</span>
+                  <input
+                    type="number"
+                    step="0.001"
+                    value={advancedNums.projection_density_threshold}
+                    onChange={updateAdvancedNumber('projection_density_threshold')}
+                    className="w-24 border border-border rounded-md px-2 py-1"
+                  />
+                </label>
+                <label className="flex items-center justify-between gap-3" title={advancedHelp.projection_min_gap}>
+                  <span>Projection Gap</span>
+                  <input
+                    type="number"
+                    value={advancedNums.projection_min_gap}
+                    onChange={updateAdvancedNumber('projection_min_gap')}
+                    className="w-24 border border-border rounded-md px-2 py-1"
+                  />
+                </label>
+                <label className="flex items-center justify-between gap-3" title={advancedHelp.split_large_area_ratio}>
+                  <span>Split Large Ratio</span>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={advancedNums.split_large_area_ratio}
+                    onChange={updateAdvancedNumber('split_large_area_ratio')}
+                    className="w-24 border border-border rounded-md px-2 py-1"
+                  />
+                </label>
+                <label className="flex items-center justify-between gap-3" title={advancedHelp.split_large_min_boxes}>
+                  <span>Split Large Min</span>
+                  <input
+                    type="number"
+                    value={advancedNums.split_large_min_boxes}
+                    onChange={updateAdvancedNumber('split_large_min_boxes')}
+                    className="w-24 border border-border rounded-md px-2 py-1"
+                  />
+                </label>
+                <label className="flex items-center justify-between gap-3" title={advancedHelp.min_ink_ratio}>
+                  <span>Min Ink Ratio</span>
+                  <input
+                    type="number"
+                    step="0.0001"
+                    value={advancedNums.min_ink_ratio}
+                    onChange={updateAdvancedNumber('min_ink_ratio')}
+                    className="w-24 border border-border rounded-md px-2 py-1"
+                  />
+                </label>
+                <label className="flex items-center justify-between gap-3" title={advancedHelp.min_ink_pixels}>
+                  <span>Min Ink Pixels</span>
+                  <input
+                    type="number"
+                    value={advancedNums.min_ink_pixels}
+                    onChange={updateAdvancedNumber('min_ink_pixels')}
+                    className="w-24 border border-border rounded-md px-2 py-1"
+                  />
+                </label>
+                <label className="flex items-center justify-between gap-3" title={advancedHelp.min_segment_width_ratio}>
+                  <span>Min Segment Width</span>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={advancedNums.min_segment_width_ratio}
+                    onChange={updateAdvancedNumber('min_segment_width_ratio')}
+                    className="w-24 border border-border rounded-md px-2 py-1"
+                  />
+                </label>
+                <label className="flex items-center justify-between gap-3" title={advancedHelp.content_crop_enabled}>
+                  <span>Content Crop</span>
+                  <input
+                    type="checkbox"
+                    checked={advancedFlags.content_crop_enabled}
+                    onChange={() => toggleAdvancedFlag('content_crop_enabled')}
+                  />
+                </label>
+                <label className="flex items-center justify-between gap-3" title={advancedHelp.content_crop_pad}>
+                  <span>Content Crop Pad</span>
+                  <input
+                    type="number"
+                    value={advancedNums.content_crop_pad}
+                    onChange={updateAdvancedNumber('content_crop_pad')}
+                    className="w-24 border border-border rounded-md px-2 py-1"
+                  />
+                </label>
+                <label className="flex items-center justify-between gap-3" title={advancedHelp.content_density_threshold}>
+                  <span>Content Density</span>
+                  <input
+                    type="number"
+                    step="0.001"
+                    value={advancedNums.content_density_threshold}
+                    onChange={updateAdvancedNumber('content_density_threshold')}
+                    className="w-24 border border-border rounded-md px-2 py-1"
+                  />
+                </label>
+                <label className="flex items-center justify-between gap-3" title={advancedHelp.content_min_span_ratio}>
+                  <span>Content Min Span</span>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={advancedNums.content_min_span_ratio}
+                    onChange={updateAdvancedNumber('content_min_span_ratio')}
+                    className="w-24 border border-border rounded-md px-2 py-1"
+                  />
+                </label>
+                <label className="flex items-center justify-between gap-3" title={advancedHelp.refine_by_content}>
+                  <span>Refine By Content</span>
+                  <input
+                    type="checkbox"
+                    checked={advancedFlags.refine_by_content}
+                    onChange={() => toggleAdvancedFlag('refine_by_content')}
+                  />
+                </label>
+                <label className="flex items-center justify-between gap-3" title={advancedHelp.refine_pad}>
+                  <span>Refine Pad</span>
+                  <input
+                    type="number"
+                    value={advancedNums.refine_pad}
+                    onChange={updateAdvancedNumber('refine_pad')}
+                    className="w-24 border border-border rounded-md px-2 py-1"
+                  />
+                </label>
+                <label className="flex items-center justify-between gap-3" title={advancedHelp.edge_refine_enabled}>
+                  <span>Edge Refine</span>
+                  <input
+                    type="checkbox"
+                    checked={advancedFlags.edge_refine_enabled}
+                    onChange={() => toggleAdvancedFlag('edge_refine_enabled')}
+                  />
+                </label>
+                <label className="flex items-center justify-between gap-3" title={advancedHelp.edge_refine_pad}>
+                  <span>Edge Refine Pad</span>
+                  <input
+                    type="number"
+                    value={advancedNums.edge_refine_pad}
+                    onChange={updateAdvancedNumber('edge_refine_pad')}
+                    className="w-24 border border-border rounded-md px-2 py-1"
+                  />
+                </label>
+              </div>
+            </div>
+          </div>
+        )}
       </Card>
 
       {/* Full Plan View */}
@@ -1093,39 +1603,19 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
         <Card className="p-4 shadow-xl border-primary/10 bg-card/95 backdrop-blur-xl">
           <div className="space-y-3">
             <div className="flex flex-wrap items-center gap-4">
-              <div className="text-sm font-medium text-text-primary">בחר סט בדיקות להרצה:</div>
-              <label className="flex items-center gap-2 text-sm text-text-primary">
-                <input
-                  type="checkbox"
-                  checked={selectedCheckGroups.includes('walls')}
-                  onChange={() => toggleCheckGroup('walls')}
-                />
-                קירות
-              </label>
-              <label className="flex items-center gap-2 text-sm text-text-primary">
-                <input
-                  type="checkbox"
-                  checked={selectedCheckGroups.includes('heights')}
-                  onChange={() => toggleCheckGroup('heights')}
-                />
-                גובה/נפח
-              </label>
-              <label className="flex items-center gap-2 text-sm text-text-primary">
-                <input
-                  type="checkbox"
-                  checked={selectedCheckGroups.includes('doors')}
-                  onChange={() => toggleCheckGroup('doors')}
-                />
-                דלתות
-              </label>
-              <label className="flex items-center gap-2 text-sm text-text-primary">
-                <input
-                  type="checkbox"
-                  checked={selectedCheckGroups.includes('windows')}
-                  onChange={() => toggleCheckGroup('windows')}
-                />
-                חלונות
-              </label>
+              <div className="text-sm font-medium text-text-primary">בחר בדיקות להרצה:</div>
+              <div className="flex flex-wrap gap-3">
+                {requirementOptions.map((req) => (
+                  <label key={req.id} className="flex items-center gap-2 text-sm text-text-primary" title={req.help}>
+                    <input
+                      type="checkbox"
+                      checked={selectedRequirements.includes(req.id)}
+                      onChange={() => toggleRequirement(req.id)}
+                    />
+                    {req.label}
+                  </label>
+                ))}
+              </div>
             </div>
 
             <div className="flex items-center justify-between gap-4">
@@ -1150,7 +1640,7 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
 
                 <Button
                   onClick={handleApprove}
-                  disabled={approvedCount === 0 || selectedCheckGroups.length === 0}
+                  disabled={approvedCount === 0 || selectedRequirements.length === 0}
                   className="min-w-[200px] shadow-lg shadow-primary/20"
                 >
                   <Check className="w-4 h-4 ml-2" />

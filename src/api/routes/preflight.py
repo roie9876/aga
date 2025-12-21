@@ -9,6 +9,7 @@ from uuid import uuid4
 from fastapi import APIRouter, HTTPException
 
 from src.azure import get_cosmos_client
+from src.azure.blob_client import get_blob_client
 from src.config import settings
 from src.models.preflight import (
     InlineSubmissionPreflightRequest,
@@ -216,3 +217,75 @@ async def get_preflight(preflight_id: str):
     except Exception as e:
         logger.error("Failed to fetch preflight results", error=str(e))
         raise HTTPException(status_code=500, detail=f"Failed to fetch preflight results: {str(e)}")
+
+
+@router.delete("/history")
+async def delete_all_preflight():
+    """Delete all preflight history records."""
+    logger.info("Deleting all preflight history")
+    cosmos_client = get_cosmos_client()
+    blob_client = get_blob_client()
+
+    try:
+        query = """
+            SELECT c.id, c.project_id, c.decomposition_id, c.blob_prefix, c.artifacts_prefix
+            FROM c
+            WHERE c.type = 'submission_preflight'
+        """
+        results = await cosmos_client.query_items(query, [])
+        deleted_count = 0
+        deleted_blobs = 0
+        for item in results:
+            partition_key = item.get("project_id") or item.get("decomposition_id") or item.get("id")
+            if await cosmos_client.delete_item(item_id=item.get("id"), partition_key=partition_key):
+                deleted_count += 1
+            blob_prefix = item.get("blob_prefix") or item.get("artifacts_prefix")
+            if isinstance(blob_prefix, str) and blob_prefix.strip():
+                deleted_blobs += await blob_client.delete_blobs_with_prefix(blob_prefix.strip())
+
+        return {
+            "deleted": deleted_count,
+            "deleted_blobs": deleted_blobs,
+        }
+    except Exception as e:
+        logger.error("Failed to delete all preflight history", error=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to delete all preflight history: {str(e)}")
+
+
+@router.delete("/{preflight_id}")
+async def delete_preflight(preflight_id: str):
+    """Delete a preflight history record (and any related blobs if present)."""
+    logger.info("Deleting preflight history", preflight_id=preflight_id)
+    cosmos_client = get_cosmos_client()
+    blob_client = get_blob_client()
+
+    try:
+        query = """
+            SELECT * FROM c
+            WHERE c.id = @preflight_id
+            AND c.type = 'submission_preflight'
+        """
+        parameters = [{"name": "@preflight_id", "value": preflight_id}]
+        results = await cosmos_client.query_items(query, parameters)
+        if not results:
+            raise HTTPException(status_code=404, detail=f"Preflight not found: {preflight_id}")
+
+        item = results[0]
+        partition_key = item.get("project_id") or item.get("decomposition_id") or item.get("id")
+        deleted = await cosmos_client.delete_item(item_id=item.get("id"), partition_key=partition_key)
+
+        blob_prefix = item.get("blob_prefix") or item.get("artifacts_prefix")
+        deleted_blobs = 0
+        if isinstance(blob_prefix, str) and blob_prefix.strip():
+            deleted_blobs = await blob_client.delete_blobs_with_prefix(blob_prefix.strip())
+
+        return {
+            "deleted": bool(deleted),
+            "preflight_id": preflight_id,
+            "deleted_blobs": deleted_blobs,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to delete preflight history", preflight_id=preflight_id, error=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to delete preflight history: {str(e)}")

@@ -170,6 +170,42 @@ class BlobStorageClient:
         except AzureError as e:
             logger.error("Failed to delete blob", error=str(e), blob_name=blob_name)
             raise
+
+    async def delete_blobs_with_prefix(
+        self,
+        prefix: str,
+        container_name: Optional[str] = None
+    ) -> int:
+        """Delete all blobs that start with the given prefix.
+
+        Args:
+            prefix: Prefix to match blob names
+            container_name: Container name (default: from settings)
+
+        Returns:
+            Number of deleted blobs
+        """
+        container = container_name or settings.azure_storage_container_name
+        if not prefix:
+            return 0
+
+        try:
+            logger.info("Deleting blobs by prefix", prefix=prefix, container=container)
+            container_client = self.client.get_container_client(container=container)
+
+            def _delete_matching() -> int:
+                deleted = 0
+                for blob in container_client.list_blobs(name_starts_with=prefix):
+                    container_client.delete_blob(blob.name)
+                    deleted += 1
+                return deleted
+
+            deleted_count = await anyio.to_thread.run_sync(_delete_matching)
+            logger.info("Deleted blobs by prefix", prefix=prefix, deleted=deleted_count)
+            return deleted_count
+        except AzureError as e:
+            logger.error("Failed to delete blobs by prefix", error=str(e), prefix=prefix)
+            raise
     
     def generate_sas_url(
         self,

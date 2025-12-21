@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any, Literal
 
 from src.azure import get_cosmos_client, get_openai_client
+from src.azure.blob_client import get_blob_client
 from src.config import settings
 from src.services.segment_analyzer import get_segment_analyzer
 from src.services.mamad_validator import get_mamad_validator
@@ -56,6 +57,10 @@ class SegmentValidationRequest(BaseModel):
             "Which groups of checks to run. The app still decides which validators are relevant per segment category; "
             "this list only enables/disables groups to save time during early testing."
         ),
+    )
+    enabled_requirements: Optional[List[str]] = Field(
+        default=None,
+        description="Explicit list of requirement IDs to run (e.g., ['1.2','2.3']). Overrides check_groups if provided.",
     )
 
 
@@ -689,7 +694,10 @@ async def validate_segments(request: SegmentValidationRequest):
         )
 
         enabled_requirements = None
-        if restrict_by_groups:
+        if request.enabled_requirements:
+            enabled_requirements = set(str(rid) for rid in request.enabled_requirements if str(rid).strip())
+            restrict_by_groups = True
+        elif restrict_by_groups:
             enabled_set: set[str] = set()
             for g in effective_check_groups:
                 enabled_set.update(group_to_requirements.get(g, []))
@@ -924,7 +932,10 @@ async def validate_segments_stream(request: SegmentValidationRequest):
         )
 
         enabled_requirements = None
-        if restrict_by_groups:
+        if request.enabled_requirements:
+            enabled_requirements = set(str(rid) for rid in request.enabled_requirements if str(rid).strip())
+            restrict_by_groups = True
+        elif restrict_by_groups:
             enabled_set: set[str] = set()
             for g in effective_check_groups:
                 enabled_set.update(group_to_requirements.get(g, []))
@@ -1859,3 +1870,75 @@ async def get_validation_results(validation_id: str):
             status_code=500,
             detail=f"Failed to fetch results: {str(e)}"
         )
+
+
+@router.delete("/validation/{validation_id}")
+async def delete_validation_result(validation_id: str):
+    """Delete a segment validation history record (and any related blobs if present)."""
+    logger.info("Deleting segment validation history", validation_id=validation_id)
+    cosmos_client = get_cosmos_client()
+    blob_client = get_blob_client()
+
+    try:
+        query = """
+            SELECT * FROM c
+            WHERE c.id = @validation_id
+            AND c.type = 'segment_validation'
+        """
+        parameters = [{"name": "@validation_id", "value": validation_id}]
+        results = await cosmos_client.query_items(query, parameters)
+        if not results:
+            raise HTTPException(status_code=404, detail=f"Validation not found: {validation_id}")
+        item = results[0]
+
+        partition_key = item.get("project_id") or item.get("decomposition_id") or item.get("id")
+        deleted = await cosmos_client.delete_item(item_id=item.get("id"), partition_key=partition_key)
+
+        blob_prefix = item.get("blob_prefix") or item.get("artifacts_prefix")
+        deleted_blobs = 0
+        if isinstance(blob_prefix, str) and blob_prefix.strip():
+            deleted_blobs = await blob_client.delete_blobs_with_prefix(blob_prefix.strip())
+
+        return {
+            "deleted": bool(deleted),
+            "validation_id": validation_id,
+            "deleted_blobs": deleted_blobs,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to delete validation history", validation_id=validation_id, error=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to delete validation history: {str(e)}")
+
+
+@router.delete("/validations")
+async def delete_all_validations():
+    """Delete all segment validation history records."""
+    logger.info("Deleting all validation history")
+    cosmos_client = get_cosmos_client()
+    blob_client = get_blob_client()
+
+    try:
+        query = """
+            SELECT c.id, c.project_id, c.decomposition_id, c.blob_prefix, c.artifacts_prefix
+            FROM c
+            WHERE c.type = 'segment_validation'
+        """
+        results = await cosmos_client.query_items(query, [])
+        deleted_count = 0
+        deleted_blobs = 0
+        for item in results:
+            partition_key = item.get("project_id") or item.get("decomposition_id") or item.get("id")
+            if await cosmos_client.delete_item(item_id=item.get("id"), partition_key=partition_key):
+                deleted_count += 1
+            blob_prefix = item.get("blob_prefix") or item.get("artifacts_prefix")
+            if isinstance(blob_prefix, str) and blob_prefix.strip():
+                deleted_blobs += await blob_client.delete_blobs_with_prefix(blob_prefix.strip())
+
+        return {
+            "deleted": deleted_count,
+            "deleted_blobs": deleted_blobs,
+        }
+    except Exception as e:
+        logger.error("Failed to delete all validation history", error=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to delete all validation history: {str(e)}")

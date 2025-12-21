@@ -41,6 +41,7 @@ ALL_REQUIREMENTS = {
     "1.2": {"category": "קירות", "description": "עובי קיר - 25-40 ס\"מ", "severity": "critical"},
     "2.1": {"category": "גובה החדר", "description": "גובה מינימלי 2.50 מטר", "severity": "critical"},
     "2.2": {"category": "גובה החדר", "description": "גובה 2.20 מטר במרתף", "severity": "warning"},
+    "2.3": {"category": "שטח ממ\"ד", "description": "שטח נטו מינימלי 9 מ\"ר (ללא קירות)", "severity": "critical"},
     "3.1": {"category": "פתחים", "description": "ריווח דלת", "severity": "warning"},
     "3.2": {"category": "פתחים", "description": "ריווח חלון", "severity": "warning"},
     "4.1": {"category": "אוורור", "description": "מערכת אוורור ת\"י 4570", "severity": "critical"},
@@ -320,9 +321,10 @@ The system maps each requirement to the segment type needed for validation:
 | Requirement ID | Category | Needed Segment Type |
 |----------------|----------|---------------------|
 | 1.1 | קירות | תכנית קומה - מיקום ממ"ד ביחס לקירות חיצוניים |
-| 1.2 | קירות | חתך קיר - עובי ומספר קירות חיצוניים |
+| 1.2 | קירות | תכנית ממ"ד בקנ"מ 1:50 - עובי קירות ומספר קירות חיצוניים |
 | 2.1 | גובה החדר | חתך אנכי - גובה החדר |
 | 2.2 | גובה החדר | חתך אנכי - גובה בתוספת בניה/מרתף + נפח החדר |
+| 2.3 | שטח ממ"ד | תכנית ממ"ד בקנ"מ 1:50 - שטח פנימי נטו |
 | 3.1 | פתחים | פרט דלת - ריווח מקיר ניצב |
 | 3.2 | פתחים | פרט חלון - ריווח בין פתחים |
 | 4.1 | אוורור | מערכת אוורור - פרט התקנה |

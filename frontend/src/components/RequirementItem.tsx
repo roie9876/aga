@@ -16,12 +16,57 @@ interface Requirement {
   severity: 'critical' | 'error' | 'warning' | 'info';
   segments_checked: string[];
   violations: Violation[];
+  evaluations?: Array<{
+    segment_id?: string;
+    status?: string;
+    notes_he?: string;
+    reason_not_checked?: string;
+    evidence?: any[];
+  }>;
 }
 
 export const RequirementItem: React.FC<{ req: Requirement }> = ({ req }) => {
   const [expanded, setExpanded] = useState(false);
   const hasViolations = req.status === 'failed' && req.violations?.length > 0;
-  const hasDetails = hasViolations || req.segments_checked?.length > 0;
+  const hasEvaluations = Array.isArray(req.evaluations) && req.evaluations.length > 0;
+  const hasDetails = hasViolations || req.segments_checked?.length > 0 || hasEvaluations;
+
+  const formatEvidence = (evidence: any[]) => {
+    if (!Array.isArray(evidence)) return [];
+    const lines: string[] = [];
+    for (const ev of evidence) {
+      if (!ev || typeof ev !== 'object') continue;
+      if (ev.evidence_type === 'dimension') {
+        const element = String(ev.element || '').toLowerCase();
+        const value = ev.value;
+        const unit = ev.unit ? ` ${ev.unit}` : '';
+        if (element.includes('computed_area')) {
+          if (typeof value === 'number') {
+            lines.push(`שטח מחושב: ${value.toFixed(2)}${unit}`);
+          }
+          continue;
+        }
+        if (element.includes('required_min_area')) {
+          lines.push(`מינימום נדרש: ${value}${unit}`);
+          continue;
+        }
+        if (element.includes('mamad_room_length')) {
+          lines.push(`אורך פנימי: ${value}${unit}`);
+          continue;
+        }
+        if (element.includes('mamad_room_width')) {
+          lines.push(`רוחב פנימי: ${value}${unit}`);
+          continue;
+        }
+        if (value !== undefined) {
+          lines.push(`${ev.element || 'מידה'}: ${value}${unit}`);
+        }
+      } else if (ev.evidence_type === 'text' && typeof ev.text === 'string') {
+        lines.push(ev.text.trim());
+      }
+    }
+    return lines;
+  };
 
   return (
     <div 
@@ -108,6 +153,39 @@ export const RequirementItem: React.FC<{ req: Requirement }> = ({ req }) => {
                 {req.segments_checked.map((seg: string, i: number) => (
                   <Badge key={i} variant="info" size="sm">{seg}</Badge>
                 ))}
+              </div>
+            </div>
+          )}
+
+          {/* Evaluation Evidence */}
+          {hasEvaluations && (
+            <div className="mt-3 p-3 bg-white rounded-lg border border-border">
+              <p className="text-xs font-semibold text-text-primary mb-2 text-right">
+                פירוט חישוב/ראיות:
+              </p>
+              <div className="space-y-2 text-xs text-text-muted text-right">
+                {req.evaluations?.map((ev, idx) => {
+                  const evidenceLines = formatEvidence(ev?.evidence || []);
+                  if (!ev && evidenceLines.length === 0) return null;
+                  return (
+                    <div key={idx} className="border border-border/60 rounded-md p-2 bg-background/60">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-semibold text-text-primary">
+                          {ev?.segment_id ? `סגמנט ${ev.segment_id}` : 'סגמנט'}
+                        </span>
+                        {ev?.status && <span className="text-text-muted">סטטוס: {ev.status}</span>}
+                      </div>
+                      {ev?.notes_he && <div className="mt-1 text-text-muted">{ev.notes_he}</div>}
+                      {evidenceLines.length > 0 && (
+                        <div className="mt-1">
+                          {evidenceLines.map((line, i) => (
+                            <div key={i}>{line}</div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             </div>
           )}

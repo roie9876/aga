@@ -60,6 +60,36 @@ class AutoSegmentationRequest(BaseModel):
     max_area_ratio: float = Field(0.55, description="Maximum area ratio for proposals")
     merge_iou_threshold: float = Field(0.20, description="IoU threshold for merging boxes")
     deskew: bool = Field(False, description="Enable deskew before segmentation")
+    adaptive_block_size: Optional[int] = Field(None, description="Adaptive threshold block size")
+    adaptive_c: Optional[int] = Field(None, description="Adaptive threshold C")
+    close_kernel: Optional[int] = Field(None, description="Morph close kernel size")
+    close_iterations: Optional[int] = Field(None, description="Morph close iterations")
+    projection_density_threshold: Optional[float] = Field(None, description="Projection density threshold")
+    projection_min_gap: Optional[int] = Field(None, description="Projection minimum gap")
+    split_large_area_ratio: Optional[float] = Field(None, description="Split large area ratio")
+    split_large_min_boxes: Optional[int] = Field(None, description="Split large min boxes")
+    line_kernel_scale: Optional[int] = Field(None, description="Line kernel scale")
+    line_merge_iterations: Optional[int] = Field(None, description="Line merge iterations")
+    separator_line_density: Optional[float] = Field(None, description="Separator line density")
+    separator_min_line_width: Optional[int] = Field(None, description="Separator minimum line width")
+    separator_min_gap: Optional[int] = Field(None, description="Separator minimum gap")
+    separator_min_height_ratio: Optional[float] = Field(None, description="Separator minimum height ratio")
+    separator_max_width: Optional[int] = Field(None, description="Separator maximum width")
+    hough_threshold: Optional[int] = Field(None, description="Hough threshold")
+    hough_min_line_length_ratio: Optional[float] = Field(None, description="Hough min line length ratio")
+    hough_max_line_gap: Optional[int] = Field(None, description="Hough max line gap")
+    hough_cluster_px: Optional[int] = Field(None, description="Hough cluster px")
+    min_ink_ratio: Optional[float] = Field(None, description="Min ink ratio")
+    min_ink_pixels: Optional[int] = Field(None, description="Min ink pixels")
+    min_segment_width_ratio: Optional[float] = Field(None, description="Min segment width ratio")
+    content_crop_enabled: Optional[bool] = Field(None, description="Enable content crop")
+    content_crop_pad: Optional[int] = Field(None, description="Content crop pad")
+    content_density_threshold: Optional[float] = Field(None, description="Content density threshold")
+    content_min_span_ratio: Optional[float] = Field(None, description="Content minimum span ratio")
+    edge_refine_enabled: Optional[bool] = Field(None, description="Enable edge refine")
+    edge_refine_pad: Optional[int] = Field(None, description="Edge refine pad")
+    refine_by_content: Optional[bool] = Field(None, description="Refine by content")
+    refine_pad: Optional[int] = Field(None, description="Refine pad")
 
 
 @router.post("/upload-segments", response_model=DecompositionResponse)
@@ -1463,7 +1493,7 @@ async def auto_segment_decomposition(
             projection_gap: int,
             separator_height_ratio: float,
         ) -> SegmenterConfig:
-            return SegmenterConfig(
+            cfg = SegmenterConfig(
                 mode="cv",
                 max_dim=int(request.max_dim),
                 min_area_ratio=float(request.min_area_ratio),
@@ -1492,6 +1522,45 @@ async def auto_segment_decomposition(
                 content_crop_enabled=True,
                 content_crop_pad=12,
             )
+            _apply_cfg_overrides(cfg, request)
+            return cfg
+
+        def _apply_cfg_overrides(cfg: SegmenterConfig, req: AutoSegmentationRequest) -> None:
+            overrides = {
+                "adaptive_block_size": req.adaptive_block_size,
+                "adaptive_c": req.adaptive_c,
+                "close_kernel": req.close_kernel,
+                "close_iterations": req.close_iterations,
+                "projection_density_threshold": req.projection_density_threshold,
+                "projection_min_gap": req.projection_min_gap,
+                "split_large_area_ratio": req.split_large_area_ratio,
+                "split_large_min_boxes": req.split_large_min_boxes,
+                "line_kernel_scale": req.line_kernel_scale,
+                "line_merge_iterations": req.line_merge_iterations,
+                "separator_line_density": req.separator_line_density,
+                "separator_min_line_width": req.separator_min_line_width,
+                "separator_min_gap": req.separator_min_gap,
+                "separator_min_height_ratio": req.separator_min_height_ratio,
+                "separator_max_width": req.separator_max_width,
+                "hough_threshold": req.hough_threshold,
+                "hough_min_line_length_ratio": req.hough_min_line_length_ratio,
+                "hough_max_line_gap": req.hough_max_line_gap,
+                "hough_cluster_px": req.hough_cluster_px,
+                "min_ink_ratio": req.min_ink_ratio,
+                "min_ink_pixels": req.min_ink_pixels,
+                "min_segment_width_ratio": req.min_segment_width_ratio,
+                "content_crop_enabled": req.content_crop_enabled,
+                "content_crop_pad": req.content_crop_pad,
+                "content_density_threshold": req.content_density_threshold,
+                "content_min_span_ratio": req.content_min_span_ratio,
+                "edge_refine_enabled": req.edge_refine_enabled,
+                "edge_refine_pad": req.edge_refine_pad,
+                "refine_by_content": req.refine_by_content,
+                "refine_pad": req.refine_pad,
+            }
+            for name, value in overrides.items():
+                if value is not None:
+                    setattr(cfg, name, value)
 
         def _merge_regions_to_target(regions_list: list, target: int) -> list:
             if target <= 0 or len(regions_list) <= target:
@@ -1688,6 +1757,7 @@ async def auto_segment_decomposition(
                             content_crop_enabled=True,
                             content_crop_pad=12,
                         )
+                        _apply_cfg_overrides(fallback, request)
                         fallback_result = segment_image(seg_image, fallback)
                         fallback_regions = list(fallback_result.get("regions", []) or [])
                         logger.info(

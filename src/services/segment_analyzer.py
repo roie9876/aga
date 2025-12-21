@@ -1075,6 +1075,15 @@ Additionally, determine the **VIEW TYPE**:
    - Spacing between elements
    - Elevation heights
 
+   **MAMAD plan (קנ"מ 1:50) rule (IMPORTANT):**
+   - If this segment shows a ממ"ד plan/detail at scale 1:50, extract the **internal length and width**
+     of the ממ"ד (from dimension lines inside the room).
+   - Record them in `dimensions[]` with elements like:
+     - "mamad room length" / "אורך ממ\"ד פנימי"
+     - "mamad room width" / "רוחב ממ\"ד פנימי"
+   - If units are not specified, assume **centimeters (cm)**.
+   - Include short evidence strings pointing to the exact numbers you saw.
+
      **Wall thickness interpretation rule (VERY IMPORTANT):**
      - If you see small dimensions placed directly on/along a wall (or between inner and outer wall lines),
          treat them as **wall thickness** even if the drawing does not explicitly label "עובי".

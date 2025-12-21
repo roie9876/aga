@@ -14,6 +14,7 @@ class RequirementsCoverageTracker:
         "1.2": {"category": "קירות", "description": "עובי קיר - 25-40 ס\"מ לפי מספר קירות חיצוניים", "severity": "critical"},
         "2.1": {"category": "גובה החדר", "description": "גובה מינימלי 2.50 מטר", "severity": "critical"},
         "2.2": {"category": "גובה החדר", "description": "גובה 2.20 מטר במרתף/תוספת בניה (עם נפח ≥22.5 מ\"ק)", "severity": "warning"},
+        "2.3": {"category": "שטח ממ\"ד", "description": "שטח נטו מינימלי 9 מ\"ר (ללא קירות)", "severity": "critical"},
         "3.1": {"category": "פתחים", "description": "ריווח דלת - ≥90cm מבפנים, ≥75cm מבחוץ", "severity": "warning"},
         "3.2": {"category": "פתחים", "description": "ריווח חלון - ≥20cm בין נישות, ≥100cm בין פתחי אור", "severity": "warning"},
         "4.1": {"category": "אוורור", "description": "מערכת אוורור וסינון בהתאם לת\"י 4570", "severity": "critical"},
@@ -52,7 +53,8 @@ class RequirementsCoverageTracker:
                 "severity": req_info["severity"],
                 "status": "not_checked",  # not_checked, passed, failed, skipped
                 "segments_checked": [],
-                "violations": []
+                "violations": [],
+                "evaluations": [],
             }
         
         # Process each analyzed segment
@@ -79,6 +81,16 @@ class RequirementsCoverageTracker:
                     if seg_id and seg_id not in coverage[req_id]["segments_checked"]:
                         coverage[req_id]["segments_checked"].append(seg_id)
 
+                    coverage[req_id]["evaluations"].append(
+                        {
+                            "segment_id": seg_id,
+                            "status": status,
+                            "notes_he": ev.get("notes_he"),
+                            "reason_not_checked": ev.get("reason_not_checked"),
+                            "evidence": ev.get("evidence") or [],
+                        }
+                    )
+
                     # Merge status (UI semantics): passed > failed > not_checked
                     # Rationale: if a requirement was satisfied in any segment, we consider it
                     # globally satisfied; conflicting failures remain visible via `violations`.
@@ -103,7 +115,7 @@ class RequirementsCoverageTracker:
             # This should stay aligned with src/services/mamad_validator.py.
             category_to_checked_requirements = {
                 "WALL_SECTION": ["1.2"],
-                "ROOM_LAYOUT": ["2.1", "2.2"],
+                "ROOM_LAYOUT": ["2.1", "2.2", "2.3"],
                 "DOOR_DETAILS": ["3.1"],
                 "WINDOW_DETAILS": ["3.2"],
                 "REBAR_DETAILS": ["6.3"],

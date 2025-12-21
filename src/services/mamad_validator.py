@@ -136,6 +136,7 @@ class MamadValidator:
             "1.2": ViolationSeverity.CRITICAL,
             "2.1": ViolationSeverity.CRITICAL,
             "2.2": ViolationSeverity.WARNING,
+            "2.3": ViolationSeverity.CRITICAL,
             "3.1": ViolationSeverity.WARNING,
             "3.2": ViolationSeverity.WARNING,
             "4.2": ViolationSeverity.WARNING,
@@ -148,6 +149,7 @@ class MamadValidator:
             "1.2": "קירות",
             "2.1": "גובה",
             "2.2": "גובה",
+            "2.3": "שטח",
             "3.1": "דלת",
             "3.2": "חלון",
             "4.2": "אוורור",
@@ -160,6 +162,7 @@ class MamadValidator:
             "1.2": "עובי קיר - 25-40 ס\"מ לפי מספר קירות חיצוניים",
             "2.1": "גובה מינימלי 2.50 מטר",
             "2.2": "גובה 2.20 מטר במרתף/תוספת בניה (עם נפח ≥22.5 מ\"ק)",
+            "2.3": "שטח ממ\"ד נטו מינימלי 9 מ\"ר (ללא קירות)",
             "3.1": "ריווח דלת - ≥90cm מבפנים, ≥75cm מבחוץ",
             "3.2": "ריווח חלון - ≥20cm בין נישות, ≥100cm בין פתחי אור",
             "4.2": 'הערת אוורור וסינון בהתאם לת"י 4570',
@@ -280,6 +283,7 @@ class MamadValidator:
             "WALL_SECTION": [self._validate_wall_thickness],
             "ROOM_LAYOUT": [
                 self._validate_room_height,
+                self._validate_mamad_min_area,
                 self._validate_external_wall_count,
                 self._validate_external_wall_classification,
                 self._validate_tower_continuity,
@@ -319,6 +323,7 @@ class MamadValidator:
         validator_to_requirements = {
             self._validate_wall_thickness: ["1.2"],
             self._validate_room_height: ["2.1", "2.2"],
+            self._validate_mamad_min_area: ["2.3"],
             self._validate_external_wall_count: ["1.1"],
             self._validate_external_wall_classification: ["1.3"],
             self._validate_high_wall: ["1.4"],
@@ -563,6 +568,21 @@ class MamadValidator:
         - 3 external walls: 30cm
         - 4 external walls: 40cm
         """
+        text_items = data.get("text_items", []) or []
+        annotations = data.get("annotations", []) or []
+        all_text = " ".join(str(t.get("text") or "") for t in (text_items + annotations) if isinstance(t, dict))
+        all_text_lower = all_text.lower()
+        mamad_label_present = ("ממ\"ד" in all_text) or ("ממד" in all_text) or ("ממ״ד" in all_text_lower) or ("mamad" in all_text_lower)
+        scale_1_50_present = bool(re.search(r"\b1\s*[:/]\s*50\b", all_text)) or ("קנ\"מ" in all_text and "50" in all_text)
+        if not mamad_label_present or not scale_1_50_present:
+            self._add_requirement_evaluation(
+                "1.2",
+                "not_checked",
+                reason_not_checked="not_mamad_1_50_segment",
+                notes_he="עובי קיר ממ\"ד נבדק רק מסגמנט עם תכנית ממ\"ד בקנ\"מ 1:50; בסגמנט זה לא זוהה ממ\"ד/קנ\"מ מתאים.",
+            )
+            return False
+
         elements = data.get("structural_elements", [])
         if not elements:
             self._add_requirement_evaluation(
@@ -1591,6 +1611,194 @@ class MamadValidator:
             reason_not_checked="not_applicable_no_exception_context",
             evidence=height_evidence,
             notes_he="לא נמצאו ראיות לכך שהממ\"ד במרתף/תוספת בניה; לכן החריג (2.2) אינו רלוונטי והגובה חייב לעמוד ב-2.50 מ'.",
+        )
+        return True
+
+    def _validate_mamad_min_area(self, data: Dict[str, Any]) -> bool:
+        """
+        Rule 2.3: Minimum net area (without walls) must be >= 9 m².
+        Evaluate only on MAMAD plan segments at scale 1:50.
+        """
+        text_items = data.get("text_items", []) or []
+        annotations = data.get("annotations", []) or []
+        all_text = " ".join(str(t.get("text") or "") for t in (text_items + annotations) if isinstance(t, dict))
+        all_text_lower = all_text.lower()
+
+        mamad_label_present = ("ממ\"ד" in all_text) or ("ממד" in all_text) or ("ממ״ד" in all_text_lower) or ("mamad" in all_text_lower)
+        scale_1_50_present = bool(re.search(r"\b1\s*[:/]\s*50\b", all_text)) or ("קנ\"מ" in all_text and "50" in all_text)
+
+        classification = data.get("classification", {}) or {}
+        view_type = str(classification.get("view_type") or "").lower()
+        if view_type and view_type not in {"top_view", "unknown"}:
+            self._add_requirement_evaluation(
+                "2.3",
+                "not_checked",
+                reason_not_checked="not_top_view",
+                notes_he="הסגמנט אינו תכנית (מבט על), ולכן לא בוצעה בדיקת שטח ממ\"ד.",
+            )
+            return False
+
+        if not mamad_label_present:
+            self._add_requirement_evaluation(
+                "2.3",
+                "not_checked",
+                reason_not_checked="mamad_label_missing",
+                notes_he='לא זוהה סימון מפורש של ממ"ד בסגמנט, ולכן לא בוצעה בדיקת שטח.',
+            )
+            return False
+
+        if not scale_1_50_present:
+            self._add_requirement_evaluation(
+                "2.3",
+                "not_checked",
+                reason_not_checked="scale_1_50_missing",
+                notes_he='לא זוהה קנ"מ 1:50 בסגמנט, ולכן לא בוצעה בדיקת שטח ממ"ד.',
+            )
+            return False
+
+        dims = data.get("dimensions", []) or []
+        candidates: List[Tuple[float, Dict[str, Any]]] = []
+        internal_candidates: List[Tuple[float, Dict[str, Any]]] = []
+
+        def _is_dimension_candidate(d: Dict[str, Any]) -> bool:
+            element = str(d.get("element") or "").lower()
+            location = str(d.get("location") or "").lower()
+            text = str(d.get("text") or "").lower()
+            combined = f"{element} {location} {text}"
+
+            include_markers = [
+                "ממ\"ד",
+                "ממד",
+                "ממ״ד",
+                "mamad",
+                "room",
+                "חדר",
+                "אורך",
+                "רוחב",
+                "length",
+                "width",
+                "מידות",
+                "dimensions",
+                "פנימי",
+            ]
+            exclude_markers = [
+                "עובי",
+                "thickness",
+                "door",
+                "window",
+                "פתח",
+                "גובה",
+                "height",
+                "סף",
+                "משקוף",
+                "משקופים",
+            ]
+            if any(k in combined for k in exclude_markers):
+                return False
+            return any(k in combined for k in include_markers) or ("ממ\"ד" in all_text or "ממד" in all_text)
+
+        def _is_overall_dimension(d: Dict[str, Any]) -> bool:
+            element = str(d.get("element") or "").lower()
+            location = str(d.get("location") or "").lower()
+            text = str(d.get("text") or "").lower()
+            combined = f"{element} {location} {text}"
+            overall_markers = [
+                "overall",
+                "כולל",
+                "חוץ",
+                "external",
+                "ברוטו",
+                "ברוטו",
+                "gross",
+                "outer",
+            ]
+            return any(k in combined for k in overall_markers)
+
+        def _is_internal_dimension(d: Dict[str, Any]) -> bool:
+            element = str(d.get("element") or "").lower()
+            location = str(d.get("location") or "").lower()
+            text = str(d.get("text") or "").lower()
+            combined = f"{element} {location} {text}"
+            internal_markers = ["פנימי", "internal", "net", "נטו"]
+            return any(k in combined for k in internal_markers) and not _is_overall_dimension(d)
+
+        for d in dims:
+            if not isinstance(d, dict):
+                continue
+            if not _is_dimension_candidate(d):
+                continue
+            value_source = d.get("value")
+            if value_source is None:
+                value_source = d.get("text")
+            val_m = self._extract_dimension_value(value_source, "m")
+            if val_m is None:
+                continue
+            value_str = str(value_source or "").lower()
+            if ("mm" in value_str) or ("מ\"מ" in value_str) or ("מ״מ" in value_str):
+                try:
+                    raw_num = float(re.search(r"\d+\.?\d*", value_str).group())
+                    val_m = raw_num / 1000.0
+                except Exception:
+                    pass
+            elif val_m > 10.0:
+                # If a large value slipped in (likely mm), try converting to meters.
+                val_m = val_m / 1000.0
+            if not (1.5 <= val_m <= 6.5):
+                continue
+            candidates.append((val_m, d))
+            if _is_internal_dimension(d):
+                internal_candidates.append((val_m, d))
+
+        preferred_candidates = internal_candidates if len(internal_candidates) >= 2 else candidates
+
+        if len(preferred_candidates) < 2:
+            self._add_requirement_evaluation(
+                "2.3",
+                "not_checked",
+                reason_not_checked="missing_room_dimensions",
+                evidence=[self._evidence_text(text="לא נמצאו שתי מידות פנימיות של ממ\"ד לתחישוב שטח.", element="mamad_room_dims")],
+                notes_he="לא נמצאו שתי מידות פנימיות (אורך ורוחב) שניתן להשתמש בהן לחישוב שטח ממ\"ד.",
+            )
+            return False
+
+        preferred_candidates.sort(key=lambda x: x[0], reverse=True)
+        length_m, length_raw = preferred_candidates[0]
+        width_m, width_raw = preferred_candidates[1]
+        area_m2 = length_m * width_m
+        evidence = [
+            self._evidence_dimension(
+                value=length_m,
+                unit="m",
+                element=str(length_raw.get("element") or "mamad_room_length"),
+                location=str(length_raw.get("location") or ""),
+                text=str(length_raw.get("value") or ""),
+                raw=length_raw,
+            ),
+            self._evidence_dimension(
+                value=width_m,
+                unit="m",
+                element=str(width_raw.get("element") or "mamad_room_width"),
+                location=str(width_raw.get("location") or ""),
+                text=str(width_raw.get("value") or ""),
+                raw=width_raw,
+            ),
+            self._evidence_dimension(value=9.0, unit="m2", element="required_min_area"),
+        ]
+
+        if area_m2 >= 9.0:
+            self._add_requirement_evaluation(
+                "2.3",
+                "passed",
+                evidence=evidence + [self._evidence_dimension(value=area_m2, unit="m2", element="computed_area")],
+                notes_he=f"שטח ממ\"ד מחושב {area_m2:.2f} מ\"ר ועומד בדרישת המינימום (≥9 מ\"ר).",
+            )
+            return True
+
+        self._add_requirement_evaluation(
+            "2.3",
+            "failed",
+            evidence=evidence + [self._evidence_dimension(value=area_m2, unit="m2", element="computed_area")],
+            notes_he=f"שטח ממ\"ד מחושב {area_m2:.2f} מ\"ר, קטן מהמינימום הנדרש (9 מ\"ר).",
         )
         return True
 

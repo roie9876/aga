@@ -48,14 +48,16 @@ export function PreflightChecks(props: {
   loading: boolean;
   result: SubmissionPreflightResponse | null;
   onBack: () => void;
-  onContinue: () => void;
+  onContinue: (force?: boolean) => void;
   continueEnabled: boolean;
   analysisProgress?: SegmentAnalysisProgress | null;
   onOpenEvidenceSegment?: (segmentId: string) => void;
 }) {
   const { loading, result, onBack, onContinue, continueEnabled, analysisProgress, onOpenEvidenceSegment } = props;
   const [expandedCheckId, setExpandedCheckId] = useState<string | null>(null);
+  const [forceContinue, setForceContinue] = useState(false);
   const checks = useMemo(() => (result?.checks || []), [result]);
+  const canContinue = continueEnabled || forceContinue;
 
   const progressList = useMemo(() => {
     const byId = analysisProgress?.statusBySegmentId || {};
@@ -97,11 +99,24 @@ export function PreflightChecks(props: {
             <Button variant="ghost" onClick={onBack} disabled={loading}>
               חזור לבחירה
             </Button>
-            <Button onClick={onContinue} disabled={loading || !continueEnabled}>
+            <Button onClick={() => onContinue(forceContinue)} disabled={loading || !canContinue}>
               המשך לבדיקה
             </Button>
           </div>
         </div>
+
+        {!loading && result && !result.passed && (
+          <div className="mt-4 text-sm text-text-muted flex items-center gap-3">
+            <label className="inline-flex items-center gap-2 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={forceContinue}
+                onChange={(event) => setForceContinue(event.target.checked)}
+              />
+              <span>אני מבין/ה ורוצה להמשיך למרות כשל בתנאי הסף</span>
+            </label>
+          </div>
+        )}
 
         {loading && analysisProgress && analysisProgress.total > 0 && (
           <div className="mt-6 rounded-lg border border-border bg-white p-4">

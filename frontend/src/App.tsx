@@ -10,7 +10,8 @@ import {
   TrendingUp,
   Shield,
   BookOpen,
-  Plus
+  Plus,
+  Trash2
 } from 'lucide-react';
 import { DecompositionUpload } from './components/DecompositionUpload';
 import { DecompositionReview } from './components/DecompositionReview';
@@ -347,7 +348,7 @@ function App() {
   const [preflightLoading, setPreflightLoading] = useState(false);
   const [preflightResult, setPreflightResult] = useState<SubmissionPreflightResponse | null>(null);
   const [preflightRunMeta, setPreflightRunMeta] = useState<any | null>(null);
-  const [pendingApprovalParams, setPendingApprovalParams] = useState<{ mode: 'segments' | 'full_plan'; approvedSegments: string[]; check_groups: string[] } | null>(null);
+  const [pendingApprovalParams, setPendingApprovalParams] = useState<{ mode: 'segments' | 'full_plan'; approvedSegments: string[]; enabled_requirements: string[] } | null>(null);
   const [preflightSegmentIndex, setPreflightSegmentIndex] = useState<Record<string, { src: string; title: string }>>({});
   const [preflightAnalysisProgress, setPreflightAnalysisProgress] = useState<SegmentAnalysisProgress | null>(null);
 
@@ -393,7 +394,7 @@ function App() {
     setStage('decomposition_review');
   };
 
-  const startValidation = async (params: { mode: 'segments' | 'full_plan'; approvedSegments: string[]; check_groups: string[] }) => {
+  const startValidation = async (params: { mode: 'segments' | 'full_plan'; approvedSegments: string[]; enabled_requirements: string[] }) => {
     setStage('validation');
     setLastApprovedSegmentIds(params.approvedSegments || []);
 
@@ -457,7 +458,7 @@ function App() {
           approved_segment_ids: params.approvedSegments,
           mode: params.mode,
           demo_mode: DEMO_MODE,
-          check_groups: params.check_groups,
+          enabled_requirements: params.enabled_requirements,
         }),
         signal: abortValidationRef.current.signal,
       });
@@ -498,7 +499,11 @@ function App() {
           return;
         }
         if (type === 'config') {
-          appendLog(`config: check_groups=${(evt.check_groups || []).join(', ')}`);
+          if (Array.isArray(evt.enabled_requirements) && evt.enabled_requirements.length > 0) {
+            appendLog(`config: enabled_requirements=${evt.enabled_requirements.join(', ')}`);
+          } else {
+            appendLog(`config: check_groups=${(evt.check_groups || []).join(', ')}`);
+          }
           return;
         }
         if (type === 'segment_start') {
@@ -706,7 +711,7 @@ function App() {
     }
   };
 
-  const handleApprovalComplete = async (params: { mode: 'segments' | 'full_plan'; approvedSegments: string[]; check_groups: string[] }) => {
+  const handleApprovalComplete = async (params: { mode: 'segments' | 'full_plan'; approvedSegments: string[]; enabled_requirements: string[] }) => {
     if (params.mode !== 'segments') {
       // Preflight endpoint currently supports the segment workflow only.
       await startValidation(params);
@@ -1459,6 +1464,77 @@ function App() {
     }
   };
 
+  const deleteValidationHistoryItem = async (validationId: string) => {
+    if (!validationId) return;
+    const confirmed = window.confirm('למחוק את היסטוריית הוולידציה הזו?');
+    if (!confirmed) return;
+
+    try {
+      const resp = await fetch(`/api/v1/segments/validation/${validationId}`, { method: 'DELETE' });
+      if (!resp.ok) throw new Error('Failed to delete validation history');
+      setValidationHistory((prev) =>
+        prev.filter((entry: any) => (entry.id || entry.validation_id) !== validationId)
+      );
+    } catch (error) {
+      console.error('Delete validation history error:', error);
+      alert('שגיאה במחיקת היסטוריית וולידציה');
+    }
+  };
+
+  const deletePreflightHistoryItem = async (preflightId: string) => {
+    if (!preflightId) return;
+    const confirmed = window.confirm('למחוק את היסטוריית תנאי הסף הזו?');
+    if (!confirmed) return;
+
+    try {
+      const resp = await fetch(`/api/v1/preflight/${preflightId}`, { method: 'DELETE' });
+      if (!resp.ok) throw new Error('Failed to delete preflight history');
+      setPreflightHistory((prev) =>
+        prev.filter((entry: any) => (entry.id || entry.preflight_id) !== preflightId)
+      );
+      if (
+        preflightHistoryMeta &&
+        (preflightHistoryMeta.id === preflightId || preflightHistoryMeta.preflight_id === preflightId)
+      ) {
+        setPreflightHistoryResult(null);
+        setPreflightHistoryMeta(null);
+        setPreflightHistorySegments([]);
+      }
+    } catch (error) {
+      console.error('Delete preflight history error:', error);
+      alert('שגיאה במחיקת היסטוריית תנאי סף');
+    }
+  };
+
+  const deleteAllHistory = async () => {
+    const confirmed = window.confirm('למחוק את כל היסטוריית הבדיקות? פעולה זו לא ניתנת לשחזור.');
+    if (!confirmed) return;
+
+    try {
+      const [validationResp, preflightResp] = await Promise.all([
+        fetch('/api/v1/segments/validations', { method: 'DELETE' }),
+        fetch('/api/v1/preflight/history', { method: 'DELETE' }),
+      ]);
+
+      if (validationResp.ok) {
+        setValidationHistory([]);
+      }
+      if (preflightResp.ok) {
+        setPreflightHistory([]);
+        setPreflightHistoryResult(null);
+        setPreflightHistoryMeta(null);
+        setPreflightHistorySegments([]);
+      }
+
+      if (!validationResp.ok || !preflightResp.ok) {
+        throw new Error('Partial delete failure');
+      }
+    } catch (error) {
+      console.error('Delete all history error:', error);
+      alert('שגיאה במחיקת כל ההיסטוריה');
+    }
+  };
+
   const loadPreflightResults = async (preflightId: string) => {
     try {
       setIsLoadingHistory(true);
@@ -1749,10 +1825,10 @@ function App() {
             result={preflightResult}
             analysisProgress={preflightAnalysisProgress}
             onBack={() => setStage('decomposition_review')}
-            onContinue={() => {
+            onContinue={(force) => {
               if (!pendingApprovalParams) return;
               // Gate strictly on passed=true.
-              if (preflightResult?.passed) {
+              if (preflightResult?.passed || force) {
                 startValidation(pendingApprovalParams);
               }
             }}
@@ -2833,13 +2909,22 @@ function App() {
                   </Button>
                 </div>
               </div>
-              <Button
-                variant="primary"
-                icon={<Plus className="w-5 h-5" />}
-                onClick={resetWorkflow}
-              >
-                בדיקה חדשה
-              </Button>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  icon={<Trash2 className="w-5 h-5" />}
+                  onClick={deleteAllHistory}
+                >
+                  מחיקת כל ההיסטוריה
+                </Button>
+                <Button
+                  variant="primary"
+                  icon={<Plus className="w-5 h-5" />}
+                  onClick={resetWorkflow}
+                >
+                  בדיקה חדשה
+                </Button>
+              </div>
             </div>
             
             {isLoadingHistory && (
@@ -2965,6 +3050,16 @@ function App() {
                             <span className="text-sm text-text-muted">
                               {entry.segment_count || 0} סגמנטים
                             </span>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              icon={<Trash2 className="w-4 h-4" />}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                deletePreflightHistoryItem(entry.id || entry.preflight_id);
+                              }}
+                              title="מחיקת רשומה"
+                            />
                           </div>
                         </div>
                       </Card>
@@ -3022,6 +3117,16 @@ function App() {
                         <span className="text-sm text-text-muted">
                           {validation.total_segments || 0} סגמנטים
                         </span>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          icon={<Trash2 className="w-4 h-4" />}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            deleteValidationHistoryItem(validation.id || validation.validation_id);
+                          }}
+                          title="מחיקת רשומה"
+                        />
                       </div>
                     </div>
                   </Card>
