@@ -1,7 +1,7 @@
 import React, { useRef, useState, useEffect } from 'react';
 import { 
   Check, X, AlertTriangle, ZoomIn, ZoomOut, 
-  RefreshCw, ChevronDown, ChevronUp,
+  RefreshCw, ChevronDown, ChevronUp, Copy,
   LayoutGrid, List
 } from 'lucide-react';
 import type { PlanDecomposition } from '../types';
@@ -67,6 +67,12 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
     }>
   >([]);
   const [analyzingSegments, setAnalyzingSegments] = useState(false);
+  const [autoSegmenting, setAutoSegmenting] = useState(false);
+  const [copiedId, setCopiedId] = useState(false);
+  const [autoSensitivity, setAutoSensitivity] = useState<'normal' | 'high'>('normal');
+  const [autoMode, setAutoMode] = useState<'cv' | 'llm'>('cv');
+  const [autoTune, setAutoTune] = useState(true);
+  const [autoVerify, setAutoVerify] = useState(true);
 
   const [selectedCheckGroups, setSelectedCheckGroups] = useState<string[]>([
     'walls',
@@ -239,6 +245,57 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
       setError(err instanceof Error ? err.message : 'שגיאה בטעינת הפירוק');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const copyDecompositionId = async () => {
+    try {
+      await navigator.clipboard.writeText(decompositionId);
+      setCopiedId(true);
+      window.setTimeout(() => setCopiedId(false), 1500);
+    } catch {
+      // best-effort
+    }
+  };
+
+  const runAutoSegmentation = async () => {
+    setAutoSegmenting(true);
+    setError(null);
+    try {
+      const payload =
+        autoSensitivity === 'high'
+          ? {
+              mode: autoMode,
+              auto_tune: autoTune,
+              verify_with_llm: autoVerify,
+              replace_existing: true,
+              max_area_ratio: 0.38,
+              min_area_ratio: 0.0025,
+              merge_iou_threshold: 0.12,
+              max_dim: 5200,
+            }
+          : { mode: autoMode, auto_tune: autoTune, verify_with_llm: autoVerify, replace_existing: true };
+      const response = await fetchWithTimeout(
+        `/api/v1/decomposition/${decompositionId}/auto-segments`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        },
+        180_000
+      );
+      if (!response.ok) {
+        const details = await response.text().catch(() => '');
+        throw new Error(details ? `Failed to auto-segment: ${details}` : 'Failed to auto-segment');
+      }
+      const data: PlanDecomposition = await response.json();
+      setDecomposition(data);
+      void refreshDecompositionSilently();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'שגיאה בסגמנטציה אוטומטית';
+      setError(message);
+    } finally {
+      setAutoSegmenting(false);
     }
   };
 
@@ -521,8 +578,21 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
               בחירת אזורים לבדיקה
             </h1>
             <p className="text-text-muted mt-1">
-              בחר אזורים ידנית על גבי התוכנית (גרור מלבן) כדי ליצור סגמנטים לבדיקה.
+              אפשר להריץ סגמנטציה אוטומטית ואז לתקן ידנית על גבי התוכנית (גרור מלבן).
             </p>
+            <div className="mt-3 inline-flex items-center gap-2 text-xs text-text-muted border border-border rounded-full px-3 py-1 bg-background">
+              <span>מזהה פירוק: {decompositionId}</span>
+              <button
+                type="button"
+                onClick={copyDecompositionId}
+                className="inline-flex items-center gap-1 text-primary hover:text-primary/80"
+                aria-label="העתק מזהה פירוק"
+                title="העתק מזהה פירוק"
+              >
+                <Copy className="w-3.5 h-3.5" />
+                {copiedId ? 'הועתק' : 'העתק'}
+              </button>
+            </div>
           </div>
           
           <div className="flex gap-3">
@@ -569,6 +639,76 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
             <Button
               size="sm"
               variant="outline"
+              onClick={runAutoSegmentation}
+              disabled={autoSegmenting}
+              title="מריץ סגמנטציה אוטומטית על התוכנית"
+            >
+              {autoSegmenting ? 'מפלח…' : 'סגמנטציה אוטומטית'}
+            </Button>
+
+            <div className="inline-flex items-center gap-2 text-xs text-text-muted border border-border rounded-full px-3 py-1 bg-background">
+              <span>מצב רגיש</span>
+              <button
+                type="button"
+                onClick={() => setAutoSensitivity(autoSensitivity === 'high' ? 'normal' : 'high')}
+                className={`inline-flex items-center px-2 py-0.5 rounded-full border text-xs ${
+                  autoSensitivity === 'high'
+                    ? 'border-primary text-primary bg-primary/10'
+                    : 'border-border text-text-muted'
+                }`}
+                title="מעלה רגישות לפיצול אזורים"
+              >
+                {autoSensitivity === 'high' ? 'פעיל' : 'כבוי'}
+              </button>
+            </div>
+
+            <div className="inline-flex items-center gap-2 text-xs text-text-muted border border-border rounded-full px-3 py-1 bg-background">
+              <span>מצב LLM</span>
+              <button
+                type="button"
+                onClick={() => setAutoMode(autoMode === 'llm' ? 'cv' : 'llm')}
+                className={`inline-flex items-center px-2 py-0.5 rounded-full border text-xs ${
+                  autoMode === 'llm'
+                    ? 'border-primary text-primary bg-primary/10'
+                    : 'border-border text-text-muted'
+                }`}
+                title="מריץ סגמנטציה עם GPT-5.1"
+              >
+                {autoMode === 'llm' ? 'פעיל' : 'כבוי'}
+              </button>
+            </div>
+
+            <div className="inline-flex items-center gap-2 text-xs text-text-muted border border-border rounded-full px-3 py-1 bg-background">
+              <span>Auto-Tune</span>
+              <button
+                type="button"
+                onClick={() => setAutoTune(!autoTune)}
+                className={`inline-flex items-center px-2 py-0.5 rounded-full border text-xs ${
+                  autoTune ? 'border-primary text-primary bg-primary/10' : 'border-border text-text-muted'
+                }`}
+                title="מריץ כמה פרמטרים ובוחר תוצאה אוטומטית"
+              >
+                {autoTune ? 'פעיל' : 'כבוי'}
+              </button>
+            </div>
+
+            <div className="inline-flex items-center gap-2 text-xs text-text-muted border border-border rounded-full px-3 py-1 bg-background">
+              <span>LLM Verify</span>
+              <button
+                type="button"
+                onClick={() => setAutoVerify(!autoVerify)}
+                className={`inline-flex items-center px-2 py-0.5 rounded-full border text-xs ${
+                  autoVerify ? 'border-primary text-primary bg-primary/10' : 'border-border text-text-muted'
+                }`}
+                title="בודק כל סגמנט עם GPT ומסנן אזורים ריקים"
+              >
+                {autoVerify ? 'פעיל' : 'כבוי'}
+              </button>
+            </div>
+
+            <Button
+              size="sm"
+              variant="outline"
               onClick={analyzeSelectedSegments}
               disabled={analyzingSegments}
               title="מריץ סיווג וחילוץ מידע לכל הסגמנטים המסומנים (ללא ולידציה)"
@@ -600,7 +740,7 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
               {editingSegmentId
                 ? 'עריכת אזור: גרור מחדש על התוכנית כדי להגדיר את האזור.'
                 : 'גרור על התוכנית כדי לסמן אזור לבדיקה (אפשר כמה פעמים). האזור יתווסף כסגמנט חדש.'}
-              {' '}כדי להתקדם לשלב הבא לחץ למטה על “אשר והמשך”.
+              {' '}אפשר גם להריץ סגמנטציה אוטומטית מהכפתור למעלה ואז לתקן ידנית.
             </div>
             <div className="text-text-muted whitespace-nowrap flex items-center gap-2">
               {roiQueue.length > 0 && <span>תור: {roiQueue.length}</span>}

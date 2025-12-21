@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 from fastapi.responses import Response, StreamingResponse
 from typing import Optional
 from PIL import Image
+from pydantic import BaseModel, Field
 
 from src.models.decomposition import (
     PlanDecomposition,
@@ -35,9 +36,30 @@ from src.azure import get_cosmos_client
 from src.azure.blob_client import get_blob_client
 from src.utils.image_cropper import get_image_cropper
 from src.utils.logging import get_logger
+from src.segmentation.auto_segmenter import (
+    SegmenterConfig,
+    segment_image,
+    DependencyError,
+)
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/decomposition", tags=["decomposition"])
+
+
+class AutoSegmentationRequest(BaseModel):
+    """Request payload for automatic segmentation."""
+
+    mode: str = Field("cv", description="Segmentation mode: cv | llm")
+    auto_tune: bool = Field(False, description="Try multiple CV settings and auto-pick best")
+    target_segments: int = Field(12, description="Target segment count for auto-tune scoring")
+    verify_with_llm: bool = Field(False, description="Use GPT-5.1 to drop empty/blank regions")
+    replace_existing: bool = Field(True, description="Replace existing segments if present")
+    ocr_enabled: bool = Field(True, description="Enable OCR on candidate crops")
+    max_dim: int = Field(4200, description="Max image dimension for detection")
+    min_area_ratio: float = Field(0.005, description="Minimum area ratio for proposals")
+    max_area_ratio: float = Field(0.55, description="Maximum area ratio for proposals")
+    merge_iou_threshold: float = Field(0.20, description="IoU threshold for merging boxes")
+    deskew: bool = Field(False, description="Enable deskew before segmentation")
 
 
 @router.post("/upload-segments", response_model=DecompositionResponse)
@@ -1287,6 +1309,615 @@ async def add_manual_segments(
         raise HTTPException(
             status_code=500,
             detail=f"שגיאה בהוספת סגמנטים ידניים: {str(e)}",
+        )
+
+
+@router.post("/{decomposition_id}/auto-segments", response_model=PlanDecomposition)
+async def auto_segment_decomposition(
+    decomposition_id: str,
+    request: AutoSegmentationRequest,
+):
+    """Automatically propose segments for a decomposition and attach crops."""
+    logger.info(
+        "Starting auto-segmentation",
+        decomposition_id=decomposition_id,
+        mode=request.mode,
+        auto_tune=request.auto_tune,
+        target_segments=request.target_segments,
+        verify_with_llm=request.verify_with_llm,
+    )
+
+    try:
+        cosmos_client = get_cosmos_client()
+        query = """
+            SELECT * FROM c
+            WHERE c.id = @decomposition_id
+            AND c.type = 'decomposition'
+        """
+
+        items = await cosmos_client.query_items(
+            query=query,
+            parameters=[{"name": "@decomposition_id", "value": decomposition_id}],
+        )
+
+        if not items:
+            raise HTTPException(status_code=404, detail="פירוק לא נמצא")
+
+        decomposition = PlanDecomposition(**items[0])
+        if not decomposition.validation_id:
+            raise HTTPException(status_code=400, detail="validation_id חסר בפירוק")
+
+        blob_client = get_blob_client()
+        blob_name = f"{decomposition.validation_id}/full_plan.png"
+
+        try:
+            with anyio.fail_after(120):
+                img_bytes = await blob_client.download_blob(blob_name)
+        except Exception as e:
+            logger.error("Failed to download full plan", decomposition_id=decomposition_id, error=str(e))
+            raise HTTPException(status_code=500, detail="שגיאה בטעינת התוכנית המלאה")
+
+        with Image.open(BytesIO(img_bytes)) as img:
+            low_image = img.convert("RGB")
+
+        seg_image = low_image
+        scale_x = 1.0
+        scale_y = 1.0
+
+        # If we have the original PDF, render a higher-res image for segmentation only.
+        if (
+            decomposition.source_file_type == "pdf"
+            and decomposition.source_file_url
+            and int(getattr(settings, "pdf_crop_render_dpi", 0)) > 0
+        ):
+            try:
+                import httpx
+                from pdf2image import convert_from_bytes
+                import math
+
+                async def _fetch_pdf() -> bytes:
+                    async with httpx.AsyncClient(timeout=60.0) as client:
+                        resp = await client.get(decomposition.source_file_url)
+                        resp.raise_for_status()
+                        return resp.content
+
+                pdf_bytes = await _fetch_pdf()
+                requested_dpi = int(getattr(settings, "pdf_crop_render_dpi", 600))
+                min_dpi = 100
+                max_pixels = int(getattr(settings, "pdf_crop_max_pixels", 120_000_000))
+
+                def _render(dpi: int):
+                    return convert_from_bytes(pdf_bytes, dpi=dpi, fmt="png", use_pdftocairo=True)
+
+                images = None
+                effective_dpi = requested_dpi
+                try:
+                    images = await anyio.to_thread.run_sync(lambda: _render(requested_dpi))
+                except Exception as e:
+                    msg = str(e).lower()
+                    if "decompression bomb" in msg:
+                        for dpi in [800, 600, 450, 300, 200, 150]:
+                            if dpi > requested_dpi:
+                                continue
+                            if dpi < min_dpi:
+                                break
+                            try:
+                                images = await anyio.to_thread.run_sync(lambda d=dpi: _render(d))
+                                effective_dpi = dpi
+                                break
+                            except Exception as e2:
+                                if "decompression bomb" in str(e2).lower():
+                                    continue
+                                raise
+                    else:
+                        raise
+
+                if images:
+                    image = images[0]
+                    pixel_count = int(image.width * image.height)
+                    if pixel_count > max_pixels:
+                        scale = math.sqrt(max_pixels / float(pixel_count))
+                        new_w = max(1, int(image.width * scale))
+                        new_h = max(1, int(image.height * scale))
+                        image = image.resize((new_w, new_h), resample=Image.Resampling.LANCZOS)
+
+                    seg_image = image.convert("RGB")
+                    scale_x = float(low_image.width) / float(seg_image.width or low_image.width)
+                    scale_y = float(low_image.height) / float(seg_image.height or low_image.height)
+
+                    logger.info(
+                        "Using high-res PDF render for segmentation",
+                        dpi=effective_dpi,
+                        low_dimensions=f"{low_image.width}x{low_image.height}",
+                        seg_dimensions=f"{seg_image.width}x{seg_image.height}",
+                        scale_x=scale_x,
+                        scale_y=scale_y,
+                    )
+            except Exception as e:
+                logger.warning("Failed to render high-res PDF for segmentation", error=str(e))
+
+        mode = str(request.mode or "cv").strip().lower()
+        result: dict = {}
+        regions: list = []
+        region_scale_x = 1.0
+        region_scale_y = 1.0
+
+        def _score_regions(regions_list: list, img_w: int, target: int) -> float:
+            valid = [r for r in regions_list if float(r.get("width", 0)) > 1 and float(r.get("height", 0)) > 1]
+            count = len(valid)
+            if count == 0:
+                return -1e9
+            widths = [max(1.0, float(r.get("width", 0))) for r in valid]
+            narrow = sum(1 for w in widths if w < (img_w * 0.04))
+            wide = sum(1 for w in widths if w > (img_w * 0.60))
+            score = 100.0
+            score -= abs(count - target) * 8.0
+            score -= narrow * 3.5
+            score -= wide * 4.0
+            return score
+
+        def _build_cfg(
+            separator_density: float,
+            separator_gap: int,
+            min_width_ratio: float,
+            projection_gap: int,
+            separator_height_ratio: float,
+        ) -> SegmenterConfig:
+            return SegmenterConfig(
+                mode="cv",
+                max_dim=int(request.max_dim),
+                min_area_ratio=float(request.min_area_ratio),
+                max_area_ratio=float(request.max_area_ratio),
+                merge_iou_threshold=float(request.merge_iou_threshold),
+                ocr_enabled=bool(request.ocr_enabled),
+                deskew=bool(request.deskew),
+                projection_density_threshold=0.008,
+                projection_min_gap=projection_gap,
+                split_large_area_ratio=0.16,
+                split_large_min_boxes=2,
+                line_kernel_scale=28,
+                line_merge_iterations=1,
+                separator_line_density=separator_density,
+                separator_min_line_width=3,
+                separator_min_gap=separator_gap,
+                separator_min_height_ratio=separator_height_ratio,
+                separator_max_width=12,
+                hough_threshold=40,
+                hough_min_line_length_ratio=0.60,
+                hough_max_line_gap=24,
+                hough_cluster_px=12,
+                min_ink_ratio=0.0015,
+                min_ink_pixels=250,
+                min_segment_width_ratio=min_width_ratio,
+                content_crop_enabled=True,
+                content_crop_pad=12,
+            )
+
+        def _merge_regions_to_target(regions_list: list, target: int) -> list:
+            if target <= 0 or len(regions_list) <= target:
+                return regions_list
+            regions_sorted = sorted(regions_list, key=lambda r: float(r.get("x", 0)))
+            while len(regions_sorted) > target:
+                # Find the narrowest region and merge it with the closest neighbor.
+                widths = [max(1.0, float(r.get("width", 0))) for r in regions_sorted]
+                idx = int(min(range(len(widths)), key=lambda i: widths[i]))
+                if len(regions_sorted) == 1:
+                    break
+                left_idx = idx - 1 if idx > 0 else None
+                right_idx = idx + 1 if idx + 1 < len(regions_sorted) else None
+                if left_idx is None:
+                    merge_idx = right_idx
+                elif right_idx is None:
+                    merge_idx = left_idx
+                else:
+                    left = regions_sorted[left_idx]
+                    right = regions_sorted[right_idx]
+                    x = float(regions_sorted[idx].get("x", 0))
+                    left_gap = x - float(left.get("x", 0)) - float(left.get("width", 0))
+                    right_gap = float(right.get("x", 0)) - x - float(regions_sorted[idx].get("width", 0))
+                    merge_idx = left_idx if left_gap <= right_gap else right_idx
+
+                a = regions_sorted[idx]
+                b = regions_sorted[merge_idx]
+                ax1 = float(a.get("x", 0))
+                ay1 = float(a.get("y", 0))
+                ax2 = ax1 + float(a.get("width", 0))
+                ay2 = ay1 + float(a.get("height", 0))
+                bx1 = float(b.get("x", 0))
+                by1 = float(b.get("y", 0))
+                bx2 = bx1 + float(b.get("width", 0))
+                by2 = by1 + float(b.get("height", 0))
+
+                nx1 = min(ax1, bx1)
+                ny1 = min(ay1, by1)
+                nx2 = max(ax2, bx2)
+                ny2 = max(ay2, by2)
+
+                merged = {
+                    **a,
+                    "x": nx1,
+                    "y": ny1,
+                    "width": max(1.0, nx2 - nx1),
+                    "height": max(1.0, ny2 - ny1),
+                }
+
+                keep_idx = min(idx, merge_idx)
+                drop_idx = max(idx, merge_idx)
+                regions_sorted[keep_idx] = merged
+                regions_sorted.pop(drop_idx)
+
+            return sorted(regions_sorted, key=lambda r: float(r.get("x", 0)))
+
+        if mode == "llm":
+            try:
+                llm_image = low_image
+                max_dim = int(request.max_dim or 0)
+                if max_dim > 0:
+                    max_side = max(llm_image.width, llm_image.height)
+                    if max_side > max_dim:
+                        scale = float(max_dim) / float(max_side)
+                        new_w = max(1, int(llm_image.width * scale))
+                        new_h = max(1, int(llm_image.height * scale))
+                        llm_image = llm_image.resize((new_w, new_h), resample=Image.Resampling.LANCZOS)
+
+                buffer = BytesIO()
+                llm_image.save(buffer, format="PNG", optimize=True)
+                plan_bytes = buffer.getvalue()
+
+                decomposition_service = get_decomposition_service()
+                segments_data, metadata_data, tokens_used = decomposition_service._analyze_plan_with_gpt(
+                    plan_image_bytes=plan_bytes
+                )
+
+                gpt_w = float(metadata_data.get("image_width", llm_image.width) or llm_image.width)
+                gpt_h = float(metadata_data.get("image_height", llm_image.height) or llm_image.height)
+                scale_x_gpt = float(low_image.width) / gpt_w if gpt_w > 0 else 1.0
+                scale_y_gpt = float(low_image.height) / gpt_h if gpt_h > 0 else 1.0
+
+                regions = []
+                for seg in segments_data:
+                    bbox = seg.get("bounding_box", {}) or {}
+                    regions.append(
+                        {
+                            "x": float(bbox.get("x", 0)) * scale_x_gpt,
+                            "y": float(bbox.get("y", 0)) * scale_y_gpt,
+                            "width": float(bbox.get("width", 0)) * scale_x_gpt,
+                            "height": float(bbox.get("height", 0)) * scale_y_gpt,
+                            "type": seg.get("type", "unknown"),
+                            "label_text": seg.get("description", ""),
+                            "confidence": float(seg.get("confidence", 0.7)),
+                        }
+                    )
+
+                result = {
+                    "regions": regions,
+                    "meta": {
+                        "mode": "llm",
+                        "tokens_used": tokens_used,
+                    },
+                }
+                logger.info(
+                    "Auto-segmentation stats (llm)",
+                    decomposition_id=decomposition_id,
+                    regions=len(regions),
+                    tokens_used=tokens_used,
+                )
+            except Exception as e:
+                logger.error("LLM segmentation failed; falling back to CV", error=str(e))
+                mode = "cv"
+
+        if mode != "llm":
+            try:
+                if bool(request.auto_tune):
+                    candidates = [
+                        _build_cfg(0.90, 180, 0.06, 24, 0.72),
+                        _build_cfg(0.85, 160, 0.055, 20, 0.70),
+                        _build_cfg(0.80, 140, 0.05, 18, 0.68),
+                        _build_cfg(0.75, 120, 0.045, 16, 0.65),
+                        _build_cfg(0.70, 100, 0.04, 14, 0.62),
+                    ]
+                    best_score = -1e9
+                    best_result = None
+                    best_regions = []
+                    for idx, cfg in enumerate(candidates, start=1):
+                        candidate = segment_image(seg_image, cfg)
+                        candidate_regions = list(candidate.get("regions", []) or [])
+                        score = _score_regions(candidate_regions, int(seg_image.width), int(request.target_segments))
+                        logger.info(
+                            "Auto-segmentation auto-tune candidate",
+                            decomposition_id=decomposition_id,
+                            candidate=idx,
+                            regions=len(candidate_regions),
+                            score=score,
+                            debug=candidate.get("meta", {}).get("debug"),
+                        )
+                        if score > best_score:
+                            best_score = score
+                            best_result = candidate
+                            best_regions = candidate_regions
+                    if best_result is None:
+                        best_result = segment_image(seg_image, _build_cfg(0.85, 160, 0.05, 18, 0.70))
+                        best_regions = list(best_result.get("regions", []) or [])
+                    result = best_result
+                    regions = best_regions
+                    region_scale_x = scale_x
+                    region_scale_y = scale_y
+                else:
+                    cfg = _build_cfg(0.85, 160, 0.045, 18, 0.70)
+                    result = segment_image(seg_image, cfg)
+                    regions = list(result.get("regions", []) or [])
+                    region_scale_x = scale_x
+                    region_scale_y = scale_y
+                    logger.info(
+                        "Auto-segmentation stats (primary)",
+                        decomposition_id=decomposition_id,
+                        regions=len(regions),
+                        debug=result.get("meta", {}).get("debug"),
+                    )
+                    if len(regions) <= 1:
+                        fallback = SegmenterConfig(
+                            mode="cv",
+                            max_dim=int(request.max_dim),
+                            min_area_ratio=max(0.0025, float(request.min_area_ratio) * 0.7),
+                            max_area_ratio=min(0.45, float(request.max_area_ratio)),
+                            merge_iou_threshold=max(0.12, float(request.merge_iou_threshold) * 0.7),
+                            ocr_enabled=bool(request.ocr_enabled),
+                            deskew=bool(request.deskew),
+                            close_kernel=3,
+                            close_iterations=1,
+                            adaptive_block_size=19,
+                            adaptive_c=6,
+                            projection_density_threshold=0.008,
+                            projection_min_gap=12,
+                            split_large_area_ratio=0.12,
+                            split_large_min_boxes=2,
+                            line_kernel_scale=24,
+                            line_merge_iterations=1,
+                            separator_line_density=0.80,
+                            separator_min_line_width=3,
+                            separator_min_gap=90,
+                            separator_min_height_ratio=0.65,
+                            separator_max_width=12,
+                            hough_threshold=35,
+                            hough_min_line_length_ratio=0.55,
+                            hough_max_line_gap=28,
+                            hough_cluster_px=12,
+                            min_ink_ratio=0.0012,
+                            min_ink_pixels=180,
+                            min_segment_width_ratio=0.04,
+                            content_crop_enabled=True,
+                            content_crop_pad=12,
+                        )
+                        fallback_result = segment_image(seg_image, fallback)
+                        fallback_regions = list(fallback_result.get("regions", []) or [])
+                        logger.info(
+                            "Auto-segmentation stats (fallback)",
+                            decomposition_id=decomposition_id,
+                            regions=len(fallback_regions),
+                            debug=fallback_result.get("meta", {}).get("debug"),
+                        )
+                        if len(fallback_regions) > len(regions):
+                            result = fallback_result
+                            regions = fallback_regions
+                            region_scale_x = scale_x
+                            region_scale_y = scale_y
+            except DependencyError as e:
+                raise HTTPException(status_code=500, detail=f"Missing dependency: {str(e)}")
+
+        min_w = max(20.0, float(low_image.width) * 0.02)
+        min_h = max(30.0, float(low_image.height) * 0.08)
+        filtered_regions = []
+        for region in regions:
+            if float(region.get("width", 0)) < min_w:
+                continue
+            if float(region.get("height", 0)) < min_h:
+                continue
+            filtered_regions.append(region)
+        if len(filtered_regions) != len(regions):
+            logger.info(
+                "Auto-segmentation filtered tiny regions",
+                decomposition_id=decomposition_id,
+                before=len(regions),
+                after=len(filtered_regions),
+                min_w=min_w,
+                min_h=min_h,
+            )
+        regions = filtered_regions
+
+        async def _llm_keep_region(region: dict) -> bool:
+            try:
+                rx = float(region.get("x", 0))
+                ry = float(region.get("y", 0))
+                rw = float(region.get("width", 0))
+                rh = float(region.get("height", 0))
+                if rw <= 1 or rh <= 1:
+                    return False
+                crop = seg_image.crop((int(rx), int(ry), int(rx + rw), int(ry + rh)))
+                max_side = 1024
+                if max(crop.width, crop.height) > max_side:
+                    scale = float(max_side) / float(max(crop.width, crop.height))
+                    crop = crop.resize(
+                        (max(1, int(crop.width * scale)), max(1, int(crop.height * scale))),
+                        resample=Image.Resampling.LANCZOS,
+                    )
+                buf = BytesIO()
+                crop.save(buf, format="PNG", optimize=True)
+                image_base64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+                system_prompt = (
+                    "You are a QA assistant for architectural plan crops. "
+                    "Decide if the image contains meaningful drawing content (lines, symbols, tables, text) "
+                    "or if it is mostly empty/blank."
+                )
+                user_prompt = (
+                    "Return JSON only: {\"keep\": true/false, \"confidence\": 0-1}. "
+                    "Keep=true if the crop contains meaningful plan content."
+                )
+
+                def _call() -> str:
+                    response = get_openai_client().chat_completions_create(
+                        model=settings.azure_openai_deployment_name,
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": user_prompt},
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {"url": f"data:image/png;base64,{image_base64}"},
+                                    },
+                                ],
+                            },
+                        ],
+                    )
+                    return response.choices[0].message.content or ""
+
+                content = await anyio.to_thread.run_sync(_call)
+                start = content.find("{")
+                end = content.rfind("}") + 1
+                payload = {}
+                if start != -1 and end > start:
+                    payload = json.loads(content[start:end])
+                else:
+                    payload = json.loads(content)
+                keep = bool(payload.get("keep"))
+                return keep
+            except Exception:
+                # Best-effort: if LLM fails, keep the region.
+                return True
+
+        if bool(request.verify_with_llm) and regions:
+            keep_regions: list = []
+            removed = 0
+            limiter = anyio.CapacityLimiter(4)
+
+            async def _check_one(region: dict) -> None:
+                nonlocal removed
+                async with limiter:
+                    keep = await _llm_keep_region(region)
+                if keep:
+                    keep_regions.append(region)
+                else:
+                    removed += 1
+
+            async with anyio.create_task_group() as tg:
+                for region in regions:
+                    tg.start_soon(_check_one, region)
+
+            if keep_regions:
+                regions = keep_regions
+            logger.info(
+                "Auto-segmentation LLM verify",
+                decomposition_id=decomposition_id,
+                kept=len(regions),
+                removed=removed,
+            )
+
+        if bool(request.auto_tune) and request.target_segments > 0 and len(regions) > request.target_segments:
+            before = len(regions)
+            regions = _merge_regions_to_target(regions, int(request.target_segments))
+            logger.info(
+                "Auto-segmentation merged to target",
+                decomposition_id=decomposition_id,
+                before=before,
+                after=len(regions),
+                target=request.target_segments,
+            )
+
+        segments: list[PlanSegment] = []
+
+        def _map_type(raw: str) -> SegmentType:
+            value = str(raw or "").strip().lower()
+            if value in {
+                SegmentType.FLOOR_PLAN.value,
+                SegmentType.SECTION.value,
+                SegmentType.DETAIL.value,
+                SegmentType.ELEVATION.value,
+                SegmentType.LEGEND.value,
+                SegmentType.TABLE.value,
+            }:
+                return SegmentType(value)
+            return SegmentType.UNKNOWN
+
+        for idx, region in enumerate(result.get("regions", []), start=1):
+            raw_x = float(region.get("x", 0)) * region_scale_x
+            raw_y = float(region.get("y", 0)) * region_scale_y
+            raw_w = float(region.get("width", 0)) * region_scale_x
+            raw_h = float(region.get("height", 0)) * region_scale_y
+            bbox = BoundingBox(
+                x=max(0.0, raw_x),
+                y=max(0.0, raw_y),
+                width=max(1.0, min(float(low_image.width) - max(0.0, raw_x), raw_w)),
+                height=max(1.0, min(float(low_image.height) - max(0.0, raw_y), raw_h)),
+            )
+            label_text = str(region.get("label_text") or "").strip()
+            title = label_text or f"סגמנט אוטומטי {idx}"
+            description = label_text or "אזור שהוצע אוטומטית"
+            confidence = float(region.get("confidence", 0.5))
+
+            segments.append(
+                PlanSegment(
+                    segment_id=f"seg_{idx:03d}",
+                    type=_map_type(region.get("type")),
+                    title=title,
+                    description=description,
+                    bounding_box=bbox,
+                    blob_url="",
+                    thumbnail_url="",
+                    confidence=max(0.05, min(1.0, confidence)),
+                    llm_reasoning="AUTO_SEGMENT_CV",
+                    approved_by_user=False,
+                    used_in_checks=[],
+                )
+            )
+
+        if request.replace_existing or not decomposition.segments:
+            decomposition.segments = segments
+        else:
+            decomposition.segments.extend(segments)
+
+        decomposition.status = DecompositionStatus.REVIEW_NEEDED
+        decomposition.processing_stats.total_segments = len(decomposition.segments)
+        decomposition.updated_at = datetime.utcnow()
+
+        # Write plan image to temp file for cropping
+        temp_dir = tempfile.mkdtemp()
+        temp_image_path = os.path.join(temp_dir, "full_plan.png")
+        with open(temp_image_path, "wb") as f:
+            f.write(img_bytes)
+
+        decomposition_service = get_decomposition_service()
+        decomposition = await decomposition_service.crop_and_upload_segments(
+            decomposition=decomposition,
+            plan_image_path=temp_image_path,
+        )
+
+        try:
+            os.remove(temp_image_path)
+            os.rmdir(temp_dir)
+        except Exception:
+            pass
+
+        decomp_dict = decomposition.model_dump(mode="json")
+        decomp_dict["type"] = "decomposition"
+        decomp_dict["project_id"] = decomposition.project_id
+        await cosmos_client.upsert_item(decomp_dict)
+
+        logger.info(
+            "Auto-segmentation complete",
+            decomposition_id=decomposition_id,
+            segments=len(decomposition.segments),
+        )
+
+        return decomposition
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Auto-segmentation failed", decomposition_id=decomposition_id, error=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail=f"שגיאה בסגמנטציה אוטומטית: {str(e)}",
         )
 
 
