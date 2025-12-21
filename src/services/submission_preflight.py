@@ -270,6 +270,22 @@ def _parse_llm_json(content: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _sanitize_ocr_text(text: str) -> str:
+    if not text:
+        return ""
+    lines = text.splitlines()
+    blocked = ("ignore", "system", "assistant", "developer", "prompt", "jailbreak", "instruction")
+    safe_lines: List[str] = []
+    for line in lines:
+        low = line.lower()
+        if any(tok in low for tok in blocked):
+            continue
+        safe_lines.append(line)
+    cleaned = "\n".join(safe_lines)
+    cleaned = re.sub(r"[^\w\s\u0590-\u05FF\-\.,:;/()\"'₪%]", " ", cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
 async def _llm_detect_area_table(*, image_bytes: bytes, ocr_text: str) -> Optional[Dict[str, Any]]:
     if not getattr(settings, "azure_openai_deployment_name", None):
         return None
@@ -366,24 +382,25 @@ def _collect_ocr_debug(segments: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
 
 def _segment_ocr_text(seg: Dict[str, Any]) -> str:
     ocr_items = _extract_ocr_items(seg)
-    return " ".join(
+    joined = " ".join(
         [
             str(it.get("text"))
             for it in ocr_items
             if isinstance(it, dict) and isinstance(it.get("text"), str)
         ]
     ).strip()
+    return _sanitize_ocr_text(joined)
 
 
 def _build_preflight_prompt(check_id: str, *, ocr_text: str, hint_text: str) -> str:
-    ocr_hint = (ocr_text or "").strip()
+    ocr_hint = _sanitize_ocr_text(ocr_text or "")
     if len(ocr_hint) > 2000:
         ocr_hint = ocr_hint[:2000] + "…"
     hint_text = (hint_text or "").strip()
 
     if check_id == "PF-01":
         return f"""You are a strict reviewer for an Israeli Home Front Command (Pakar) submission.
-Task: Determine if this segment contains a **request summary table** and if it includes identifying details.
+Task: Determine if this segment contains a **request summary table**, includes identifying details, and has a **signature block**.
 
 Hint: {hint_text}
 OCR text (may be noisy):
@@ -393,6 +410,7 @@ Return ONLY valid JSON:
 {{
   "request_table_present": true|false,
   "identifiers_present": true|false,
+  "signature_present": true|false,
   "confidence": 0.0-1.0,
   "evidence": ["short evidence strings in Hebrew"]
 }}"""
@@ -571,7 +589,7 @@ Return ONLY valid JSON:
 
     if check_id == "PF-13":
         return f"""You are a strict reviewer for an Israeli Home Front Command (Pakar) submission.
-Task: Determine if this segment is a **Rishuy Zamin decision form**.
+Task: Determine if this segment is a **Rishuy Zamin decision form** and if it includes a **signature**.
 
 Hint: {hint_text}
 OCR text (may be noisy):
@@ -581,6 +599,7 @@ Return ONLY valid JSON:
 {{
   "rishuy_zamin_present": true|false,
   "decision_form_present": true|false,
+  "signature_present": true|false,
   "confidence": 0.0-1.0,
   "evidence": ["short evidence strings in Hebrew"]
 }}"""
@@ -616,18 +635,26 @@ async def _llm_detect_preflight_check(
         }
     ]
 
-    response = await asyncio.to_thread(
-        client.chat_completions_create,
-        model=settings.azure_openai_deployment_name,
-        messages=messages,
-    )
-    content = response.choices[0].message.content
-    data = _parse_llm_json(content)
-    if not isinstance(data, dict):
-        return None
-    data["prompt"] = prompt
-    data["raw_response"] = content
-    return data
+    try:
+        response = await asyncio.to_thread(
+            client.chat_completions_create,
+            model=settings.azure_openai_deployment_name,
+            messages=messages,
+        )
+        content = response.choices[0].message.content
+        data = _parse_llm_json(content)
+        if not isinstance(data, dict):
+            return None
+        data["prompt"] = prompt
+        data["raw_response"] = content
+        return data
+    except Exception as e:
+        logger.error("Preflight LLM check failed", check_id=check_id, error=str(e))
+        return {
+            "error": str(e),
+            "prompt": prompt,
+            "raw_response": None,
+        }
 
 
 async def _download_image_bytes(blob_url: str) -> Optional[bytes]:
@@ -864,12 +891,16 @@ async def run_submission_preflight(
                     img = await _download_image_bytes(blob_url)
                     if not img:
                         return None
-                    data = await _llm_detect_preflight_check(
-                        check_id=check_id,
-                        image_bytes=img,
-                        ocr_text=_segment_ocr_text(seg),
-                        hint_text=_segment_text_blob(seg),
-                    )
+                    try:
+                        data = await _llm_detect_preflight_check(
+                            check_id=check_id,
+                            image_bytes=img,
+                            ocr_text=_segment_ocr_text(seg),
+                            hint_text=_segment_text_blob(seg),
+                        )
+                    except Exception as e:
+                        logger.error("Preflight LLM check crashed", check_id=check_id, segment_id=seg_id, error=str(e))
+                        return seg_id, {"error": str(e), "prompt": None, "raw_response": None}
                     if not data:
                         return None
                     return seg_id, data
@@ -1043,22 +1074,35 @@ async def run_submission_preflight(
         req_ids = [
             seg_id
             for seg_id, data in llm_req.items()
-            if data.get("request_table_present") is True and data.get("identifiers_present") is True
+            if data.get("request_table_present") is True
+            and data.get("identifiers_present") is True
+            and data.get("signature_present") is True
+        ]
+        req_missing_sig_ids = [
+            seg_id
+            for seg_id, data in llm_req.items()
+            if data.get("request_table_present") is True
+            and data.get("identifiers_present") is True
+            and data.get("signature_present") is not True
         ]
         req_weak_ids = [
             seg_id for seg_id, data in llm_req.items() if data.get("request_table_present") is True
         ]
         status = (
             PreflightStatus.PASSED if req_ids
-            else (PreflightStatus.FAILED if strict else PreflightStatus.WARNING) if req_weak_ids
+            else (PreflightStatus.FAILED if strict else PreflightStatus.WARNING) if (req_missing_sig_ids or req_weak_ids)
             else PreflightStatus.FAILED
         )
         details = (
-            'נמצא סגמנט עם טבלת פרטי בקשה הכוללת מזהים/מספרים (LLM).'
+            'נמצא סגמנט עם טבלת פרטי בקשה הכוללת מזהים וחתימה (LLM).'
             if req_ids
-            else ('זוהה סגמנט טבלה אך ללא מזהים ברורים (LLM).' if req_weak_ids else 'לא זוהתה טבלה/דף ריכוז פרטי בקשה (LLM).')
+            else (
+                'זוהתה טבלת פרטי בקשה עם מזהים אך ללא חתימה (LLM).'
+                if req_missing_sig_ids
+                else ('זוהה סגמנט טבלה אך ללא מזהים ברורים (LLM).' if req_weak_ids else 'לא זוהתה טבלה/דף ריכוז פרטי בקשה (LLM).')
+            )
         )
-        evidence = (req_ids or req_weak_ids)[:10]
+        evidence = (req_ids or req_missing_sig_ids or req_weak_ids)[:10]
         debug = {
             "ocr": ocr_debug_all or None,
             "llm": llm_req,
@@ -1217,26 +1261,39 @@ async def run_submission_preflight(
         rishuy_llm_ids = [
             seg_id
             for seg_id, data in llm_rishuy.items()
-            if data.get("rishuy_zamin_present") is True and data.get("decision_form_present") is True
+            if data.get("rishuy_zamin_present") is True
+            and data.get("decision_form_present") is True
+            and data.get("signature_present") is True
+        ]
+        rishuy_missing_sig_ids = [
+            seg_id
+            for seg_id, data in llm_rishuy.items()
+            if data.get("rishuy_zamin_present") is True
+            and data.get("decision_form_present") is True
+            and data.get("signature_present") is not True
         ]
         rishuy_llm_weak = [
             seg_id for seg_id, data in llm_rishuy.items() if data.get("rishuy_zamin_present") is True
         ]
         rishuy_status = (
             PreflightStatus.PASSED if rishuy_llm_ids
-            else (PreflightStatus.FAILED if strict else PreflightStatus.WARNING) if rishuy_llm_weak
+            else (PreflightStatus.FAILED if strict else PreflightStatus.WARNING) if (rishuy_missing_sig_ids or rishuy_llm_weak)
             else (PreflightStatus.FAILED if strict else PreflightStatus.WARNING)
         )
         details = (
-            'זוהה טופס החלטה מרישוי זמין (כולל אינדיקציה להחלטה) (LLM).'
+            'זוהה טופס החלטה מרישוי זמין עם חתימה (LLM).'
             if rishuy_llm_ids
             else (
-                'זוהה אזכור לרישוי זמין אך ללא אינדיקציה ברורה לטופס החלטה (LLM).'
-                if rishuy_llm_weak
-                else 'לא זוהה טופס החלטה מרישוי זמין (LLM).'
+                'זוהה טופס החלטה מרישוי זמין אך ללא חתימה (LLM).'
+                if rishuy_missing_sig_ids
+                else (
+                    'זוהה אזכור לרישוי זמין אך ללא אינדיקציה ברורה לטופס החלטה (LLM).'
+                    if rishuy_llm_weak
+                    else 'לא זוהה טופס החלטה מרישוי זמין (LLM).'
+                )
             )
         )
-        evidence = (rishuy_llm_ids or rishuy_llm_weak)[:10]
+        evidence = (rishuy_llm_ids or rishuy_missing_sig_ids or rishuy_llm_weak)[:10]
         debug = {
             "ocr": ocr_debug_all or None,
             "llm": llm_rishuy,
