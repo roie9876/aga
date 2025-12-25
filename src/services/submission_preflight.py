@@ -18,6 +18,7 @@ from src.config import settings
 from src.models.decomposition import SegmentType
 from src.models.preflight import PreflightCheckResult, PreflightStatus
 from src.utils.logging import get_logger
+from src.services.segment_analyzer import TAG_DEFINITIONS
 
 logger = get_logger(__name__)
 
@@ -303,7 +304,7 @@ async def _llm_detect_area_table(*, image_bytes: bytes, ocr_text: str) -> Option
 
     prompt = f"""You are a strict reviewer for an Israeli Home Front Command (Pakar) submission.
 
-Task: Determine if this image is a **protected-area area calculation table** and if the table is **not empty**.
+Task: Determine if this image contains a **protected-area area calculation table**, even if it is empty, and whether it has **area values**.
 
 OCR text (may be noisy):
 {ocr_hint}
@@ -317,7 +318,8 @@ Return ONLY valid JSON:
 }}
 
 Rules:
-- "area_table_present" should be true ONLY if the image clearly looks like a table of areas (טבלת חישוב שטחים/שטחי מיגון).
+- "area_table_present" should be true if the image clearly shows a table intended for area calculations (טבלת חישוב שטחים/שטחי מיגון),
+  even if the table cells are empty. Look for a grid of rows/columns, headers, or a table title.
 - "area_values_present" should be true ONLY if numeric area values appear in the table (e.g., m²/מ״ר or numeric cells).
 """
 
@@ -747,6 +749,114 @@ def _segment_text_corpus(seg: Dict[str, Any]) -> str:
     return " ".join([p for p in parts if p])
 
 
+def _normalize_text_for_tags(value: str) -> str:
+    normalized = value or ""
+    normalized = normalized.replace("״", '"').replace("”", '"').replace("“", '"')
+    normalized = normalized.replace("׳", "'")
+    return normalized.lower()
+
+
+def _extract_scales_for_tags(text: str) -> List[int]:
+    if not text:
+        return []
+    matches = re.findall(r"1\s*[:/]\s*(\d{2,4})", text)
+    scales: List[int] = []
+    for m in matches:
+        try:
+            scales.append(int(m))
+        except ValueError:
+            continue
+    return list(sorted(set(scales)))
+
+
+def _find_hits_for_tags(text: str, phrases: List[str]) -> List[str]:
+    hits: List[str] = []
+    for phrase in phrases:
+        if not phrase:
+            continue
+        if phrase.lower() in text:
+            hits.append(phrase)
+    return hits
+
+
+def _collect_text_for_tags(seg: Dict[str, Any]) -> str:
+    parts: List[str] = []
+    parts.append(_segment_text_blob(seg))
+    parts.extend(_extract_checkable_text_items(seg))
+    ocr_items = _extract_ocr_items(seg)
+    for item in ocr_items:
+        if isinstance(item, dict) and isinstance(item.get("text"), str):
+            parts.append(item["text"])
+    return "\n".join([p for p in parts if p])
+
+
+def _detect_content_tags_light(seg: Dict[str, Any]) -> List[Dict[str, Any]]:
+    raw_text = _collect_text_for_tags(seg)
+    normalized = _normalize_text_for_tags(raw_text)
+    scales = _extract_scales_for_tags(normalized)
+
+    tags: List[Dict[str, Any]] = []
+    for tag in TAG_DEFINITIONS:
+        required = tag.get("required_phrases", [])
+        optional = tag.get("optional_phrases", [])
+        scale_values = tag.get("scale_values") or []
+
+        required_hits = _find_hits_for_tags(normalized, required)
+        optional_hits = _find_hits_for_tags(normalized, optional)
+        scale_hits = [s for s in scales if s in scale_values]
+
+        score = 0.0
+        score += len(required_hits) * 0.6
+        score += len(optional_hits) * 0.2
+        if scale_hits:
+            score += 0.4
+
+        has_required = len(required_hits) > 0
+        has_scale = bool(scale_hits)
+        has_optional = len(optional_hits) > 0
+
+        if not (has_required or (has_scale and has_optional)):
+            continue
+
+        tags.append(
+            {
+                "tag": tag["id"],
+                "label": tag["label"],
+                "description": tag["description"],
+                "confidence": round(min(0.95, max(0.15, score)), 2),
+                "evidence": list(dict.fromkeys(required_hits + optional_hits))[:8],
+                "scales_detected": scale_hits,
+            }
+        )
+
+    return tags
+
+
+def _get_content_tags(seg: Dict[str, Any]) -> List[Dict[str, Any]]:
+    ad = seg.get("analysis_data")
+    if isinstance(ad, dict):
+        tags = ad.get("content_tags")
+        if isinstance(tags, list) and tags:
+            return tags
+    return _detect_content_tags_light(seg)
+
+
+def _filter_segments_by_tags(segments: Sequence[Dict[str, Any]], tag_ids: Sequence[str]) -> List[Dict[str, Any]]:
+    wanted = {str(t).strip() for t in tag_ids if str(t).strip()}
+    if not wanted:
+        return []
+    out: List[Dict[str, Any]] = []
+    for seg in segments:
+        tags = _get_content_tags(seg)
+        if not isinstance(tags, list):
+            continue
+        for t in tags:
+            if isinstance(t, dict) and t.get("tag") in wanted:
+                out.append(seg)
+                break
+    return out
+
+
 def _is_site_plan_like(seg: Dict[str, Any]) -> bool:
     return _match_keywords(_segment_text_corpus(seg), _HEBREW_KEYWORDS["site_plan"])
 
@@ -785,6 +895,25 @@ def _has_area_table_signal(text: str) -> bool:
     has_table = any(tok in text for tok in table_tokens)
     has_area = any(tok in text for tok in area_tokens)
     return has_table and has_area
+
+
+def _score_area_table_candidate(seg: Dict[str, Any]) -> int:
+    """Heuristic score for PF-09 candidates (higher = more likely area table)."""
+    corpus = _segment_text_corpus(seg)
+    score = 0
+    if _has_area_table_signal(corpus) and _has_area_values(corpus):
+        score += 6
+    elif _has_area_table_signal(corpus):
+        score += 4
+    elif _has_table_token(corpus):
+        score += 2
+    # Empty tables may have very little OCR text; give a small boost.
+    if 0 < len(corpus) < 80:
+        score += 1
+    st = _safe_segment_type(seg.get("type"))
+    if st == SegmentType.LEGEND:
+        score += 1
+    return score
 
 
 def _has_numeric_token(text: str, *, min_digits: int = 2) -> bool:
@@ -919,7 +1048,33 @@ async def run_submission_preflight(
         _find_segments_by_keywords(approved_segments, "rishuy_zamin")
     )
     dims_candidates = _unique_segments(approved_segments)
-    area_candidates = _unique_segments(approved_segments)
+    area_candidates = _unique_segments(
+        sorted(
+            approved_segments,
+            key=_score_area_table_candidate,
+            reverse=True,
+        )
+    )
+    # Tag-based prioritization (content_tags or lightweight tagger).
+    tag_area = _filter_segments_by_tags(approved_segments, ["area_calculation_table"])
+    tag_floor = _filter_segments_by_tags(approved_segments, ["floor_plan"])
+    tag_mamad = _filter_segments_by_tags(approved_segments, ["mamad_plan_1_15"])
+    tag_site = _filter_segments_by_tags(approved_segments, ["site_plan_map"])
+    tag_wall_drop = _filter_segments_by_tags(approved_segments, ["mamad_wall_drop_plan"])
+    tag_request = _filter_segments_by_tags(approved_segments, ["permit_application_form"])
+
+    if tag_area:
+        area_candidates = _unique_segments(tag_area + area_candidates)
+    if tag_floor:
+        floor_plan_candidates = _unique_segments(tag_floor + floor_plan_candidates)
+    if tag_mamad:
+        mamad_candidates = _unique_segments(tag_mamad + mamad_candidates)
+    if tag_site:
+        env_site_candidates = _unique_segments(tag_site + env_site_candidates)
+    if tag_wall_drop:
+        wall_reduction_candidates = _unique_segments(tag_wall_drop + wall_reduction_candidates)
+    if tag_request:
+        request_table_candidates = _unique_segments(tag_request + request_table_candidates)
 
     llm_results: Dict[str, Dict[str, Any]] = {}
     ocr_debug_all = _collect_ocr_debug(approved_segments)
@@ -931,8 +1086,12 @@ async def run_submission_preflight(
 
         async def _run_llm_check(check_id: str, candidates: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
             selected = _unique_segments(list(candidates) if candidates else approved_segments)
-            if max_segments is not None:
-                selected = selected[:max_segments]
+            local_max_segments = max_segments
+            if check_id == "PF-09" and local_max_segments is not None:
+                # PF-09 (area table) benefits from a wider scan to catch empty tables with weak OCR.
+                local_max_segments = max(local_max_segments, 10)
+            if local_max_segments is not None:
+                selected = selected[:local_max_segments]
 
             async def _one(seg: Dict[str, Any]) -> Optional[Tuple[str, Dict[str, Any]]]:
                 seg_id = str(seg.get("segment_id"))
@@ -1537,22 +1696,55 @@ async def run_submission_preflight(
 
     llm_area = llm_results.get("PF-09", {})
     if llm_area:
-        llm_area_ids = [
-            seg_id
+        def _has_table_evidence(ev: Any) -> bool:
+            if not isinstance(ev, list):
+                return False
+            table_tokens = ["טבלה", "טבלא", "תאים", "שורות", "עמודות", "grid"]
+            for item in ev:
+                if not isinstance(item, str):
+                    continue
+                low = item.lower()
+                if any(tok in low for tok in table_tokens):
+                    return True
+            return False
+
+        def _score_llm_area_candidate(seg_id: str, data: Dict[str, Any]) -> float:
+            score = 0.0
+            if data.get("area_table_present") is True:
+                score += 3.0
+            if data.get("area_values_present") is True:
+                score += 2.0
+            if _has_table_evidence(data.get("evidence")):
+                score += 2.0
+            seg = next((s for s in approved_segments if str(s.get("segment_id")) == seg_id), None)
+            tags = _get_content_tags(seg or {})
+            if any(isinstance(t, dict) and t.get("tag") == "area_calculation_table" for t in tags):
+                score += 3.0
+            if any(isinstance(t, dict) and t.get("tag") == "floor_plan" for t in tags):
+                score -= 2.5
+            conf = data.get("confidence")
+            if isinstance(conf, (int, float)):
+                score += float(conf)
+            return score
+
+        llm_candidates = [
+            (seg_id, data)
             for seg_id, data in llm_area.items()
-            if data.get("area_table_present") is True and data.get("area_values_present") is True
+            if isinstance(data, dict) and data.get("area_table_present") is True
         ]
-        llm_area_table_ids = [
-            seg_id for seg_id, data in llm_area.items() if data.get("area_table_present") is True
-        ]
-        if llm_area_ids:
-            area_status = PreflightStatus.PASSED
-            area_details = 'נמצאה טבלת שטחים עם ערכי מ\"ר (LLM).'
-            area_evidence = llm_area_ids[:10]
-        elif llm_area_table_ids:
-            area_status = PreflightStatus.WARNING if not strict else PreflightStatus.FAILED
-            area_details = 'זוהתה טבלת שטחים אך ללא ערכים ברורים (LLM).'
-            area_evidence = llm_area_table_ids[:10]
+        llm_candidates.sort(key=lambda x: _score_llm_area_candidate(x[0], x[1]), reverse=True)
+        best = llm_candidates[0] if llm_candidates else None
+
+        if best:
+            seg_id, data = best
+            has_values = data.get("area_values_present") is True
+            if has_values:
+                area_status = PreflightStatus.PASSED
+                area_details = 'נמצאה טבלת שטחים עם ערכי מ\"ר (LLM).'
+            else:
+                area_status = PreflightStatus.WARNING if not strict else PreflightStatus.FAILED
+                area_details = 'נמצאה טבלת שטחים אך היא ריקה/ללא ערכים (LLM).'
+            area_evidence = [seg_id]
         else:
             area_status = PreflightStatus.WARNING if not strict else PreflightStatus.FAILED
             area_details = 'ה‑LLM לא זיהה טבלת שטחים.'
