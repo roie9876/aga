@@ -18,7 +18,7 @@ import { DecompositionReview } from './components/DecompositionReview';
 import { RequirementItem } from './components/RequirementItem';
 import { RequirementsModal } from './components/RequirementsModal';
 import { PreflightChecks } from './components/PreflightChecks';
-import { Button, Card, StatCard, Badge, ProgressBar, EmptyState, FloatingActionButton } from './components/ui';
+import { Button, Card, Badge, ProgressBar, EmptyState, FloatingActionButton } from './components/ui';
 import { StepIndicator } from './components/ValidationComponents';
 import type { SubmissionPreflightResponse } from './types';
 
@@ -188,6 +188,20 @@ const translateType = (type: string): string => {
   };
   
   return types[type?.toLowerCase()] || type || 'לא ידוע';
+};
+
+const getSegmentDisplay = (segment: any): { title: string; subtitle: string } => {
+  const analysis = segment?.analysis_data || {};
+  const tags = Array.isArray(analysis?.content_tags) ? analysis.content_tags : [];
+  const firstTag = tags.find((t: any) => t && typeof t === 'object') || null;
+  const tagLabel = firstTag?.label || firstTag?.tag;
+  const tagDescription = firstTag?.description;
+  const typeLabel = translateType(segment?.type);
+
+  const title = tagLabel ? String(tagLabel) : typeLabel;
+  const subtitle = tagDescription ? String(tagDescription) : (segment?.description || typeLabel);
+
+  return { title, subtitle };
 };
 
 // Calculate real-time coverage statistics from validation data
@@ -2064,6 +2078,14 @@ function App() {
                           return overallRequirementStatus[rid] !== 'passed';
                         });
 
+                        const reqEvals: any[] = Array.isArray(validation?.requirement_evaluations)
+                          ? validation.requirement_evaluations
+                          : [];
+                        const failedReqs = reqEvals
+                          .filter((e: any) => e && e.status === 'failed' && typeof e.requirement_id === 'string')
+                          .map((e: any) => e.requirement_id as string);
+                        const hasLocalFailures = failedReqs.length > 0 || filteredViolations.length > 0;
+
                         const checkedReqs: string[] = Array.isArray(validation.checked_requirements)
                           ? (validation.checked_requirements as string[])
                           : [];
@@ -2083,10 +2105,10 @@ function App() {
                           segment.status === 'analyzed' &&
                           checksPerformed &&
                           (String(validation.status || '').toLowerCase() === 'passed' || Boolean(validation.passed)) &&
-                          filteredViolations.length === 0;
+                          !hasLocalFailures;
                         const isFailed =
                           segment.status === 'analyzed' &&
-                          (String(validation.status || '').toLowerCase() === 'failed' || filteredViolations.length > 0);
+                          hasLocalFailures;
                         const isError = segment.status === 'error';
                         
                         return (
@@ -2130,14 +2152,19 @@ function App() {
                               
                               <div className="flex-1">
                                 <div className="flex items-start justify-between gap-3 mb-2">
-                                  <div>
-                                    <h4 className="font-semibold text-text-primary text-lg">
-                                      {translateType(segment.type)}
-                                    </h4>
-                                    <p className="text-sm text-text-muted mt-1">
-                                      {segment.description || translateType(segment.type)}
-                                    </p>
-                                  </div>
+                                  {(() => {
+                                    const display = getSegmentDisplay(segment);
+                                    return (
+                                      <div>
+                                        <h4 className="font-semibold text-text-primary text-lg">
+                                          {display.title}
+                                        </h4>
+                                        <p className="text-sm text-text-muted mt-1">
+                                          {display.subtitle}
+                                        </p>
+                                      </div>
+                                    );
+                                  })()}
                                   
                                   {isSuccess && (
                                     <Badge variant="success">
@@ -2473,8 +2500,15 @@ function App() {
                                                   {showAttempted ? 'בוצעו ניסיונות בדיקה אך לא נמצאו ראיות מספיקות' : 'לא בוצעו בדיקות בפועל'}
                                                 </h5>
                                                 <p className="text-xs text-blue-700 mb-2">
-                                                  הסגמנט סווג כ-<span className="font-semibold">"{translateType(segment.type)}"</span>{' '}
-                                                  ({segment.description || translateType(segment.type)}),
+                                                  {(() => {
+                                                    const display = getSegmentDisplay(segment);
+                                                    return (
+                                                      <>
+                                                        הסגמנט סווג כ-<span className="font-semibold">"{display.title}"</span>{' '}
+                                                        ({display.subtitle}),
+                                                      </>
+                                                    );
+                                                  })()}
                                                   {showAttempted
                                                     ? ' אך למרות זאת לא נמצאו ראיות מספיקות כדי לאמת אף דרישה בסגמנט הזה.'
                                                     : ' אך המערכת לא מצאה ראיות מספיקות כדי לאמת אף דרישה בסגמנט הזה.'}
@@ -2817,27 +2851,71 @@ function App() {
 
               <div className="space-y-4">
                 <Card padding="md" className="space-y-4 border-border">
-                  <h4 className="text-lg font-semibold text-text-primary">סטטוס כללי</h4>
-                  <div className="grid grid-cols-1 gap-3">
-                    <StatCard 
-                      label="סגמנטים נותחו"
-                      value={validationResult.total_segments}
-                      icon={<FileText className="w-5 h-5" />}
-                      color="blue"
-                    />
-                    <StatCard 
-                      label="סגמנטים שעברו"
-                      value={validationResult.passed || 0}
-                      icon={<CheckCircle2 className="w-5 h-5" />}
-                      color="green"
-                    />
-                    <StatCard 
-                      label="אזהרות"
-                      value={validationResult.warnings || 0}
-                      icon={<AlertCircle className="w-5 h-5" />}
-                      color="amber"
-                    />
-                  </div>
+                  <h4 className="text-lg font-semibold text-text-primary">פירוט בדיקות</h4>
+                  {(() => {
+                    const entries = Object.entries(overallRequirementStatus);
+                    const passedReqs = entries
+                      .filter(([, status]) => status === 'passed')
+                      .map(([rid]) => rid)
+                      .sort();
+                    const failedReqs = entries
+                      .filter(([, status]) => status === 'failed')
+                      .map(([rid]) => rid)
+                      .sort();
+
+                    if (passedReqs.length === 0 && failedReqs.length === 0) {
+                      return (
+                        <div className="text-sm text-text-muted">
+                          אין תוצאות בדיקות להצגה.
+                        </div>
+                      );
+                    }
+
+                    return (
+                      <div className="space-y-4">
+                        <div>
+                          <div className="text-sm font-semibold text-success mb-2">עברו</div>
+                          {passedReqs.length === 0 ? (
+                            <div className="text-xs text-text-muted">אין</div>
+                          ) : (
+                            <div className="flex flex-wrap gap-2">
+                              {passedReqs.map((rid) => (
+                                <button
+                                  key={rid}
+                                  type="button"
+                                  onClick={() => setRequirementInfoId(rid)}
+                                  className="focus:outline-none focus:ring-2 focus:ring-primary/30 rounded-full"
+                                  title="לחץ להסבר הבדיקה"
+                                >
+                                  <Badge variant="success" size="sm">{rid}</Badge>
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                        <div>
+                          <div className="text-sm font-semibold text-error mb-2">נכשלו</div>
+                          {failedReqs.length === 0 ? (
+                            <div className="text-xs text-text-muted">אין</div>
+                          ) : (
+                            <div className="flex flex-wrap gap-2">
+                              {failedReqs.map((rid) => (
+                                <button
+                                  key={rid}
+                                  type="button"
+                                  onClick={() => setRequirementInfoId(rid)}
+                                  className="focus:outline-none focus:ring-2 focus:ring-primary/30 rounded-full"
+                                  title="לחץ להסבר הבדיקה"
+                                >
+                                  <Badge variant="error" size="sm">{rid}</Badge>
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })()}
                 </Card>
 
                 <Card padding="md" className="bg-background border-border">

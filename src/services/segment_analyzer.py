@@ -2,6 +2,7 @@
 import asyncio
 import base64
 import json
+import re
 import subprocess
 import tempfile
 from collections import OrderedDict
@@ -15,6 +16,204 @@ from src.config import settings
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
+
+TAG_DEFINITIONS = [
+    {
+        "id": "permit_application_form",
+        "label": "טופס פרטי הבקשה",
+        "description": (
+            "מסמכי רישוי זמ\"ן עם פרטי בקשה לוועדה המקומית: מבקש, מתכנן שלד, "
+            "פרטי נכס, מהות הבקשה, החלטות וחתימות."
+        ),
+        "required_phrases": [
+            "טופס פרטי הבקשה",
+            "בקשה להיתר בניה",
+            "בקשה להיתר בנייה",
+            "בקשה להיתר בניה או לשימוש במקרקעין",
+            "מנהל התכנון",
+            "מערכת רישוי זמין",
+            "רישוי זמין",
+        ],
+        "optional_phrases": [
+            "מהות הבקשה",
+            "בעלי העניין",
+            "מבקש הבקשה",
+            "מתכנן השלד",
+            "עורך הבקשה",
+            "החלטת הועדה",
+            "חתימה",
+            "גוש",
+            "חלקה",
+            "פרטי הנכס",
+            "פרטי הבקשה",
+            "פרטי הבקשה להיתר",
+            "בקשה להיתר",
+            "בקשה להיתר בניה מס",
+            "בקשה להיתר בניה מס׳",
+            "בקשה להיתר בניה מס'",
+            "היתר הבניה המבוקש",
+            "תצהיר בעלי הזכויות",
+            "חתימת בעל הזכויות",
+            "ועדה מקומית לתכנון ובנייה",
+            "ועדה מקומית לתכנון ובניה",
+        ],
+    },
+    {
+        "id": "area_calculation_table",
+        "label": "טבלת חישובי שטחים",
+        "description": "טבלה לחישוב שטח עיקרי/שירות/סה\"כ במסגרת תכנית אדריכלית.",
+        "required_phrases": [
+            "טבלת שטחים",
+            "חישוב שטחים",
+            "חישוב שטחים בחלוקה לעיקרי ושירות",
+            "שטחים מבוקשים לבניה",
+        ],
+        "optional_phrases": [
+            "שטח עיקרי",
+            "שטח שירות",
+            "סה\"כ",
+            "חישוב שטחים בחלוקה",
+        ],
+    },
+    {
+        "id": "site_plan_map",
+        "label": "מפה מצבית",
+        "description": "מפת מיקום הנכס/תרשים סביבה, לעיתים עם הצהרת מודד ומקרא.",
+        "required_phrases": [
+            "מפה מצבית",
+            "מפה להיתר בניה",
+            "נתוני רשות וגבולות",
+            "מפה טופוגרפית",
+            "תשריט מדידה",
+        ],
+        "optional_phrases": [
+            "תכנית סביבה",
+            "מצב קיים",
+            "הצהרת המודד",
+            "קנ\"מ 1:1250",
+            "קנ\"מ 1:250",
+        ],
+        "scale_values": [1250],
+    },
+    {
+        "id": "mamad_plan_1_15",
+        "label": "תוכנית ממ\"ד קנ\"מ 1:50",
+        "description": "תכנית ממ\"ד מפורטת (לרוב 1:50, לעיתים 1:15) עם מידות פנימיות.",
+        "required_phrases": [
+            "תכנית ממ\"ד",
+            "תוכנית ממ\"ד",
+            "תכנית ממד",
+            "תוכנית ממד",
+            "תכנית הממ\"ד",
+            "תוכנית הממ\"ד",
+        ],
+        "optional_phrases": [
+            "קנ\"מ 1:50",
+            "קנ\"מ 1:15",
+            "1:50",
+            "1:15",
+        ],
+        "scale_values": [15, 50],
+    },
+    {
+        "id": "mamad_wall_drop_plan",
+        "label": "תכנית ירידת קירות",
+        "description": "תכנית ממ\"ד בקנ\"מ 1:50 לצורך חישובי ירידת קירות לקומה מתחת.",
+        "required_phrases": [
+            "ירידת קירות",
+            "תכנית ירידת",
+            "תוכנית ירידת",
+        ],
+        "optional_phrases": [
+            "ממ\"ד",
+            "ממד",
+            "קנ\"מ 1:50",
+            "1:50",
+        ],
+        "scale_values": [50],
+    },
+    {
+        "id": "floor_plan",
+        "label": "תוכנית קומה",
+        "description": "תכנית קומה בקנ\"מ 1:100 עם פריסת חללים ומיקום הממ\"ד ביחס לקומה.",
+        "required_phrases": [
+            "תכנית קומה",
+            "תוכנית קומה",
+            "תכנית גגות",
+            "תוכנית גגות",
+            "קומת קרקע",
+            "קומת מרתף",
+            "קומה א",
+            "קומה ב",
+            "קומה ג",
+        ],
+        "optional_phrases": [
+            "קנ\"מ 1:100",
+            "1:100",
+            "חזית",
+            "חתך",
+            "פריסת גדרות",
+        ],
+        "scale_values": [100],
+    },
+    {
+        "id": "anchorage_detail",
+        "label": "פרט ריתום",
+        "description": "פרטי ריתום לקורות/קירות ממ\"ד (אנכי/אופקי/רצפת ביניים).",
+        "required_phrases": [
+            "פרט ריתום",
+            "ריתום אנכי",
+            "ריתום אופקי",
+            "ריתום רצפת ביניים",
+        ],
+        "optional_phrases": [
+            "קורות",
+            "זיון",
+            "קלטרות",
+            "בזל",
+        ],
+    },
+    {
+        "id": "window_opening_detail",
+        "label": "פרט פתח לחלון",
+        "description": "פרט פתח חלון ממ\"ד, לרוב בקנ\"מ 1:20–1:25.",
+        "required_phrases": [
+            "פרט פתח לחלון",
+            "פרט פתח חלון",
+            "פרט חלון",
+            "חלון הממ\"ד",
+            "מבט על חלון",
+            "פרט חלון דור חדש",
+        ],
+        "optional_phrases": [
+            "קנ\"מ 1:25",
+            "קנ\"מ 1:20",
+            "1:25",
+            "1:20",
+            "דור חדש",
+        ],
+    },
+    {
+        "id": "door_opening_detail",
+        "label": "פרט פתח דלת",
+        "description": "פרט דלת ממ\"ד (דלת הדף/הזזה) עם חתכים ומידות.",
+        "required_phrases": [
+            "פרט פתח לדלת",
+            "פרט דלת",
+            "דלת הדף",
+            "דלת טיפוסי",
+            "פרט וחתכים דלת",
+        ],
+        "optional_phrases": [
+            "חתך ב-ב",
+            "חתך",
+            "קנ\"מ 1:20",
+            "קנ\"מ 1:25",
+            "1:20",
+            "1:25",
+        ],
+    },
+]
 
 
 class SegmentAnalyzer:
@@ -86,6 +285,8 @@ class SegmentAnalyzer:
                 merged = self._merge_text_items(existing, ocr_items)
                 extracted_data["text_items"] = merged
                 extracted_data.setdefault("ocr_text_items", ocr_items)
+
+            extracted_data["content_tags"] = self._detect_content_tags(extracted_data)
             
             logger.info("Segment analysis complete",
                        segment_id=segment_id,
@@ -881,8 +1082,12 @@ MAMAD reference description: {mamad_segment_description}
 Rules:
 - External wall = a wall segment of the ממ\"ד that borders the outside/facade (the building envelope) in the floor plan.
 - Internal wall = borders interior spaces (other rooms, corridor, shafts) in the floor plan.
+- Heuristic fallback when the envelope is unclear:
+  - A wall with a window opening is very likely external.
+  - A wall with the ממ\"ד door is very likely internal.
+  - Use these hints to infer the most plausible TOTAL external wall count if the envelope cannot be traced.
 - Count TOTAL external walls of the ממ\"ד as an integer in [1..4].
-- If you cannot determine confidently from these images, return null and set confidence < 0.6.
+- If you cannot determine confidently, return null and set confidence < 0.6.
 
 Return JSON:
 {{
@@ -922,8 +1127,12 @@ MAMAD reference description: {mamad_segment_description}
 Rules:
 - External wall = a wall segment of the ממ\"ד that borders the outside/facade (the building envelope) in the floor plan.
 - Internal wall = borders interior spaces (other rooms, corridor, shafts) in the floor plan.
+- Heuristic fallback when the envelope is unclear:
+  - A wall with a window opening is very likely external.
+  - A wall with the ממ\"ד door is very likely internal.
+  - Use these hints to infer the most plausible TOTAL external wall count if the envelope cannot be traced.
 - Count TOTAL external walls of the ממ\"ד as an integer in [1..4].
-- If you cannot determine confidently from these images, return null and set confidence < 0.6.
+- If you cannot determine confidently, return null and set confidence < 0.6.
 
 Return JSON:
 {{
@@ -955,6 +1164,53 @@ Return JSON:
                 count = None
         except Exception:
             count = None
+
+        def _coerce_count(value: Any) -> Optional[int]:
+            try:
+                c = int(value)
+            except Exception:
+                return None
+            return c if 0 <= c <= 4 else None
+
+        if count is None:
+            internal = _coerce_count(extracted.get("internal_wall_count"))
+            if internal is not None:
+                inferred = 4 - internal
+                if 1 <= inferred <= 4:
+                    count = inferred
+                    evidence = extracted.get("evidence")
+                    if not isinstance(evidence, list):
+                        evidence = []
+                    evidence.append("fallback: external=4-internal")
+                    extracted["evidence"] = evidence
+                    try:
+                        extracted["confidence"] = min(float(extracted.get("confidence") or 0.0), 0.55)
+                    except Exception:
+                        extracted["confidence"] = 0.55
+
+        if count is None:
+            sides = extracted.get("external_sides_hint")
+            if isinstance(sides, list):
+                normalized = set()
+                for item in sides:
+                    s = str(item or "").strip().lower()
+                    if not s:
+                        continue
+                    if s in {"left", "right", "top", "bottom"}:
+                        normalized.add(s)
+                    elif s in {"north", "south", "east", "west"}:
+                        normalized.add(s)
+                if 1 <= len(normalized) <= 4:
+                    count = len(normalized)
+                    evidence = extracted.get("evidence")
+                    if not isinstance(evidence, list):
+                        evidence = []
+                    evidence.append("fallback: count from external_sides_hint")
+                    extracted["evidence"] = evidence
+                    try:
+                        extracted["confidence"] = min(float(extracted.get("confidence") or 0.0), 0.55)
+                    except Exception:
+                        extracted["confidence"] = 0.55
 
         extracted["external_wall_count"] = count
         return extracted
@@ -1290,6 +1546,99 @@ Additionally, determine the **VIEW TYPE**:
                 },
                 "raw_response": content[:1000]  # Include first 1000 chars for debugging
             }
+
+    def _normalize_text(self, value: str) -> str:
+        normalized = value or ""
+        normalized = normalized.replace("״", '"').replace("”", '"').replace("“", '"')
+        normalized = normalized.replace("׳", "'")
+        return normalized.lower()
+
+    def _extract_scales(self, text: str) -> List[int]:
+        if not text:
+            return []
+        matches = re.findall(r"1\\s*[:/]\\s*(\\d{2,4})", text)
+        scales: List[int] = []
+        for m in matches:
+            try:
+                scales.append(int(m))
+            except ValueError:
+                continue
+        return list(sorted(set(scales)))
+
+    def _find_hits(self, text: str, phrases: List[str]) -> List[str]:
+        hits: List[str] = []
+        for phrase in phrases:
+            if not phrase:
+                continue
+            if phrase.lower() in text:
+                hits.append(phrase)
+        return hits
+
+    def _collect_text_for_tags(self, extracted_data: Dict[str, Any]) -> str:
+        parts: List[str] = []
+        for key in ("text_items", "ocr_text_items"):
+            items = extracted_data.get(key)
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                text = str(item.get("text", "")).strip()
+                if text:
+                    parts.append(text)
+        return "\n".join(parts)
+
+    def _detect_content_tags(self, extracted_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        raw_text = self._collect_text_for_tags(extracted_data)
+        normalized = self._normalize_text(raw_text)
+        scales = self._extract_scales(normalized)
+
+        tags: List[Dict[str, Any]] = []
+        for tag in TAG_DEFINITIONS:
+            required = tag.get("required_phrases", [])
+            optional = tag.get("optional_phrases", [])
+            scale_values = tag.get("scale_values") or []
+
+            required_hits = self._find_hits(normalized, required)
+            optional_hits = self._find_hits(normalized, optional)
+            scale_hits = [s for s in scales if s in scale_values]
+
+            score = 0.0
+            score += len(required_hits) * 0.6
+            score += len(optional_hits) * 0.2
+            if scale_hits:
+                score += 0.4
+
+            # Tag is considered present if any required hit exists, or a scale hit plus optional hits.
+            has_required = len(required_hits) > 0
+            has_scale = bool(scale_hits)
+            has_optional = len(optional_hits) > 0
+
+            if not (has_required or (has_scale and has_optional)):
+                continue
+
+            tags.append(
+                {
+                    "tag": tag["id"],
+                    "label": tag["label"],
+                    "description": tag["description"],
+                    "confidence": round(min(0.95, max(0.15, score)), 2),
+                    "evidence": list(dict.fromkeys(required_hits + optional_hits))[:8],
+                    "scales_detected": scale_hits,
+                }
+            )
+
+        if not tags:
+            return [
+                {
+                    "tag": "unclassified",
+                    "label": "ללא סיווג",
+                    "description": "לא נמצאו כותרות/מילות מפתח מספיקות לסיווג הסגמנט.",
+                    "confidence": 0.2,
+                    "evidence": [],
+                    "scales_detected": [],
+                }
+            ]
+
+        return tags
 
 
 # Singleton instance

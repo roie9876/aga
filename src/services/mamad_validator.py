@@ -77,10 +77,26 @@ class MamadValidator:
                 notes_he = "דרישה זו כבר עברה בסגמנט קודם ולכן לא הורצה שוב בסגמנט זה."
             evidence = []
 
+        ev_evidence: List[Dict[str, Any]] = list(evidence or [])
+        if notes_he:
+            # Ensure every evaluation has at least one readable evidence line for the UI.
+            has_text_evidence = any(
+                isinstance(item, dict) and item.get("evidence_type") == "text"
+                for item in ev_evidence
+            )
+            if not has_text_evidence:
+                ev_evidence.append(
+                    self._evidence_text(
+                        text=notes_he,
+                        element="evaluation_summary",
+                        location="validation_summary",
+                    )
+                )
+
         ev: Dict[str, Any] = {
             "requirement_id": requirement_id,
             "status": status,
-            "evidence": evidence or [],
+            "evidence": ev_evidence,
         }
         if reason_not_checked:
             ev["reason_not_checked"] = reason_not_checked
@@ -1006,6 +1022,18 @@ class MamadValidator:
         # Exception: if thickness is >=40cm, it satisfies 1.2 for any 1-4 external walls.
         if num_external_known is None:
             if min_external_thickness >= 40:
+                evidence_context = [
+                    self._evidence_text(
+                        text=f"עובי קיר חיצוני מינימלי שנמצא: {min_external_thickness:.0f} ס\"מ",
+                        element="wall_thickness_observed",
+                        location="external_wall_maximum_case",
+                    ),
+                    self._evidence_text(
+                        text="מספר קירות חיצוניים לא זוהה; עובי ≥40 ס\"מ עומד בדרישה לכל מקרה (1–4 קירות)",
+                        element="wall_thickness_context",
+                        location="external_wall_maximum_case",
+                    ),
+                ]
                 self._add_requirement_evaluation(
                     "1.2",
                     "passed",
@@ -1017,7 +1045,8 @@ class MamadValidator:
                             element="required_min_wall_thickness_max_case",
                             location="external_wall_maximum_case",
                         )
-                    ],
+                    ]
+                    + evidence_context,
                     notes_he=(
                         "נמצא עובי קיר חיצוני ≥40 ס\"מ, ולכן הדרישה לעובי קירות חיצוניים לפי סעיף 1.2 מתקיימת "
                         "ללא תלות במספר הקירות החיצוניים (1-4)."
@@ -1029,6 +1058,18 @@ class MamadValidator:
             # then the room cannot have 4 external walls. In that case, a minimum external thickness
             # of 30cm satisfies 1.2 for 1–3 external walls (and also covers the window-case for 1–2).
             if min_external_thickness >= 30 and door_sides:
+                evidence_context = [
+                    self._evidence_text(
+                        text=f"עובי קיר חיצוני מינימלי שנמצא: {min_external_thickness:.0f} ס\"מ",
+                        element="wall_thickness_observed",
+                        location="external_wall_count_inferred_max3",
+                    ),
+                    self._evidence_text(
+                        text="זוהתה דלת ממ\"ד המעידה על קיר פנימי ⇒ מספר קירות חיצוניים מקסימלי 3",
+                        element="wall_thickness_context",
+                        location="external_wall_count_inferred_max3",
+                    ),
+                ]
                 self._add_requirement_evaluation(
                     "1.2",
                     "passed",
@@ -1040,7 +1081,8 @@ class MamadValidator:
                             element="required_min_wall_thickness_inferred_max3",
                             location="external_wall_count_inferred_max3",
                         )
-                    ],
+                    ]
+                    + evidence_context,
                     notes_he=(
                         "זוהה עובי קיר חיצוני מינימלי ≥30 ס\"מ וכן אינדיקציה לקיר פנימי (דלת ממ\"ד), "
                         "ולכן מספר הקירות החיצוניים הוא לכל היותר 3. במצב זה עובי ≥30 ס\"מ עומד בדרישה 1.2 "
@@ -1109,6 +1151,27 @@ class MamadValidator:
                     element="required_min_wall_thickness",
                     location=f"external_walls={num_external_known}",
                 )
+            ]
+            + [
+                self._evidence_text(
+                    text=f"מספר קירות חיצוניים מזוהה: {num_external_known}",
+                    element="wall_thickness_context",
+                    location=f"external_walls={num_external_known}",
+                ),
+                self._evidence_text(
+                    text=f"עובי קיר חיצוני מינימלי שנמצא: {min_external_thickness:.0f} ס\"מ",
+                    element="wall_thickness_observed",
+                    location=f"external_walls={num_external_known}",
+                ),
+                self._evidence_text(
+                    text=(
+                        "חלון הדף נגרר בקיר חיצוני: כן"
+                        if has_sliding_window_on_external
+                        else ("חלון הדף נגרר בקיר חיצוני: לא זוהה" if has_any_window else "לא זוהה חלון הדף בסגמנט")
+                    ),
+                    element="wall_thickness_window_case",
+                    location=f"external_walls={num_external_known}",
+                ),
             ],
             notes_he=(
                 f"עובי הקירות החיצוניים שפוענחו עומד בדרישה: מינימום {required_thickness} ס\"מ "

@@ -68,6 +68,23 @@ export const RequirementItem: React.FC<{ req: Requirement }> = ({ req }) => {
     return lines;
   };
 
+  const collectSummaryLines = () => {
+    const lines: string[] = [];
+    if (!Array.isArray(req.evaluations)) return lines;
+    for (const ev of req.evaluations) {
+      if (ev?.notes_he && typeof ev.notes_he === 'string') {
+        lines.push(ev.notes_he.trim());
+      }
+      const evidenceLines = formatEvidence(ev?.evidence || []);
+      for (const line of evidenceLines) {
+        lines.push(line);
+      }
+    }
+    return Array.from(new Set(lines)).slice(0, 4);
+  };
+
+  const summaryLines = collectSummaryLines();
+
   return (
     <div 
       className={`transition-all ${
@@ -136,6 +153,11 @@ export const RequirementItem: React.FC<{ req: Requirement }> = ({ req }) => {
                 {req.segments_checked.length > 3 && ` +${req.segments_checked.length - 3}`}
               </p>
             )}
+            {!expanded && summaryLines.length > 0 && req.status !== 'not_checked' && (
+              <p className="text-xs text-text-muted mt-2 text-right">
+                סיכום בדיקה: {summaryLines[0]}
+              </p>
+            )}
           </div>
         </div>
       </button>
@@ -143,6 +165,18 @@ export const RequirementItem: React.FC<{ req: Requirement }> = ({ req }) => {
       {/* Expanded Details */}
       {expanded && hasDetails && (
         <div className="px-5 pb-4 space-y-3 border-t border-border/50">
+          {summaryLines.length > 0 && req.status !== 'not_checked' && (
+            <div className="mt-3 p-3 bg-white rounded-lg border border-border">
+              <p className="text-xs font-semibold text-text-primary mb-2 text-right">
+                סיכום הבדיקה:
+              </p>
+              <div className="space-y-1 text-xs text-text-muted text-right">
+                {summaryLines.map((line, i) => (
+                  <div key={i}>{line}</div>
+                ))}
+              </div>
+            </div>
+          )}
           {/* Segments Checked */}
           {req.segments_checked?.length > 0 && (
             <div className="mt-3 p-3 bg-white rounded-lg border border-border">
