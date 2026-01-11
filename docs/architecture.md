@@ -477,6 +477,29 @@ Container Apps Benefits:
 - **Log levels**: DEBUG, INFO, WARNING, ERROR
 - **Context**: All logs include environment, service name, timestamps
 
+#### Internal LLM Usage Accounting (Tokens/Cost)
+
+The backend tracks Azure OpenAI token usage per HTTP request and stores it for internal cost analysis.
+
+- Request-scoped accumulator: `src/utils/llm_usage.py` (contextvars)
+- Middleware lifecycle (streaming-safe): `src/api/main.py`
+- Per-call instrumentation: `src/azure/openai_client.py`
+
+**Where the data goes (exports-only)**
+
+- The app persists `llm_usage` into Cosmos history documents (e.g., decomposition/preflight/segment_validation).
+- The UI does **not** display tokens during normal usage.
+- Export artifacts include it under an internal section:
+   - JSON export: `_internal.llm_usage`
+   - Printable/PDF export: section titled “שימוש בטוקנים (פנימי)”
+
+**Optional log output (for grepping while debugging)**
+
+- `LOG_LLM_USAGE=true` logs:
+   - `LLM usage (call)` on each OpenAI call (plus running request total)
+   - `LLM usage (request complete)` at the end of the HTTP request
+- `LOG_LLM_USAGE_INCLUDE_CALLS=true` also includes per-call rows in the request summary
+
 ### Health Checks
 
 - `/health` endpoint checks all Azure services

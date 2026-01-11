@@ -1,6 +1,6 @@
 # Project Status - Mamad Validation App
 
-**Last Updated**: December 18, 2025  
+**Last Updated**: January 11, 2026  
 **Current Phase**: End-to-End Validation + Coverage Transparency (Testing Phase)  
 **Target Release**: Q1 2026
 
@@ -218,6 +218,18 @@ Building a FastAPI application that validates Israeli Home Front Command shelter
 - [x] Performance: run segment analysis concurrently (bounded) with per-segment timeout to avoid 20+ minute runs on many segments
 - [x] Observability: log preflight duration (`duration_ms`) per request for debugging and tuning
 - [x] Realtime segment analysis progress: new streaming endpoint (`POST /api/v1/decomposition/{id}/segments/analyze-stream`, NDJSON) lets the UI show which segments are being analyzed in real time during preflight (X/Y, status per seg, click to preview)
+
+#### Phase 3.8.2: LLM Token Accounting (Exports Only) - COMPLETED ✨ (January 11, 2026)
+- [x] Add request-scoped LLM usage accumulator (input/output/total + optional cost)
+- [x] Make streaming-safe (context remains active until stream completes)
+- [x] Persist `llm_usage` into Cosmos history docs:
+  - [x] decomposition
+  - [x] preflight
+  - [x] segment_validation
+- [x] Enforce “exports only” (no token counts in normal UI payloads)
+- [x] JSON export embeds `_internal.llm_usage` by fetching history docs at export time
+- [x] PDF/print export includes an internal “שימוש בטוקנים (פנימי)” section
+- [x] Optional backend logging for debugging/grepping (`LOG_LLM_USAGE=true`)
 
   #### Phase 3.9: Focused Extractors Stability + Multi-Scale Door Context - IN PROGRESS (December 13, 2025)
   - [x] Restore `src/services/segment_analyzer.py` to a valid, importable state after a syntax-corruption regression
@@ -605,6 +617,7 @@ Coverage Report (NEW - Tracks 16 implemented checks)
 | **2025-12-13** | Disabled automatic segmentation (manual ROI workflow) + moved Blob SDK calls off event loop to prevent ROI-save hangs | Copilot |
 | **2025-12-14** | Added folder upload for pre-cut segment images (new /api/v1/decomposition/upload-segments + UI hook in DecompositionUpload) | Copilot |
 | **2025-12-15** | Implemented conditional (context-dependent) validations for 2.2 (AND conditions w/ explicit volume) and new deterministic checks for 1.1/1.3/1.4/1.5 + regression tests | Copilot |
+| **2026-01-11** | Added request-scoped LLM token usage tracking (exports-only) + PDF/JSON export integration + optional log output | Copilot |
 
 
 

@@ -21,6 +21,7 @@ from src.services.external_wall_context import (
     infer_external_wall_context,
     inject_external_wall_count,
 )
+from src.utils.llm_usage import get_llm_usage_snapshot
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -759,6 +760,7 @@ async def validate_segments(request: SegmentValidationRequest):
             "validation_id": decomposition.get("validation_id"),
             "project_id": decomposition.get("project_id"),
             "analyzed_segments": analyzed_segments,
+            "llm_usage": get_llm_usage_snapshot(),
             "demo_mode": request.demo_mode,
             "demo_focus": demo_focus_note,
             "created_at": created_at,
@@ -1065,7 +1067,6 @@ async def validate_segments_stream(request: SegmentValidationRequest):
                                 "structural_elements": len(data.get("structural_elements", []) or [])
                                 if isinstance(data, dict)
                                 else 0,
-                                "tokens_used": data.get("tokens_used") if isinstance(data, dict) else None,
                             }
                         )
                     )
@@ -1654,6 +1655,7 @@ async def validate_segments_stream(request: SegmentValidationRequest):
             "validation_id": decomposition.get("validation_id"),
             "project_id": decomposition.get("project_id"),
             "analyzed_segments": analyzed_segments,
+            "llm_usage": get_llm_usage_snapshot(),
             "demo_mode": request.demo_mode,
             "demo_focus": demo_focus_note,
             "check_groups": effective_check_groups,

@@ -593,8 +593,6 @@ Return JSON:
             )
         content = response.choices[0].message.content
         extracted = self._parse_gpt_response(content)
-        if response.usage:
-            extracted["tokens_used"] = response.usage.total_tokens
         return extracted
 
     async def extract_door_spacing(
@@ -1478,15 +1476,13 @@ Additionally, determine the **VIEW TYPE**:
             
             content = response.choices[0].message.content
             tokens_used = response.usage.total_tokens if response.usage else 0
-            
+
             logger.info("GPT analysis response received",
                        content_length=len(content),
                        tokens_used=tokens_used)
             
             # Extract JSON from response
             extracted_data = self._parse_gpt_response(content)
-            extracted_data["tokens_used"] = tokens_used
-            
             return extracted_data
             
         except Exception as e:

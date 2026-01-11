@@ -83,6 +83,28 @@ Assign these roles to your Azure identity:
 
    **No `.env` file needed!** - Authentication via Azure Entra ID
 
+### Optional: Token/Cost Tracking (Internal)
+
+The app tracks Azure OpenAI token usage per request for internal cost analysis.
+
+- Token/cost data is included only in exported artifacts (JSON/PDF) under an internal section (`_internal.llm_usage`).
+- It is **not** shown in the normal UI.
+
+Enable optional cost estimation (prices are per 1K tokens):
+
+```bash
+export AZURE_OPENAI_PRICE_PER_1K_INPUT_TOKENS_USD="..."
+export AZURE_OPENAI_PRICE_PER_1K_OUTPUT_TOKENS_USD="..."
+```
+
+Enable backend log output (so you can grep token totals during runs):
+
+```bash
+export LOG_LLM_USAGE=true
+# Optional (more verbose):
+export LOG_LLM_USAGE_INCLUDE_CALLS=true
+```
+
 4. **Run the application**
    
    Terminal 1 (Backend):

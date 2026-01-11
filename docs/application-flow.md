@@ -219,6 +219,13 @@ Source: `frontend/src/App.tsx`
 - `openPrintableReport()` builds an HTML report and calls `window.print()`.
 - `downloadJsonReport()` serializes the final results to JSON and triggers a download.
 
+**Internal token/cost tracking (exports only)**
+
+- The backend persists `llm_usage` into Cosmos history docs.
+- At export time, the frontend fetches the related history documents and embeds:
+  - JSON export: `_internal.llm_usage`
+  - PDF/print export: “שימוש בטוקנים (פנימי)” section
+
 
 ## Notes
 

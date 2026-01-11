@@ -2,9 +2,11 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 
 from src.config import settings
 from src.utils.logging import setup_logging, get_logger
+from src.utils.llm_usage import start_request_llm_usage, end_request_llm_usage, get_llm_usage_snapshot
 from src.api.routes import health, validation, decomposition, segment_validation, requirements, preflight
 
 # Setup logging before anything else
@@ -27,6 +29,61 @@ app = FastAPI(
     version=settings.api_version,
     lifespan=lifespan,
 )
+
+
+@app.middleware("http")
+async def llm_usage_middleware(request, call_next):
+    """Track Azure OpenAI token usage per request (internal only)."""
+
+    token = start_request_llm_usage()
+    try:
+        response = await call_next(request)
+    except Exception:
+        end_request_llm_usage(token)
+        raise
+
+    # Streaming responses may keep executing after middleware returns.
+    # Wrap the body iterator so we only reset the context after streaming completes.
+    if isinstance(response, StreamingResponse):
+        original_iterator = response.body_iterator
+
+        async def wrapped_iterator():
+            try:
+                async for chunk in original_iterator:
+                    yield chunk
+            finally:
+                if getattr(settings, "log_llm_usage", False):
+                    try:
+                        logger.info(
+                            "LLM usage (request complete)",
+                            method=getattr(request, "method", None),
+                            path=str(getattr(request, "url", "")),
+                            llm_usage=get_llm_usage_snapshot(
+                                include_calls=bool(getattr(settings, "log_llm_usage_include_calls", False))
+                            ),
+                        )
+                    except Exception:
+                        pass
+                end_request_llm_usage(token)
+
+        response.body_iterator = wrapped_iterator()
+        return response
+
+    if getattr(settings, "log_llm_usage", False):
+        try:
+            logger.info(
+                "LLM usage (request complete)",
+                method=getattr(request, "method", None),
+                path=str(getattr(request, "url", "")),
+                llm_usage=get_llm_usage_snapshot(
+                    include_calls=bool(getattr(settings, "log_llm_usage_include_calls", False))
+                ),
+            )
+        except Exception:
+            pass
+
+    end_request_llm_usage(token)
+    return response
 
 # Configure CORS
 app.add_middleware(

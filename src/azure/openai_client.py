@@ -9,6 +9,7 @@ from openai import APIConnectionError, APITimeoutError, APIStatusError, RateLimi
 
 from src.config import settings
 from src.utils.logging import get_logger
+from src.utils.llm_usage import record_openai_chat_completion_usage, get_llm_usage_snapshot
 
 logger = get_logger(__name__)
 
@@ -101,7 +102,27 @@ class OpenAIClient:
 
         for attempt in range(1, max_attempts + 1):
             try:
-                return self.client.chat.completions.create(**kwargs)
+                response = self.client.chat.completions.create(**kwargs)
+                try:
+                    record_openai_chat_completion_usage(
+                        response=response,
+                        model=str(kwargs.get("model")) if kwargs.get("model") is not None else None,
+                    )
+                    if getattr(settings, "log_llm_usage", False):
+                        usage = getattr(response, "usage", None)
+                        if usage is not None:
+                            logger.info(
+                                "LLM usage (call)",
+                                model=str(kwargs.get("model")) if kwargs.get("model") is not None else None,
+                                input_tokens=int(getattr(usage, "prompt_tokens", 0) or 0),
+                                output_tokens=int(getattr(usage, "completion_tokens", 0) or 0),
+                                total_tokens=int(getattr(usage, "total_tokens", 0) or 0),
+                                request_total_tokens=int(get_llm_usage_snapshot().get("total_tokens", 0) or 0),
+                            )
+                except Exception:
+                    # Never fail the request due to internal usage tracking.
+                    pass
+                return response
             except (RateLimitError, APIStatusError, APITimeoutError, APIConnectionError) as e:
                 last_error = e
 

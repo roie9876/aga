@@ -36,6 +36,7 @@ from src.azure import get_cosmos_client
 from src.azure.blob_client import get_blob_client
 from src.utils.image_cropper import get_image_cropper
 from src.utils.logging import get_logger
+from src.utils.llm_usage import get_llm_usage_snapshot
 from src.segmentation.auto_segmenter import (
     SegmenterConfig,
     segment_image,
@@ -219,6 +220,7 @@ async def create_decomposition_from_uploaded_segments(
         cosmos_client = get_cosmos_client()
         decomp_dict = decomposition.model_dump(mode="json")
         decomp_dict["type"] = "decomposition"
+        decomp_dict["llm_usage"] = get_llm_usage_snapshot()
         await cosmos_client.create_item(decomp_dict)
 
         return DecompositionResponse(
@@ -588,6 +590,7 @@ async def decompose_plan(
         decomp_dict["project_id"] = project_id
         decomp_dict["type"] = "decomposition"  # Document type
         
+        decomp_dict["llm_usage"] = get_llm_usage_snapshot()
         await cosmos_client.create_item(decomp_dict)
         
         logger.info(
@@ -790,6 +793,7 @@ async def analyze_decomposition_segments(
         if updated > 0:
             decomp_data["status"] = DecompositionStatus.REVIEW_NEEDED.value
 
+        decomp_data["llm_usage"] = get_llm_usage_snapshot()
         await cosmos_client.upsert_item(decomp_data)
 
         logger.info(
@@ -960,6 +964,7 @@ async def analyze_decomposition_segments_stream(
         decomp_data["updated_at"] = datetime.utcnow().isoformat()
         if updated > 0:
             decomp_data["status"] = DecompositionStatus.REVIEW_NEEDED.value
+        decomp_data["llm_usage"] = get_llm_usage_snapshot()
         await cosmos_client.upsert_item(decomp_data)
 
         yield json.dumps(
@@ -1047,6 +1052,7 @@ async def update_segment(
         decomp_data["status"] = DecompositionStatus.REVIEW_NEEDED.value
         
         # Save back to Cosmos DB
+        decomp_data["llm_usage"] = get_llm_usage_snapshot()
         await cosmos_client.upsert_item(decomp_data)
         
         logger.info("Segment updated successfully",
@@ -1317,6 +1323,7 @@ async def add_manual_segments(
         if isinstance(decomp_data.get("processing_stats"), dict):
             decomp_data["processing_stats"]["total_segments"] = len(decomp_data.get("segments", []))
 
+        decomp_data["llm_usage"] = get_llm_usage_snapshot()
         await cosmos_client.upsert_item(decomp_data)
 
         logger.info(
@@ -1662,14 +1669,12 @@ async def auto_segment_decomposition(
                     "regions": regions,
                     "meta": {
                         "mode": "llm",
-                        "tokens_used": tokens_used,
                     },
                 }
                 logger.info(
                     "Auto-segmentation stats (llm)",
                     decomposition_id=decomposition_id,
                     regions=len(regions),
-                    tokens_used=tokens_used,
                 )
             except Exception as e:
                 logger.error("LLM segmentation failed; falling back to CV", error=str(e))
@@ -1971,6 +1976,7 @@ async def auto_segment_decomposition(
         decomp_dict = decomposition.model_dump(mode="json")
         decomp_dict["type"] = "decomposition"
         decomp_dict["project_id"] = decomposition.project_id
+        decomp_dict["llm_usage"] = get_llm_usage_snapshot()
         await cosmos_client.upsert_item(decomp_dict)
 
         logger.info(
@@ -2136,6 +2142,7 @@ async def update_segment_bbox(
         decomp_data["status"] = DecompositionStatus.REVIEW_NEEDED.value
         decomp_data["updated_at"] = datetime.utcnow().isoformat()
 
+        decomp_data["llm_usage"] = get_llm_usage_snapshot()
         await cosmos_client.upsert_item(decomp_data)
 
         logger.info(
@@ -2220,6 +2227,7 @@ async def approve_decomposition(
         decomp_data["status"] = "approved"
         
         # Save
+        decomp_data["llm_usage"] = get_llm_usage_snapshot()
         await cosmos_client.upsert_item(decomp_data)
         
         logger.info("Decomposition approved",

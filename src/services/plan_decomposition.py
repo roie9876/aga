@@ -208,7 +208,7 @@ class PlanDecompositionService:
                 processing_stats=ProcessingStats(
                     total_segments=len(segments),
                     processing_time_seconds=total_time,
-                    llm_tokens_used=tokens_used,
+                    llm_tokens_used=0,
                     analysis_time_seconds=analysis_time
                 )
             )

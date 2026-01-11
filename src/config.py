@@ -22,6 +22,12 @@ class Settings(BaseSettings):
     environment: str = "development"
     log_level: str = "INFO"
     api_version: str = "v1"
+
+    # Internal logging controls
+    # If enabled, logs LLM token usage to backend logs (numbers only).
+    # This is NOT exposed to end users via API responses.
+    log_llm_usage: bool = False
+    log_llm_usage_include_calls: bool = False
     
     # Azure OpenAI
     azure_openai_endpoint: str
@@ -32,6 +38,11 @@ class Settings(BaseSettings):
     azure_openai_max_retries: int = 6
     azure_openai_retry_base_seconds: float = 1.0
     azure_openai_retry_max_seconds: float = 30.0
+
+    # Optional pricing (USD) for cost estimation in internal exports.
+    # If unset, the system will still track tokens but will not compute cost.
+    azure_openai_price_per_1k_input_tokens_usd: Optional[float] = None
+    azure_openai_price_per_1k_output_tokens_usd: Optional[float] = None
 
     # Performance / parallelism controls
     # These are conservative defaults intended to improve throughput without

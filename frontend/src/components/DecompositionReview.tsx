@@ -305,8 +305,10 @@ export const DecompositionReview: React.FC<DecompositionReviewProps> = ({
           }
           if (next.kind === 'update' && next.segmentId) {
             setPendingEdits((prev) => {
-              if (!prev[next.segmentId]) return prev;
-              const { [next.segmentId]: _removed, ...rest } = prev;
+              const segId = next.segmentId;
+              if (!segId) return prev;
+              if (!prev[segId]) return prev;
+              const { [segId]: _removed, ...rest } = prev;
               return rest;
             });
           }

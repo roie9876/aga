@@ -990,14 +990,72 @@ function App() {
     };
   }, []);
 
-  const downloadJsonReport = () => {
+  const downloadJsonReport = async () => {
     if (!validationResult) return;
+
+    const fetchJson = async (url: string): Promise<any | null> => {
+      try {
+        const resp = await fetch(url, { method: 'GET' });
+        if (!resp.ok) return null;
+        return await resp.json();
+      } catch {
+        return null;
+      }
+    };
+
+    const toUsage = (doc: any): any | null => {
+      const u = doc?.llm_usage;
+      if (!u || typeof u !== 'object') return null;
+      const total = Number((u as any).total_tokens);
+      if (!Number.isFinite(total)) return null;
+      return u;
+    };
+
+    const sumUsage = (parts: Array<any | null>) => {
+      const rows = parts.filter(Boolean) as any[];
+      if (rows.length === 0) return null;
+      const summed: any = {
+        input_tokens: 0,
+        output_tokens: 0,
+        total_tokens: 0,
+        calls_count: 0,
+      };
+      let cost = 0;
+      let hasCost = false;
+      for (const u of rows) {
+        summed.input_tokens += Number(u?.input_tokens) || 0;
+        summed.output_tokens += Number(u?.output_tokens) || 0;
+        summed.total_tokens += Number(u?.total_tokens) || 0;
+        summed.calls_count += Number(u?.calls_count) || 0;
+        if (Number.isFinite(Number(u?.cost_usd))) {
+          hasCost = true;
+          cost += Number(u.cost_usd);
+        }
+      }
+      if (hasCost) summed.cost_usd = cost;
+      return summed;
+    };
 
     const preflightExport = preflightRunMeta
       ? { meta: preflightRunMeta, result: preflightResult }
       : (preflightHistoryMeta && preflightHistoryResult ? { meta: preflightHistoryMeta, result: preflightHistoryResult } : null);
 
-    const report = {
+    const validationId = String((validationResult as any)?.validation_id || '').trim();
+    const preflightId = String((preflightRunMeta as any)?.preflight_id || (preflightHistoryMeta as any)?.preflight_id || '').trim();
+    const decompId = String(decompositionId || '').trim();
+
+    const [validationDoc, preflightDoc, decompDoc] = await Promise.all([
+      validationId ? fetchJson(`/api/v1/segments/validation/${encodeURIComponent(validationId)}`) : Promise.resolve(null),
+      preflightId ? fetchJson(`/api/v1/preflight/${encodeURIComponent(preflightId)}`) : Promise.resolve(null),
+      decompId ? fetchJson(`/api/v1/decomposition/${encodeURIComponent(decompId)}`) : Promise.resolve(null),
+    ]);
+
+    const usageValidation = toUsage(validationDoc);
+    const usagePreflight = toUsage(preflightDoc);
+    const usageDecomposition = toUsage(decompDoc);
+    const usageTotal = sumUsage([usageDecomposition, usagePreflight, usageValidation]);
+
+    const report: any = {
       exported_at: new Date().toISOString(),
       demo_mode: Boolean(validationResult.demo_mode),
       demo_focus: validationResult.demo_focus || null,
@@ -1007,6 +1065,17 @@ function App() {
       preflight: preflightExport,
       validation_result: validationResult,
     };
+
+    if (usageTotal) {
+      report._internal = {
+        llm_usage: {
+          decomposition: usageDecomposition,
+          preflight: usagePreflight,
+          validation: usageValidation,
+          total: usageTotal,
+        },
+      };
+    }
 
     const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json;charset=utf-8' });
     const url = URL.createObjectURL(blob);
@@ -1022,15 +1091,49 @@ function App() {
     URL.revokeObjectURL(url);
   };
 
-  const downloadPreflightJsonReport = () => {
+  const downloadPreflightJsonReport = async () => {
     if (!preflightHistoryResult) return;
-    const report = {
+
+    const fetchJson = async (url: string): Promise<any | null> => {
+      try {
+        const resp = await fetch(url, { method: 'GET' });
+        if (!resp.ok) return null;
+        return await resp.json();
+      } catch {
+        return null;
+      }
+    };
+
+    const toUsage = (doc: any): any | null => {
+      const u = doc?.llm_usage;
+      if (!u || typeof u !== 'object') return null;
+      const total = Number((u as any).total_tokens);
+      if (!Number.isFinite(total)) return null;
+      return u;
+    };
+
+    const preflightId = String((preflightHistoryMeta as any)?.preflight_id || (preflightHistoryMeta as any)?.id || '').trim();
+    const preflightDoc = preflightId
+      ? await fetchJson(`/api/v1/preflight/${encodeURIComponent(preflightId)}`)
+      : null;
+    const usagePreflight = toUsage(preflightDoc);
+
+    const report: any = {
       exported_at: new Date().toISOString(),
       preflight: {
         meta: preflightHistoryMeta || null,
         result: preflightHistoryResult,
       },
     };
+
+    if (usagePreflight) {
+      report._internal = {
+        llm_usage: {
+          preflight: usagePreflight,
+          total: usagePreflight,
+        },
+      };
+    }
     const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -1045,10 +1148,53 @@ function App() {
     URL.revokeObjectURL(url);
   };
 
-  const openPrintableReport = () => {
+  const openPrintableReport = async () => {
     if (!validationResult) return;
 
     const effectiveStats = effectiveCoverageStats ?? calculateEffectiveCoverageStatistics(validationResult, overallRequirementStatus);
+
+    const fetchJson = async (url: string): Promise<any | null> => {
+      try {
+        const resp = await fetch(url, { method: 'GET' });
+        if (!resp.ok) return null;
+        return await resp.json();
+      } catch {
+        return null;
+      }
+    };
+
+    const toUsage = (doc: any): any | null => {
+      const u = doc?.llm_usage;
+      if (!u || typeof u !== 'object') return null;
+      const total = Number((u as any).total_tokens);
+      if (!Number.isFinite(total)) return null;
+      return u;
+    };
+
+    const sumUsage = (parts: Array<any | null>) => {
+      const rows = parts.filter(Boolean) as any[];
+      if (rows.length === 0) return null;
+      const summed: any = {
+        input_tokens: 0,
+        output_tokens: 0,
+        total_tokens: 0,
+        calls_count: 0,
+      };
+      let cost = 0;
+      let hasCost = false;
+      for (const u of rows) {
+        summed.input_tokens += Number(u?.input_tokens) || 0;
+        summed.output_tokens += Number(u?.output_tokens) || 0;
+        summed.total_tokens += Number(u?.total_tokens) || 0;
+        summed.calls_count += Number(u?.calls_count) || 0;
+        if (Number.isFinite(Number(u?.cost_usd))) {
+          hasCost = true;
+          cost += Number(u.cost_usd);
+        }
+      }
+      if (hasCost) summed.cost_usd = cost;
+      return summed;
+    };
 
     const selectedIds = Array.isArray(lastApprovedSegmentIds) ? lastApprovedSegmentIds : [];
     const allSegments: any[] = Array.isArray(decompositionSnapshot?.segments) ? decompositionSnapshot.segments : [];
@@ -1073,6 +1219,21 @@ function App() {
     const preflightExport = preflightRunMeta
       ? { meta: preflightRunMeta, result: preflightResult }
       : (preflightHistoryMeta && preflightHistoryResult ? { meta: preflightHistoryMeta, result: preflightHistoryResult } : null);
+
+    const validationId = String((validationResult as any)?.validation_id || '').trim();
+    const preflightId = String((preflightRunMeta as any)?.preflight_id || (preflightHistoryMeta as any)?.preflight_id || '').trim();
+    const decompId = String(decompositionId || '').trim();
+
+    const [validationDoc, preflightDoc, decompDoc] = await Promise.all([
+      validationId ? fetchJson(`/api/v1/segments/validation/${encodeURIComponent(validationId)}`) : Promise.resolve(null),
+      preflightId ? fetchJson(`/api/v1/preflight/${encodeURIComponent(preflightId)}`) : Promise.resolve(null),
+      decompId ? fetchJson(`/api/v1/decomposition/${encodeURIComponent(decompId)}`) : Promise.resolve(null),
+    ]);
+
+    const usageValidation = toUsage(validationDoc);
+    const usagePreflight = toUsage(preflightDoc);
+    const usageDecomposition = toUsage(decompDoc);
+    const usageTotal = sumUsage([usageDecomposition, usagePreflight, usageValidation]);
 
     const apiVersion = 'v1';
     const fullPlanUrl = decompositionId
@@ -1117,6 +1278,39 @@ function App() {
     </table>` : `<div class="muted">אין תוצאות תנאי סף לשיתוף.</div>`}
   </div>
 ` : '';
+
+    const usageSection = usageTotal ? `
+  <div class="card">
+    <h2 style="margin:0 0 6px; font-size:16px;">שימוש בטוקנים (פנימי)</h2>
+    <div class="row">
+      <span class="pill">input_tokens: ${esc(usageTotal.input_tokens)}</span>
+      <span class="pill">output_tokens: ${esc(usageTotal.output_tokens)}</span>
+      <span class="pill">total_tokens: ${esc(usageTotal.total_tokens)}</span>
+      <span class="pill">calls_count: ${esc(usageTotal.calls_count)}</span>
+      ${Number.isFinite(Number(usageTotal.cost_usd)) ? `<span class="pill">cost_usd: ${esc(Number(usageTotal.cost_usd).toFixed(6))}</span>` : ''}
+    </div>
+    <div class="muted" style="margin-top:8px;">המידע מופיע רק בדוח להדפסה/ייצוא (PDF) ולשימוש פנימי לצרכי עלויות.</div>
+  </div>
+` : '';
+
+    const rawReport: any = {
+      exported_at: new Date().toISOString(),
+      decomposition_id: decompositionId,
+      selected_segment_ids: selectedIds,
+      decomposition: decompositionSnapshot,
+      preflight: preflightExport,
+      validation_result: validationResult,
+    };
+    if (usageTotal) {
+      rawReport._internal = {
+        llm_usage: {
+          decomposition: usageDecomposition,
+          preflight: usagePreflight,
+          validation: usageValidation,
+          total: usageTotal,
+        },
+      };
+    }
 
     const html = `<!doctype html>
 <html lang="he" dir="rtl">
@@ -1283,16 +1477,11 @@ function App() {
 
   ${preflightSection}
 
+  ${usageSection}
+
   <div class="card">
     <h2 style="margin:0 0 6px; font-size:16px;">Raw JSON (לשיתוף ולמידה)</h2>
-    <pre>${prettyJson({
-      exported_at: new Date().toISOString(),
-      decomposition_id: decompositionId,
-      selected_segment_ids: selectedIds,
-      decomposition: decompositionSnapshot,
-      preflight: preflightExport,
-      validation_result: validationResult,
-    })}</pre>
+    <pre>${prettyJson(rawReport)}</pre>
   </div>
 </body>
 </html>`;
@@ -1313,8 +1502,26 @@ function App() {
     }, 250);
   };
 
-  const openPrintablePreflightReport = () => {
+  const openPrintablePreflightReport = async () => {
     if (!preflightHistoryResult) return;
+
+    const fetchJson = async (url: string): Promise<any | null> => {
+      try {
+        const resp = await fetch(url, { method: 'GET' });
+        if (!resp.ok) return null;
+        return await resp.json();
+      } catch {
+        return null;
+      }
+    };
+
+    const toUsage = (doc: any): any | null => {
+      const u = doc?.llm_usage;
+      if (!u || typeof u !== 'object') return null;
+      const total = Number((u as any).total_tokens);
+      if (!Number.isFinite(total)) return null;
+      return u;
+    };
 
     const esc = (v: any) => String(v ?? '')
       .replace(/&/g, '&amp;')
@@ -1328,10 +1535,43 @@ function App() {
     const meta = preflightHistoryMeta || {};
     const checks = preflightHistoryResult.checks || [];
     const segments = Array.isArray(preflightHistorySegments) ? preflightHistorySegments : [];
+
+    const preflightId = String((preflightHistoryMeta as any)?.preflight_id || (preflightHistoryMeta as any)?.id || '').trim();
+    const preflightDoc = preflightId
+      ? await fetchJson(`/api/v1/preflight/${encodeURIComponent(preflightId)}`)
+      : null;
+    const usagePreflight = toUsage(preflightDoc);
     const getSegmentImageUrl = (segmentId: string) => {
       if (!meta?.decomposition_id || !segmentId) return null;
       return `/api/v1/decomposition/${encodeURIComponent(meta.decomposition_id)}/images/segments/${encodeURIComponent(segmentId)}`;
     };
+
+    const usageSection = usagePreflight ? `
+  <div class="card">
+    <h2 style="margin:0 0 6px; font-size:16px;">שימוש בטוקנים (פנימי)</h2>
+    <div class="row">
+      <span class="pill">input_tokens: ${esc(usagePreflight.input_tokens)}</span>
+      <span class="pill">output_tokens: ${esc(usagePreflight.output_tokens)}</span>
+      <span class="pill">total_tokens: ${esc(usagePreflight.total_tokens)}</span>
+      <span class="pill">calls_count: ${esc(usagePreflight.calls_count)}</span>
+      ${Number.isFinite(Number(usagePreflight.cost_usd)) ? `<span class="pill">cost_usd: ${esc(Number(usagePreflight.cost_usd).toFixed(6))}</span>` : ''}
+    </div>
+    <div class="muted" style="margin-top:8px;">המידע מופיע רק בדוח להדפסה/ייצוא (PDF) ולשימוש פנימי לצרכי עלויות.</div>
+  </div>
+` : '';
+
+    const rawReport: any = {
+      exported_at: new Date().toISOString(),
+      preflight: { meta, result: preflightHistoryResult },
+    };
+    if (usagePreflight) {
+      rawReport._internal = {
+        llm_usage: {
+          preflight: usagePreflight,
+          total: usagePreflight,
+        },
+      };
+    }
 
     const html = `<!doctype html>
 <html lang="he" dir="rtl">
@@ -1422,12 +1662,11 @@ function App() {
     ` : `<div class="muted">אין מידע על סגמנטים שנבדקו.</div>`}
   </div>
 
+  ${usageSection}
+
   <div class="card">
     <h2 style="margin:0 0 6px; font-size:16px;">Raw JSON (לשיתוף ולמידה)</h2>
-    <pre>${prettyJson({
-      exported_at: new Date().toISOString(),
-      preflight: { meta, result: preflightHistoryResult },
-    })}</pre>
+    <pre>${prettyJson(rawReport)}</pre>
   </div>
 </body>
 </html>`;
