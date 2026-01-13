@@ -18,6 +18,7 @@ from src.models.preflight import (
 )
 from src.services.submission_preflight import run_submission_preflight
 from src.utils.llm_usage import get_llm_usage_snapshot
+from src.utils.code_version import get_code_version
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -103,6 +104,7 @@ async def run_preflight(request: SubmissionPreflightRequest) -> SubmissionPrefli
             "summary": summary,
             "checks": [c.model_dump() for c in checks],
             "llm_usage": get_llm_usage_snapshot(),
+            "code_version": get_code_version(),
             "created_at": created_at,
             "plan_name": plan_name,
             "segment_count": segment_count,

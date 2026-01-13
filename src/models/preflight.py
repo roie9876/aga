@@ -46,7 +46,7 @@ class SubmissionPreflightRequest(BaseModel):
         description="Preflight mode. Typically 'segments' for the decomposition workflow.",
     )
     strict: bool = Field(
-        False,
+        True,
         description=(
             "If true, treat some otherwise-warning checks as failures (stricter gate before validation)."
         ),
@@ -84,5 +84,5 @@ class InlineSubmissionPreflightRequest(BaseModel):
 
     decomposition: Dict[str, Any] = Field(..., description="Decomposition document payload (type='decomposition')")
     approved_segment_ids: List[str] = Field(..., min_length=1, description="Approved segment IDs")
-    strict: bool = Field(False, description="Same as SubmissionPreflightRequest.strict")
+    strict: bool = Field(True, description="Same as SubmissionPreflightRequest.strict")
     run_llm_checks: bool = Field(True, description="Same as SubmissionPreflightRequest.run_llm_checks")

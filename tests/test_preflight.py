@@ -88,6 +88,63 @@ async def test_run_submission_preflight_strict_fails_when_mamad_missing() -> Non
     assert pf07.status in {PreflightStatus.FAILED, PreflightStatus.ERROR}
 
 
+@pytest.mark.asyncio
+async def test_preflight_pf05_ignores_door_detail_mislabeled_as_section() -> None:
+    from src.services.submission_preflight import run_submission_preflight
+    from src.models.preflight import PreflightStatus
+
+    decomposition = {
+        "id": "decomp-pf05-detail",
+        "type": "decomposition",
+        "segments": [
+            {"segment_id": "s-sec-1", "type": "section", "title": "חתך א-א"},
+            # Misclassified: this is a detail (door opening), not a true section.
+            {"segment_id": "s-sec-detail", "type": "section", "title": "פרט פתח דלת"},
+        ],
+    }
+
+    approved = [s["segment_id"] for s in decomposition["segments"]]
+    passed, checks = await run_submission_preflight(
+        decomposition=decomposition,
+        approved_segment_ids=approved,
+        strict=False,
+        run_llm_checks=False,
+    )
+
+    assert passed is False
+    pf05 = next((c for c in checks if c.check_id == "PF-05"), None)
+    assert pf05 is not None
+    assert pf05.status == PreflightStatus.FAILED
+
+
+@pytest.mark.asyncio
+async def test_preflight_pf06_ignores_door_detail_mislabeled_as_elevation() -> None:
+    from src.services.submission_preflight import run_submission_preflight
+    from src.models.preflight import PreflightStatus
+
+    decomposition = {
+        "id": "decomp-pf06-detail",
+        "type": "decomposition",
+        "segments": [
+            # Misclassified: this is a door opening detail, not a building elevation.
+            {"segment_id": "s-elev-detail", "type": "elevation", "title": "פרט פתח דלת 1:25"},
+        ],
+    }
+
+    approved = [s["segment_id"] for s in decomposition["segments"]]
+    passed, checks = await run_submission_preflight(
+        decomposition=decomposition,
+        approved_segment_ids=approved,
+        strict=False,
+        run_llm_checks=False,
+    )
+
+    assert passed is False
+    pf06 = next((c for c in checks if c.check_id == "PF-06"), None)
+    assert pf06 is not None
+    assert pf06.status == PreflightStatus.FAILED
+
+
 def test_preflight_route_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
     from src.api.main import app
     import src.api.routes.preflight as preflight_route

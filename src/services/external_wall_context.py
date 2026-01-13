@@ -20,6 +20,25 @@ from typing import Any, Dict, List, Optional
 _MAMAD_RE = re.compile(r"\bממ\"?ד\b|\bממד\b", re.IGNORECASE)
 
 
+def _extract_tag_names(tags: Any) -> set[str]:
+    """Return normalized tag names from analysis_data['content_tags'].
+
+    The pipeline historically stored tags as `list[str]`, but newer runs store
+    them as `list[dict]` objects with a `tag` field.
+    """
+    if not isinstance(tags, list):
+        return set()
+    out: set[str] = set()
+    for item in tags:
+        if isinstance(item, dict):
+            name = _norm_text(item.get("tag"))
+        else:
+            name = _norm_text(item)
+        if name:
+            out.add(name)
+    return out
+
+
 def _norm_text(value: Any) -> str:
     try:
         return str(value or "").strip()
@@ -71,6 +90,14 @@ class SegmentCandidate:
 
 
 def _is_floor_plan(candidate: SegmentCandidate) -> bool:
+    tags = _extract_tag_names(candidate.analysis_data.get("content_tags"))
+    # Strong tag signal
+    if "floor_plan" in tags:
+        return True
+    # If it's explicitly a MAMAD plan, treat it as not a floor plan for
+    # cross-segment inference purposes (even if segment_type is 'floor_plan').
+    if any(t in tags for t in ["mamad_plan_1_15", "mamad_wall_drop_plan"]):
+        return False
     if candidate.segment_type == "floor_plan":
         return True
     summary = candidate.analysis_data.get("summary")
@@ -91,6 +118,10 @@ def _is_floor_plan(candidate: SegmentCandidate) -> bool:
 def _is_mamad_reference(candidate: SegmentCandidate) -> bool:
     if _contains_mamad(candidate.description):
         return True
+    # Prefer explicit content tags (more reliable than OCR in some crops)
+    tag_set = _extract_tag_names(candidate.analysis_data.get("content_tags"))
+    if any(t in tag_set for t in ["mamad_plan_1_15", "mamad_wall_drop_plan"]):
+        return True
     corpus = _analysis_text_corpus(candidate.analysis_data)
     return _contains_mamad(corpus)
 
@@ -102,9 +133,16 @@ def select_floor_plan_candidate(candidates: List[SegmentCandidate]) -> Optional[
         return None
 
     def _score(c: SegmentCandidate) -> int:
+        tags = _extract_tag_names(c.analysis_data.get("content_tags"))
         score = 0
+        # Prefer explicit floor plan tag over the (often unreliable) segment_type.
+        if "floor_plan" in tags:
+            score += 6
         if c.segment_type == "floor_plan":
-            score += 3
+            score += 1
+        # Avoid accidentally picking a MAMAD 1:50 plan that was labeled as floor_plan.
+        if any(t in tags for t in ["mamad_plan_1_15", "mamad_wall_drop_plan"]):
+            score -= 10
         summary = c.analysis_data.get("summary")
         if isinstance(summary, dict) and _norm_text(summary.get("primary_function")).lower() == "floor_plan":
             score += 2
@@ -123,7 +161,16 @@ def select_mamad_reference_candidate(candidates: List[SegmentCandidate]) -> Opti
         return None
 
     def _score(c: SegmentCandidate) -> int:
+        tags = _extract_tag_names(c.analysis_data.get("content_tags"))
         score = 0
+        # Strongly prefer explicit MAMAD plan tags as the reference.
+        if "mamad_plan_1_15" in tags:
+            score += 8
+        if "mamad_wall_drop_plan" in tags:
+            score += 7
+        # Avoid using administrative pages as references.
+        if "permit_application_form" in tags:
+            score -= 5
         # Prefer non-floor-plan as the reference detail
         if c.segment_type != "floor_plan":
             score += 2
@@ -179,13 +226,9 @@ async def infer_external_wall_count(
     if analyzer is None:
         return None
 
-    # Prefer an explicit count already extracted from the floor-plan analysis.
-    direct = coerce_external_wall_count(floor_plan.analysis_data.get("external_wall_count"))
-    if direct is not None:
-        return direct
-    direct_after = coerce_external_wall_count(floor_plan.analysis_data.get("external_wall_count_after_exceptions"))
-    if direct_after is not None:
-        return direct_after
+    # Do NOT blindly trust a count extracted from the floor-plan base analysis.
+    # In practice the model may guess (e.g., defaulting to 4) without strong evidence.
+    # We prefer the dedicated cross-image inference that provides confidence + evidence.
 
     if not hasattr(analyzer, "infer_mamad_external_wall_count"):
         return None
@@ -230,12 +273,22 @@ async def infer_external_wall_context(
     if count is None:
         return None
 
+    confidence = _coerce_confidence(result.get("confidence"))
+    # Be conservative: only propagate a count when the model claims it's confident.
+    # This prevents cross-segment injection from amplifying a weak guess.
+    if confidence < 0.6:
+        return None
+
+    evidence = _coerce_evidence(result.get("evidence"))
+    if not evidence:
+        return None
+
     return {
         "external_wall_count": count,
         "internal_wall_count": coerce_external_wall_count(result.get("internal_wall_count")),
         "external_sides_hint": result.get("external_sides_hint") if isinstance(result.get("external_sides_hint"), list) else [],
-        "confidence": _coerce_confidence(result.get("confidence")),
-        "evidence": _coerce_evidence(result.get("evidence")),
+        "confidence": confidence,
+        "evidence": evidence,
         "source": "floor_plan_inference",
         "floor_plan_segment_id": floor_plan.segment_id,
         "mamad_reference_segment_id": mamad_reference.segment_id,
@@ -262,14 +315,28 @@ def inject_external_wall_count(
         if not isinstance(analysis_data, dict):
             continue
 
-        # If the segment already carries a count (or after-exceptions count), do not override.
+        # If the segment already carries a count (or after-exceptions count), do not override
+        # unless we have a high-confidence cross-segment inference.
         existing = coerce_external_wall_count(
             analysis_data.get("external_wall_count_after_exceptions")
         )
         if existing is None:
             existing = coerce_external_wall_count(analysis_data.get("external_wall_count"))
         if existing is not None:
-            continue
+            if not isinstance(context, dict):
+                continue
+            # Never override an already-inferred value.
+            if _norm_text(analysis_data.get("external_wall_count_source")) == "floor_plan_inference":
+                continue
+            inferred_conf = _coerce_confidence(context.get("confidence"))
+            inferred_count = coerce_external_wall_count(context.get("external_wall_count"))
+            if inferred_count is None:
+                continue
+            # Only override when the inferred result is confidently different.
+            if inferred_count == existing:
+                continue
+            if inferred_conf < 0.7:
+                continue
 
         analysis_data["external_wall_count"] = external_wall_count
         if isinstance(context, dict):
@@ -277,6 +344,8 @@ def inject_external_wall_count(
             analysis_data.setdefault("external_wall_count_confidence", context.get("confidence"))
             if isinstance(context.get("evidence"), list):
                 analysis_data.setdefault("external_wall_count_evidence", context.get("evidence"))
+            if isinstance(context.get("external_sides_hint"), list):
+                analysis_data.setdefault("external_sides_hint", context.get("external_sides_hint"))
             analysis_data.setdefault(
                 "external_wall_count_reference_segments",
                 {

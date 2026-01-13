@@ -22,6 +22,7 @@ from src.services.external_wall_context import (
     inject_external_wall_count,
 )
 from src.utils.llm_usage import get_llm_usage_snapshot
+from src.utils.code_version import get_code_version
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -69,6 +70,10 @@ class SegmentValidationResponse(BaseModel):
     """Response from segment validation."""
     validation_id: str = Field(..., description="Validation result ID")
     created_at: Optional[str] = Field(None, description="UTC timestamp when this validation run was created")
+    code_version: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Build signature for the code that produced this result (git sha, app version, build time).",
+    )
     total_segments: int = Field(..., description="Total segments validated")
     passed: int = Field(..., description="Segments that passed")
     failed: int = Field(..., description="Segments that failed")
@@ -248,6 +253,7 @@ async def validate_segments(request: SegmentValidationRequest):
             external_wall_ctx
             and isinstance(external_wall_ctx, dict)
             and external_wall_ctx.get("external_wall_count") is not None
+            and float(external_wall_ctx.get("confidence") or 0.0) >= 0.6
         ):
             inject_external_wall_count(
                 analyzed_segments=list(analysis_by_id.values()),
@@ -356,7 +362,26 @@ async def validate_segments(request: SegmentValidationRequest):
                     )
 
             # Walls
-            if ("walls" in effective_check_groups) or ("WALL_SECTION" in cat_upper):
+            # REQ 1.2 is often evidenced in a MAMAD top-view plan (1:50) which may be classified as ROOM_LAYOUT
+            # rather than WALL_SECTION. In that case, rely on content tags / relevant requirements to decide
+            # whether to run the focused wall-thickness extractor.
+            content_tags = []
+            if isinstance(data, dict) and isinstance(data.get("content_tags"), list):
+                content_tags = [str(x) for x in (data.get("content_tags") or [])]
+            relevant_reqs = []
+            if isinstance(data, dict):
+                cls_ctx = data.get("classification")
+                if isinstance(cls_ctx, dict) and isinstance(cls_ctx.get("relevant_requirements"), list):
+                    relevant_reqs = [str(x) for x in (cls_ctx.get("relevant_requirements") or [])]
+
+            run_wall_focus = (
+                ("walls" in effective_check_groups)
+                or ("WALL_SECTION" in cat_upper)
+                or ("1.2" in relevant_reqs)
+                or any(t in content_tags for t in ["mamad_plan_1_15", "mamad_wall_drop_plan"])
+            )
+
+            if run_wall_focus:
                 try:
                     wall_focus = await analyzer.extract_wall_thickness(
                         segment_id=str(seg.get("segment_id")),
@@ -761,6 +786,7 @@ async def validate_segments(request: SegmentValidationRequest):
             "project_id": decomposition.get("project_id"),
             "analyzed_segments": analyzed_segments,
             "llm_usage": get_llm_usage_snapshot(),
+            "code_version": get_code_version(),
             "demo_mode": request.demo_mode,
             "demo_focus": demo_focus_note,
             "created_at": created_at,
@@ -803,6 +829,7 @@ async def validate_segments(request: SegmentValidationRequest):
         return {
             "validation_id": validation_id,
             "created_at": created_at,
+            "code_version": get_code_version(),
             "total_segments": len(approved_segments),
             "passed": passed,
             "failed": failed,
@@ -1234,7 +1261,24 @@ async def validate_segments_stream(request: SegmentValidationRequest):
                                 )
                             )
 
-                    if ("walls" in effective_check_groups) or ("WALL_SECTION" in cat_upper):
+                    base = analysis_result.get("analysis_data") or {}
+                    content_tags = []
+                    relevant_reqs = []
+                    if isinstance(base, dict) and isinstance(base.get("content_tags"), list):
+                        content_tags = [str(x) for x in (base.get("content_tags") or [])]
+                    if isinstance(base, dict):
+                        cls_ctx = base.get("classification")
+                        if isinstance(cls_ctx, dict) and isinstance(cls_ctx.get("relevant_requirements"), list):
+                            relevant_reqs = [str(x) for x in (cls_ctx.get("relevant_requirements") or [])]
+
+                    run_wall_focus = (
+                        ("walls" in effective_check_groups)
+                        or ("WALL_SECTION" in cat_upper)
+                        or ("1.2" in relevant_reqs)
+                        or any(t in content_tags for t in ["mamad_plan_1_15", "mamad_wall_drop_plan"])
+                    )
+
+                    if run_wall_focus:
                         events.append(_ndjson({"event": "wall_focus_start", "segment_id": seg_id}))
                         try:
                             wall_focus = await analyzer.extract_wall_thickness(
@@ -1243,8 +1287,6 @@ async def validate_segments_stream(request: SegmentValidationRequest):
                                 segment_type=segment.get("type", "unknown"),
                                 segment_description=segment.get("description", ""),
                             )
-
-                            base = analysis_result.get("analysis_data") or {}
                             wall_count = 0
                             if isinstance(base, dict) and isinstance(wall_focus, dict):
                                 base.setdefault("wall_thickness_focus", wall_focus.get("wall_thickness_focus"))
@@ -1656,6 +1698,7 @@ async def validate_segments_stream(request: SegmentValidationRequest):
             "project_id": decomposition.get("project_id"),
             "analyzed_segments": analyzed_segments,
             "llm_usage": get_llm_usage_snapshot(),
+            "code_version": get_code_version(),
             "demo_mode": request.demo_mode,
             "demo_focus": demo_focus_note,
             "check_groups": effective_check_groups,
@@ -1677,6 +1720,7 @@ async def validate_segments_stream(request: SegmentValidationRequest):
         result = {
             "validation_id": validation_id,
             "created_at": created_at,
+            "code_version": get_code_version(),
             "total_segments": total,
             "passed": passed,
             "failed": failed,

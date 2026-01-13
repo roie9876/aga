@@ -701,7 +701,7 @@ Return JSON:
       {{
         "thickness_cm": 0.0,
         "confidence": 0.0,
-        "location": "short description",
+                "location": "short description",
         "evidence": ["evidence strings"]
       }}
     ]
@@ -711,6 +711,10 @@ Return JSON:
 
 Rules:
 - If units are absent, assume cm.
+- If possible, include a SIDE hint relative to the ממ"ד room in `location`:
+    - Use one of: left/right/top/bottom (or Hebrew: שמאל/ימין/עליון/תחתון)
+    - Example locations: "left wall (שמאל)", "top wall ליד חלון", "right wall ליד דלת"
+- Do NOT guess outside/inside here unless the drawing explicitly shows it.
 - If unsure, include best candidates with confidence < 0.7."""
 
         extracted = await self._run_focused_extraction(
@@ -1080,10 +1084,15 @@ MAMAD reference description: {mamad_segment_description}
 Rules:
 - External wall = a wall segment of the ממ\"ד that borders the outside/facade (the building envelope) in the floor plan.
 - Internal wall = borders interior spaces (other rooms, corridor, shafts) in the floor plan.
+- Do NOT assume that all four walls are external. Many ממ"ד rooms have only 1 external wall.
+- Only return a non-null count if you can point to visible envelope/outside adjacency evidence.
 - Heuristic fallback when the envelope is unclear:
-  - A wall with a window opening is very likely external.
-  - A wall with the ממ\"ד door is very likely internal.
-  - Use these hints to infer the most plausible TOTAL external wall count if the envelope cannot be traced.
+    - A wall with a window opening is very likely external.
+    - A wall with the ממ\"ד door is very likely internal.
+    - IMPORTANT: If you can confidently identify EXACTLY ONE window wall, treat that as the ONLY external wall
+        UNLESS the building envelope/outside adjacency is clearly visible for additional sides.
+    - If you cannot trace the envelope clearly beyond the window/door hints, prefer returning null (confidence < 0.6)
+        over guessing multiple external walls.
 - Count TOTAL external walls of the ממ\"ד as an integer in [1..4].
 - If you cannot determine confidently, return null and set confidence < 0.6.
 
@@ -1092,6 +1101,8 @@ Return JSON:
   "external_wall_count": null,
   "internal_wall_count": null,
   "external_sides_hint": ["left", "right", "top", "bottom"],
+    "window_sides_detected": ["left", "right", "top", "bottom"],
+    "door_sides_detected": ["left", "right", "top", "bottom"],
   "confidence": 0.0,
   "evidence": ["short evidence strings (what you saw)"]
 }}"""
@@ -1125,10 +1136,15 @@ MAMAD reference description: {mamad_segment_description}
 Rules:
 - External wall = a wall segment of the ממ\"ד that borders the outside/facade (the building envelope) in the floor plan.
 - Internal wall = borders interior spaces (other rooms, corridor, shafts) in the floor plan.
+- Do NOT assume that all four walls are external. Many ממ"ד rooms have only 1 external wall.
+- Only return a non-null count if you can point to visible envelope/outside adjacency evidence.
 - Heuristic fallback when the envelope is unclear:
-  - A wall with a window opening is very likely external.
-  - A wall with the ממ\"ד door is very likely internal.
-  - Use these hints to infer the most plausible TOTAL external wall count if the envelope cannot be traced.
+    - A wall with a window opening is very likely external.
+    - A wall with the ממ\"d door is very likely internal.
+    - IMPORTANT: If you can confidently identify EXACTLY ONE window wall, treat that as the ONLY external wall
+        UNLESS the building envelope/outside adjacency is clearly visible for additional sides.
+    - If you cannot trace the envelope clearly beyond the window/door hints, prefer returning null (confidence < 0.6)
+        over guessing multiple external walls.
 - Count TOTAL external walls of the ממ\"ד as an integer in [1..4].
 - If you cannot determine confidently, return null and set confidence < 0.6.
 
@@ -1137,6 +1153,8 @@ Return JSON:
   "external_wall_count": null,
   "internal_wall_count": null,
   "external_sides_hint": ["left", "right", "top", "bottom"],
+    "window_sides_detected": ["left", "right", "top", "bottom"],
+    "door_sides_detected": ["left", "right", "top", "bottom"],
   "confidence": 0.0,
   "evidence": ["short evidence strings (what you saw)"]
 }}"""

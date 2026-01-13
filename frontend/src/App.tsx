@@ -890,7 +890,7 @@ function App() {
           decomposition_id: decompositionId,
           approved_segment_ids: params.approvedSegments,
           mode: 'segments',
-          strict: false,
+          strict: true,
           run_llm_checks: true,
         }),
       });
@@ -1050,6 +1050,14 @@ function App() {
       decompId ? fetchJson(`/api/v1/decomposition/${encodeURIComponent(decompId)}`) : Promise.resolve(null),
     ]);
 
+    const codeVersion = (
+      (validationDoc as any)?.code_version && typeof (validationDoc as any).code_version === 'object'
+        ? (validationDoc as any).code_version
+        : ((validationResult as any)?.code_version && typeof (validationResult as any).code_version === 'object'
+          ? (validationResult as any).code_version
+          : null)
+    );
+
     const usageValidation = toUsage(validationDoc);
     const usagePreflight = toUsage(preflightDoc);
     const usageDecomposition = toUsage(decompDoc);
@@ -1057,6 +1065,7 @@ function App() {
 
     const report: any = {
       exported_at: new Date().toISOString(),
+      code_version: codeVersion,
       demo_mode: Boolean(validationResult.demo_mode),
       demo_focus: validationResult.demo_focus || null,
       decomposition_id: decompositionId,
@@ -1117,9 +1126,15 @@ function App() {
       ? await fetchJson(`/api/v1/preflight/${encodeURIComponent(preflightId)}`)
       : null;
     const usagePreflight = toUsage(preflightDoc);
+    const codeVersion = (
+      (preflightDoc as any)?.code_version && typeof (preflightDoc as any).code_version === 'object'
+        ? (preflightDoc as any).code_version
+        : null
+    );
 
     const report: any = {
       exported_at: new Date().toISOString(),
+      code_version: codeVersion,
       preflight: {
         meta: preflightHistoryMeta || null,
         result: preflightHistoryResult,
@@ -1230,6 +1245,18 @@ function App() {
       decompId ? fetchJson(`/api/v1/decomposition/${encodeURIComponent(decompId)}`) : Promise.resolve(null),
     ]);
 
+    const codeVersion = (
+      (validationDoc as any)?.code_version && typeof (validationDoc as any).code_version === 'object'
+        ? (validationDoc as any).code_version
+        : ((validationResult as any)?.code_version && typeof (validationResult as any).code_version === 'object'
+          ? (validationResult as any).code_version
+          : null)
+    );
+    const codeVersionText = codeVersion
+      ? (String((codeVersion as any).git_sha_short || (codeVersion as any).git_sha || (codeVersion as any).app_version || '').trim()
+        || JSON.stringify(codeVersion))
+      : '';
+
     const usageValidation = toUsage(validationDoc);
     const usagePreflight = toUsage(preflightDoc);
     const usageDecomposition = toUsage(decompDoc);
@@ -1295,6 +1322,7 @@ function App() {
 
     const rawReport: any = {
       exported_at: new Date().toISOString(),
+      code_version: codeVersion,
       decomposition_id: decompositionId,
       selected_segment_ids: selectedIds,
       decomposition: decompositionSnapshot,
@@ -1343,6 +1371,7 @@ function App() {
     <div class="row">
       <span class="pill">מזהה בדיקה: ${esc(validationResult.validation_id || '')}</span>
       <span class="pill">תאריך בדיקה: ${esc(new Date(validationResult.created_at || Date.now()).toLocaleString('he-IL'))}</span>
+      ${codeVersionText ? `<span class="pill">גרסת קוד: ${esc(codeVersionText)}</span>` : ''}
       <span class="pill">מזהה פירוק: ${esc(decompositionId || '')}</span>
       <span class="pill">סגמנטים שנותחו: ${esc(validationResult.total_segments ?? analyzedSegments.length ?? '')}</span>
       <span class="pill">דרישות שעברו: ${esc(effectiveStats.passed || 0)}</span>
@@ -1541,6 +1570,15 @@ function App() {
       ? await fetchJson(`/api/v1/preflight/${encodeURIComponent(preflightId)}`)
       : null;
     const usagePreflight = toUsage(preflightDoc);
+    const codeVersion = (
+      (preflightDoc as any)?.code_version && typeof (preflightDoc as any).code_version === 'object'
+        ? (preflightDoc as any).code_version
+        : null
+    );
+    const codeVersionText = codeVersion
+      ? (String((codeVersion as any).git_sha_short || (codeVersion as any).git_sha || (codeVersion as any).app_version || '').trim()
+        || JSON.stringify(codeVersion))
+      : '';
     const getSegmentImageUrl = (segmentId: string) => {
       if (!meta?.decomposition_id || !segmentId) return null;
       return `/api/v1/decomposition/${encodeURIComponent(meta.decomposition_id)}/images/segments/${encodeURIComponent(segmentId)}`;
@@ -1562,6 +1600,7 @@ function App() {
 
     const rawReport: any = {
       exported_at: new Date().toISOString(),
+      code_version: codeVersion,
       preflight: { meta, result: preflightHistoryResult },
     };
     if (usagePreflight) {
@@ -1602,6 +1641,7 @@ function App() {
     <div class="row">
       ${meta.preflight_id ? `<span class="pill">מזהה: ${esc(meta.preflight_id)}</span>` : ''}
       ${meta.created_at ? `<span class="pill">תאריך: ${esc(meta.created_at)}</span>` : ''}
+      ${codeVersionText ? `<span class="pill">גרסת קוד: ${esc(codeVersionText)}</span>` : ''}
       ${meta.decomposition_id ? `<span class="pill">מזהה פירוק: ${esc(meta.decomposition_id)}</span>` : ''}
       ${typeof meta.segment_count === 'number' ? `<span class="pill">סגמנטים: ${meta.segment_count}</span>` : ''}
       ${preflightHistoryResult.passed ? `<span class="pill">סטטוס: עבר</span>` : `<span class="pill">סטטוס: נכשל</span>`}
@@ -2323,7 +2363,8 @@ function App() {
                         const failedReqs = reqEvals
                           .filter((e: any) => e && e.status === 'failed' && typeof e.requirement_id === 'string')
                           .map((e: any) => e.requirement_id as string);
-                        const hasLocalFailures = failedReqs.length > 0 || filteredViolations.length > 0;
+                        const failedReqsFiltered = failedReqs.filter((rid: string) => overallRequirementStatus[rid] !== 'passed');
+                        const hasLocalFailures = failedReqsFiltered.length > 0 || filteredViolations.length > 0;
 
                         const checkedReqs: string[] = Array.isArray(validation.checked_requirements)
                           ? (validation.checked_requirements as string[])
@@ -2688,6 +2729,37 @@ function App() {
                                     </div>
                                   </div>
                                 )}
+
+                                {/* Failures without explicit violations (evidence-first) */}
+                                {filteredViolations.length === 0 && (() => {
+                                  const reqEvals: any[] = Array.isArray((validation as any)?.requirement_evaluations)
+                                    ? ((validation as any).requirement_evaluations as any[])
+                                    : [];
+
+                                  const failedReqs = reqEvals
+                                    .filter((e: any) => e && e.status === 'failed' && typeof e.requirement_id === 'string')
+                                    .map((e: any) => e.requirement_id as string);
+
+                                  const failedReqsFiltered = failedReqs.filter((rid: string) => overallRequirementStatus[rid] !== 'passed');
+
+                                  if (failedReqsFiltered.length === 0) return null;
+
+                                  return (
+                                    <div className="bg-error/5 border border-error/20 rounded-lg p-4">
+                                      <div className="flex items-start gap-3">
+                                        <AlertCircle className="w-5 h-5 text-error shrink-0 mt-0.5" />
+                                        <div>
+                                          <h5 className="text-sm font-semibold text-error mb-1">
+                                            נמצאו כשלים בדרישות שנבדקו
+                                          </h5>
+                                          <p className="text-xs text-text-muted">
+                                            דרישות שנכשלו: {failedReqsFiltered.join(', ')}
+                                          </p>
+                                        </div>
+                                      </div>
+                                    </div>
+                                  );
+                                })()}
                                 
                                 {/* Success Message with Details */}
                                 {validation.passed && (!validation.violations || validation.violations.length === 0) && (

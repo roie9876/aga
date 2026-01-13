@@ -960,6 +960,65 @@ def _has_rishuy_zamin_decision(text: str) -> bool:
     return has_system and has_decision
 
 
+def _is_detail_like_section_candidate(seg: Dict[str, Any]) -> bool:
+    """Heuristic filter for PF-05.
+
+    Some decompositions may mislabel door/window/opening details as `section`.
+    For preflight, we prefer to exclude those from the "2 sections" requirement.
+    """
+
+    # IMPORTANT: don't include seg['type'] in the corpus here.
+    # In preflight we are explicitly trying to correct cases where `type` is wrong.
+    parts: List[str] = []
+    parts.append(_norm(seg.get("title")))
+    parts.append(_norm(seg.get("description")))
+    parts.extend(_extract_checkable_text_items(seg))
+    for item in _extract_ocr_items(seg):
+        if isinstance(item, dict) and isinstance(item.get("text"), str):
+            parts.append(item["text"])
+
+    normalized = _normalize_text_for_tags("\n".join([p for p in parts if p]))
+    compact = re.sub(r"\s+", "", normalized)
+
+    # If the segment clearly claims to be a section, keep it.
+    if any(tok in normalized for tok in ["חתך", "section"]):
+        return False
+
+    # Common signals for details around openings (e.g., "פרט פתח דלת").
+    has_detail = any(tok in normalized for tok in ["פרט", "detail", "פרטים"])
+    has_opening = any(tok in normalized for tok in ["פתח", "חלון", "משקוף", "מסגרת"]) or ("דלת" in normalized) or ("דלת" in compact)
+
+    return has_detail and has_opening
+
+
+def _is_detail_like_elevation_candidate(seg: Dict[str, Any]) -> bool:
+    """Heuristic filter for PF-06.
+
+    Some decompositions may mislabel opening details (door/window) as `elevation`.
+    For preflight we prefer to exclude those from the "elevations 1:100" requirement.
+    """
+
+    parts: List[str] = []
+    parts.append(_norm(seg.get("title")))
+    parts.append(_norm(seg.get("description")))
+    parts.extend(_extract_checkable_text_items(seg))
+    for item in _extract_ocr_items(seg):
+        if isinstance(item, dict) and isinstance(item.get("text"), str):
+            parts.append(item["text"])
+
+    normalized = _normalize_text_for_tags("\n".join([p for p in parts if p]))
+    compact = re.sub(r"\s+", "", normalized)
+
+    # If the segment clearly claims to be an elevation/facade, keep it.
+    if any(tok in normalized for tok in ["חזית", "elevation", "facade"]):
+        return False
+
+    has_detail = any(tok in normalized for tok in ["פרט", "detail", "פרטים"])
+    has_opening = any(tok in normalized for tok in ["פתח", "חלון", "משקוף", "מסגרת"]) or ("דלת" in normalized) or ("דלת" in compact)
+
+    return has_detail and has_opening
+
+
 def _has_any_dimension(seg: Dict[str, Any]) -> bool:
     ad = seg.get("analysis_data")
     if not isinstance(ad, dict):
@@ -1010,8 +1069,14 @@ async def run_submission_preflight(
             if _is_drawing_like(s) and not _is_site_plan_like(s)
         ]
         floor_plan_candidates = _unique_segments(fallback)
-    section_candidates = _unique_segments(by_type.get(SegmentType.SECTION, []))
-    elevation_candidates = _unique_segments(by_type.get(SegmentType.ELEVATION, []))
+    sections_filtered = [
+        s for s in by_type.get(SegmentType.SECTION, []) if not _is_detail_like_section_candidate(s)
+    ]
+    section_candidates = _unique_segments(sections_filtered)
+    elevations_filtered = [
+        s for s in by_type.get(SegmentType.ELEVATION, []) if not _is_detail_like_elevation_candidate(s)
+    ]
+    elevation_candidates = _unique_segments(elevations_filtered)
     mamad_keyword = [
         s
         for s in approved_segments
@@ -1186,16 +1251,20 @@ async def run_submission_preflight(
     )
 
     # PF-05: at least 2 sections
-    sections = by_type.get(SegmentType.SECTION, [])
+    sections = sections_filtered
     llm_sections = llm_results.get("PF-05", {})
     if llm_sections:
+        allowed_section_ids = {str(s.get("segment_id")) for s in sections if s.get("segment_id")}
         section_ids = [
-            seg_id for seg_id, data in llm_sections.items() if data.get("section_present") is True
+            seg_id
+            for seg_id, data in llm_sections.items()
+            if data.get("section_present") is True and seg_id in allowed_section_ids
         ]
         section_scale_ids = [
             seg_id
             for seg_id, data in llm_sections.items()
             if data.get("section_present") is True and data.get("scale_1_100_present") is True
+            and seg_id in allowed_section_ids
         ]
         status = PreflightStatus.PASSED if len(section_scale_ids) >= 2 else PreflightStatus.FAILED
         if len(section_scale_ids) >= 2:
@@ -1227,16 +1296,20 @@ async def run_submission_preflight(
     )
 
     # PF-06: at least one elevation
-    elevations = by_type.get(SegmentType.ELEVATION, [])
+    elevations = elevations_filtered
     llm_elev = llm_results.get("PF-06", {})
     if llm_elev:
+        allowed_elev_ids = {str(s.get("segment_id")) for s in elevations if s.get("segment_id")}
         elev_ids = [
-            seg_id for seg_id, data in llm_elev.items() if data.get("elevation_present") is True
+            seg_id
+            for seg_id, data in llm_elev.items()
+            if data.get("elevation_present") is True and seg_id in allowed_elev_ids
         ]
         elev_scale_ids = [
             seg_id
             for seg_id, data in llm_elev.items()
             if data.get("elevation_present") is True and data.get("scale_1_100_present") is True
+            and seg_id in allowed_elev_ids
         ]
         status = PreflightStatus.PASSED if elev_scale_ids else PreflightStatus.FAILED
         details = (
