@@ -332,8 +332,30 @@ def inject_external_wall_count(
             inferred_count = coerce_external_wall_count(context.get("external_wall_count"))
             if inferred_count is None:
                 continue
-            # Only override when the inferred result is confidently different.
+            # If the inferred result matches the existing count, we still want to enrich
+            # the analysis with provenance + side hints (helps REQ 1.2 wall classification).
             if inferred_count == existing:
+                did_enrich = False
+                if not _norm_text(analysis_data.get("external_wall_count_source")) and context.get("source"):
+                    analysis_data["external_wall_count_source"] = context.get("source")
+                    did_enrich = True
+                if analysis_data.get("external_wall_count_confidence") is None and context.get("confidence") is not None:
+                    analysis_data["external_wall_count_confidence"] = context.get("confidence")
+                    did_enrich = True
+                if not isinstance(analysis_data.get("external_wall_count_evidence"), list) and isinstance(context.get("evidence"), list):
+                    analysis_data["external_wall_count_evidence"] = context.get("evidence")
+                    did_enrich = True
+                if (not isinstance(analysis_data.get("external_sides_hint"), list) or not analysis_data.get("external_sides_hint")) and isinstance(context.get("external_sides_hint"), list):
+                    analysis_data["external_sides_hint"] = context.get("external_sides_hint")
+                    did_enrich = True
+                if not isinstance(analysis_data.get("external_wall_count_reference_segments"), dict):
+                    analysis_data["external_wall_count_reference_segments"] = {
+                        "floor_plan_segment_id": context.get("floor_plan_segment_id"),
+                        "mamad_reference_segment_id": context.get("mamad_reference_segment_id"),
+                    }
+                    did_enrich = True
+                if did_enrich:
+                    updated += 1
                 continue
             if inferred_conf < 0.7:
                 continue

@@ -701,13 +701,13 @@ class MamadValidator:
             t = (text or "").lower()
             sides: set[str] = set()
             # Hebrew
-            if any(k in t for k in ["שמאל", "צד שמאל", "קיר שמאל", "שמאלה"]):
+            if any(k in t for k in ["שמאל", "שמאלי", "צד שמאל", "קיר שמאל", "שמאלה", "מערב", "מערבי"]):
                 sides.add("left")
-            if any(k in t for k in ["ימין", "צד ימין", "קיר ימין", "ימינה"]):
+            if any(k in t for k in ["ימין", "ימני", "צד ימין", "קיר ימין", "ימינה", "מזרח", "מזרחי"]):
                 sides.add("right")
             if any(k in t for k in ["עליון", "למעלה", "צד עליון", "קיר עליון", "צפון"]):
                 sides.add("top")
-            if any(k in t for k in ["תחתון", "למטה", "צד תחתון", "קיר תחתון", "דרום"]):
+            if any(k in t for k in ["תחתון", "למטה", "צד תחתון", "קיר תחתון", "דרום", "דרומי"]):
                 sides.add("bottom")
             # English
             if "left" in t:
@@ -923,29 +923,54 @@ class MamadValidator:
 
         # Prefer an explicitly extracted external-wall count AFTER applying counting exceptions (1.1–1.3).
         # This supports the updated spec in requirements-mamad.md where 1.2 depends on the *final* count.
-        external_wall_count_raw = None
+        # IMPORTANT: Some pipelines populate keys like `external_wall_count_after_exceptions` with None.
+        # Do not treat a present-but-null key as authoritative.
+        external_wall_count_source = str(data.get("external_wall_count_source") or "").strip()
+        external_wall_count_confidence = data.get("external_wall_count_confidence")
+        external_wall_count_evidence = data.get("external_wall_count_evidence")
+        if not isinstance(external_wall_count_evidence, list):
+            external_wall_count_evidence = []
+
+        def _coerce_count(v: Any) -> Optional[int]:
+            if v is None:
+                return None
+            if isinstance(v, bool):
+                return None
+            if isinstance(v, int):
+                return v
+            if isinstance(v, float):
+                if v.is_integer():
+                    return int(v)
+                return None
+            if isinstance(v, str):
+                t = v.strip()
+                if t.isdigit():
+                    try:
+                        return int(t)
+                    except Exception:
+                        return None
+            return None
+
         external_wall_count_key_used: Optional[str] = None
+        num_external_known: Optional[int] = None
         for key in [
             "external_wall_count_after_exceptions",
             "external_wall_count_final",
             "external_wall_count_post_exceptions",
             "external_wall_count",
         ]:
-            if key in data:
-                external_wall_count_raw = data.get(key)
+            if key not in data:
+                continue
+            raw = data.get(key)
+            coerced = _coerce_count(raw)
+            if coerced is None:
+                continue
+            if 1 <= coerced <= 4:
+                num_external_known = coerced
                 external_wall_count_key_used = key
                 break
-        num_external_known: Optional[int] = None
-        if isinstance(external_wall_count_raw, int) and 1 <= external_wall_count_raw <= 4:
-            num_external_known = external_wall_count_raw
 
         base_external_wall_count = data.get("external_wall_count") if isinstance(data.get("external_wall_count"), int) else None
-
-        external_wall_count_source = str(data.get("external_wall_count_source") or "").strip()
-        external_wall_count_confidence = data.get("external_wall_count_confidence")
-        external_wall_count_evidence = data.get("external_wall_count_evidence")
-        if not isinstance(external_wall_count_evidence, list):
-            external_wall_count_evidence = []
 
         # Optional cross-segment hints (from floor plan inference): which SIDES of the ממ"ד are external.
         # This helps classify walls in the detailed MAMAD plan when thickness callouts include a side hint.
