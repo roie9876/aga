@@ -885,15 +885,31 @@ class MamadValidator:
             if any(m.lower() in combined_lower for m in internal_markers):
                 return "internal"
 
-            # Avoid treating hedged/uncertain descriptions as explicit external classification.
+            # Explicit external markers (with conservative hedge handling).
             # In top-view segments, do NOT trust "external" labels unless we also have an
             # injected external-sides hint from a floor-plan inference. This prevents false
             # failures when OCR/labels are ambiguous on floor plans or mixed sheets.
-            if not _is_hedged_text(combined_lower):
-                if any(m.lower() in combined_lower for m in external_markers):
-                    if floor_plan_like and not external_sides_hint:
-                        return "unknown"
-                    return "external"
+            if any(m.lower() in combined_lower for m in external_markers):
+                if floor_plan_like and not external_sides_hint:
+                    return "unknown"
+
+                # If we have inferred external sides and this wall has a side hint that does NOT match,
+                # do not trust the textual "external" label (it is often mis-applied by the LLM).
+                side_hints_for_marker: set[str] = set()
+                side_hints_for_marker |= _infer_sides_from_text(location_text)
+                side_hints_for_marker |= _infer_sides_from_text(str(wall.get("notes") or ""))
+                if isinstance(ev_items, list):
+                    side_hints_for_marker |= _infer_sides_from_any(ev_items)
+                if side_hints_for_marker and external_sides_hint and not (side_hints_for_marker & external_sides_hint):
+                    return "unknown"
+
+                # If the model hedges on a sub-25cm thickness, do not accept it as explicit external.
+                # But for >=25cm, allow explicit external labels even if phrased as "סביר/ייתכן".
+                thickness_for_marker = self._extract_dimension_value(wall.get("thickness"), "cm")
+                if _is_hedged_text(combined_lower) and (thickness_for_marker is None or thickness_for_marker < 25):
+                    return "unknown"
+
+                return "external"
 
             # Side-hint inference from wall context (location/notes/evidence)
             wall_side_hints: set[str] = set()
@@ -905,18 +921,18 @@ class MamadValidator:
             # If we have external side hints from the floor plan, use them as a strong signal.
             # Only act when the wall itself carries side hints.
             if wall_side_hints and external_sides_hint:
-                if wall_side_hints & door_sides:
+                if wall_side_hints & door_sides_effective:
                     return "internal"
                 if wall_side_hints & external_sides_hint:
                     return "external"
 
             # Door/window rule-of-thumb (when a side can be inferred)
-            if wall_side_hints and (wall_side_hints & door_sides):
+            if wall_side_hints and (wall_side_hints & door_sides_effective):
                 return "internal"
 
             # A thickness callout referencing multiple sides is usually a perimeter (external) wall set.
             # Do NOT assume a single-side callout is external just because a window exists on that side.
-            if len(wall_side_hints) >= 2 and not (wall_side_hints & door_sides):
+            if len(wall_side_hints) >= 2 and not (wall_side_hints & door_sides_effective):
                 return "external"
 
             return "unknown"
@@ -1036,21 +1052,129 @@ class MamadValidator:
         # If the window side is confidently identifiable (single side) and it conflicts with the inferred hints,
         # prefer the window side for *side mapping*.
         external_sides_hint_override_note: Optional[str] = None
+        external_sides_hint_overridden: bool = False
         window_side_single: Optional[str] = None
         if len(window_sides) == 1:
             window_side_single = next(iter(window_sides))
 
+        strong_window_signal = bool(has_mamad_window_marker or window_external_marker_present or has_sliding_window_marker)
+
+        # If the inferred external sides would classify a <25cm wall as external, it's a high-risk scenario
+        # for false failures/not_checked when side mapping is inconsistent. In that case, allow a single
+        # window side (when present) to override the inferred mapping.
+        thin_wall_on_inferred_external_side = False
+        if isinstance(elements, list) and external_sides_hint:
+            for el in elements[:40]:
+                if not isinstance(el, dict):
+                    continue
+                if str(el.get("type") or "").lower() != "wall":
+                    continue
+                thickness_raw = el.get("thickness")
+                thickness_cm = self._extract_dimension_value(thickness_raw, "cm")
+                if thickness_cm is None:
+                    continue
+                if thickness_cm >= 25:
+                    continue
+                loc = str(el.get("location") or "")
+                notes = str(el.get("notes") or "")
+                ev_items = el.get("evidence")
+                ev_text = ""
+                if isinstance(ev_items, list):
+                    ev_text = " ".join([str(x) for x in ev_items])
+                combined = f"{loc} {notes} {ev_text}".lower()
+                if _is_hedged_text(combined):
+                    continue
+                side_hints = set()
+                side_hints |= _infer_sides_from_text(loc)
+                side_hints |= _infer_sides_from_text(notes)
+                if isinstance(ev_items, list):
+                    side_hints |= _infer_sides_from_any(ev_items)
+                if side_hints and (side_hints & external_sides_hint):
+                    thin_wall_on_inferred_external_side = True
+                    break
+
         if (
             window_side_single
             and external_sides_hint
-            and window_side_single not in external_sides_hint
             and external_wall_count_source == "floor_plan_inference"
+            and (
+                (
+                    window_side_single not in external_sides_hint
+                    and (
+                        (num_external_known is not None and num_external_known >= 3)
+                        or thin_wall_on_inferred_external_side
+                    )
+                )
+                or (
+                    external_context_conflict
+                    and strong_window_signal
+                    and len(external_sides_hint) > 1
+                    and (
+                        (num_external_known is not None and num_external_known >= 3)
+                        or thin_wall_on_inferred_external_side
+                    )
+                )
+            )
         ):
             external_sides_hint_override_note = (
                 "זוהתה סתירה בין 'רמז צד קיר חיצוני' מתכנית הקומה לבין צד החלון בתכנית הממ\"ד. "
                 f"לצורך שיוך עובי קיר חיצוני לפי דרישה 1.2, הועדף צד החלון: {window_side_single}."
             )
             external_sides_hint = {window_side_single}
+            external_sides_hint_overridden = True
+
+        # If both window and door appear on the same side, door-side inference is often noisy/misaligned
+        # for REQ 1.2. Prefer the window side and avoid treating this as a blocking external-context conflict.
+        door_sides_effective = set(door_sides)
+        window_vs_door_overlap = bool(window_side_single and (window_side_single in door_sides_effective))
+        if window_vs_door_overlap and strong_window_signal:
+            external_context_conflict = False
+            door_sides_effective.discard(window_side_single)
+            data.setdefault("_validator_notes", [])
+            if isinstance(data.get("_validator_notes"), list):
+                data["_validator_notes"].append(
+                    {
+                        "element": "external_wall_context_conflict_relaxed",
+                        "text": (
+                            "זוהתה חפיפה בין צד חלון ממ\"ד לבין צד דלת ממ\"ד; "
+                            "לצורך בדיקת 1.2 הועדף צד החלון ולא הופעלה חסימת 'סתירת הקשר'."
+                        ),
+                    }
+                )
+
+        # If we had to override the inferred external sides with a single window side, the floor-plan-derived
+        # external wall count becomes unreliable. Do not use it to enforce stricter 30/40cm thresholds.
+        # This prevents false failures when cross-segment side mapping is inconsistent (e.g., mirrored crops).
+        external_wall_count_reported: Optional[int] = num_external_known
+        if (
+            external_sides_hint_overridden
+            and external_wall_count_source == "floor_plan_inference"
+            and num_external_known is not None
+            and external_sides_hint
+            and len(external_sides_hint) != num_external_known
+        ):
+            note = (
+                "ספירת קירות החוץ הוסקה מתכנית קומה אך קיימת סתירה עם צד החלון בתכנית הממ\"ד, "
+                "ולכן הספירה אינה נחשבת אמינה לצורך קביעת רף 30/40 ס\"מ."
+            )
+            data.setdefault("_validator_notes", [])
+            if isinstance(data.get("_validator_notes"), list):
+                data["_validator_notes"].append({"element": "external_wall_count_discarded", "text": note})
+            num_external_known = None
+
+        # If we intentionally collapsed external side mapping to a single window side, assume 1 external wall.
+        # This is a narrow heuristic motivated by common real-world drawings and prevents REQ 1.2 from being
+        # perpetually not_checked due to "unknown count" when the only reliable external indicator is the window.
+        if num_external_known is None and external_sides_hint_overridden and window_side_single and strong_window_signal:
+            num_external_known = 1
+            data.setdefault("_validator_notes", [])
+            if isinstance(data.get("_validator_notes"), list):
+                data["_validator_notes"].append(
+                    {
+                        "element": "external_wall_count_inferred_from_window_side",
+                        "text": "הוסקה ספירת קירות חוץ = 1 לפי צד חלון יחיד בתכנית הממ\"ד לצורך בדיקת 1.2.",
+                    }
+                )
 
         # If the segment is a ROOM_LAYOUT/DETAIL-like crop and the external-wall count is provided without
         # any supporting source/evidence, treat it as uncertain to avoid false strict thickness rules (30/40).
@@ -1199,7 +1323,7 @@ class MamadValidator:
                 wall_side_hints |= _infer_sides_from_any(wall.get("evidence"))
 
             exposure = _classify_wall_exposure(wall_location, wall_type, wall=wall)
-            opening_adjacent = _is_opening_adjacent_wall(wall)
+            opening_adjacent = _is_opening_adjacent_wall(wall) or ("wall_thickness_focus" in wall_context_lower)
 
             # If the model is clearly hedging, do not treat sub-25cm values as external wall thickness.
             # This avoids hard failures from guessed/uncertain callouts.
@@ -1233,7 +1357,7 @@ class MamadValidator:
                     explicit_external_thicknesses.append(thickness_cm)
                 # If this wall references multiple sides, treat them as external unless a MAMAD door marks a side internal.
                 if wall_side_hints:
-                    external_sides_inferred |= (wall_side_hints - door_sides)
+                    external_sides_inferred |= (wall_side_hints - door_sides_effective)
             elif exposure == "internal":
                 parsed_internal_thicknesses.append(thickness_cm)
                 if wall_side_hints:
@@ -1252,18 +1376,23 @@ class MamadValidator:
                 )
             )
 
-        # If we have a known total external wall count (possibly inferred from a floor plan),
-        # attach it as evidence so the UI can explain why a specific minimum thickness was chosen.
-        if num_external_known is not None:
+        # If we have an external wall count from upstream inference, attach it as evidence.
+        # Note: In some conflict scenarios we deliberately *discard* the count for thresholding,
+        # but still want it visible for debugging.
+        if external_wall_count_reported is not None:
+            used_for_requirement = bool(
+                num_external_known is not None and external_wall_count_reported == num_external_known
+            )
             evidence.append(
                 self._evidence_dimension(
-                    value=float(num_external_known),
+                    value=float(external_wall_count_reported),
                     unit="count",
                     element="external_wall_count",
                     location=external_wall_count_source or "external_wall_count",
                     raw={
                         "source": external_wall_count_source or None,
                         "confidence": external_wall_count_confidence,
+                        "used_for_requirement": used_for_requirement,
                     },
                 )
             )
@@ -1374,7 +1503,7 @@ class MamadValidator:
             # If the <25cm value came from heuristic classification (no explicit "external" markers),
             # be conservative: report not_checked instead of failing.
             min_explicit = min(explicit_external_thicknesses) if explicit_external_thicknesses else None
-            if external_context_conflict:
+            if external_context_conflict and (min_explicit is None or min_explicit >= 25):
                 self._add_requirement_evaluation(
                     "1.2",
                     "not_checked",
