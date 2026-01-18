@@ -129,9 +129,18 @@ class ValidationEngine:
                 data.external_wall_count,
                 data.wall_with_window or False
             )
-            
-            min_thickness = min(data.wall_thickness_cm)
-            if min_thickness < required_thickness:
+
+            thickness_values = [t for t in data.wall_thickness_cm if t is not None]
+            if thickness_values:
+                sorted_thickness = sorted(thickness_values, reverse=True)
+                if len(sorted_thickness) >= data.external_wall_count:
+                    min_thickness = min(sorted_thickness[:data.external_wall_count])
+                else:
+                    min_thickness = min(sorted_thickness)
+            else:
+                min_thickness = None
+
+            if min_thickness is not None and min_thickness < required_thickness:
                 rule_id = f"1.2_wall_thickness_{data.external_wall_count}_wall{'s' if data.external_wall_count > 1 else ''}"
                 rule = self.parser.get_rule_by_id(rule_id)
                 if rule:

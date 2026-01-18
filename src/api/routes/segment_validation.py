@@ -406,8 +406,11 @@ async def validate_segments(request: SegmentValidationRequest):
                                 thickness_cm = w.get("thickness_cm")
                                 conf = w.get("confidence")
                                 location = w.get("location")
+                                side = w.get("side")
                                 evidence = w.get("evidence")
                                 if thickness_cm is not None:
+                                    if (not location) and isinstance(side, str) and side.strip():
+                                        location = f"{side.strip()} wall"
                                     base["structural_elements"].append(
                                         {
                                             "type": "wall",
@@ -416,6 +419,7 @@ async def validate_segments(request: SegmentValidationRequest):
                                             "notes": "wall_thickness_focus",
                                             "confidence": conf,
                                             "evidence": evidence,
+                                            "side": side,
                                         }
                                     )
                                     base["dimensions"].append(

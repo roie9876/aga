@@ -701,7 +701,8 @@ Return JSON:
       {{
         "thickness_cm": 0.0,
         "confidence": 0.0,
-                "location": "short description",
+                                "side": "left|right|top|bottom|null",
+                                "location": "short description",
         "evidence": ["evidence strings"]
       }}
     ]
@@ -712,6 +713,8 @@ Return JSON:
 Rules:
 - If units are absent, assume cm.
 - If possible, include a SIDE hint relative to the ממ"ד room in `location`:
+- If possible, fill `side` with one of: left/right/top/bottom (or null if unclear).
+- Also include a SIDE hint relative to the ממ"ד room in `location`:
     - Use one of: left/right/top/bottom (or Hebrew: שמאל/ימין/עליון/תחתון)
     - Example locations: "left wall (שמאל)", "top wall ליד חלון", "right wall ליד דלת"
 - Do NOT guess outside/inside here unless the drawing explicitly shows it.
