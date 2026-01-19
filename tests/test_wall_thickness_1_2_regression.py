@@ -74,3 +74,44 @@ def test_wall_thickness_does_not_hard_fail_on_opening_detail_segment():
 
     # The key regression: do not mark as FAILED based on ambiguous opening-detail thickness.
     assert ev_12[0].get("status") != "failed"
+
+
+def test_wall_thickness_top_view_without_explicit_external_text_is_not_failed():
+    v = MamadValidator()
+
+    analysis_data = {
+        "classification": {
+            "primary_category": "ROOM_LAYOUT",
+            "secondary_categories": [],
+            "view_type": "top_view",
+            "relevant_requirements": ["1.2"],
+        },
+        "summary": {"primary_function": "floor_plan"},
+        "content_tags": ["mamad_plan_1_15"],
+        "text_items": [
+            {"text": 'תכנית הממ"ד', "language": "hebrew", "type": "title"},
+            {"text": 'קנ"מ 1:50', "language": "hebrew", "type": "note"},
+        ],
+        "external_wall_count": 4,
+        "external_wall_count_source": "floor_plan_inference",
+        "external_wall_count_confidence": 0.88,
+        "structural_elements": [
+            {
+                "type": "wall",
+                "thickness": "20 cm",
+                "location": "outer perimeter wall thickness label near top-right",
+                "notes": "",
+            },
+            {
+                "type": "wall",
+                "thickness": "25 cm",
+                "location": "left wall",
+                "notes": "",
+            },
+        ],
+    }
+
+    result = v.validate_segment(analysis_data, demo_mode=True)
+    ev_12 = [e for e in result.get("requirement_evaluations", []) if e.get("requirement_id") == "1.2"]
+    assert ev_12, "Expected a 1.2 evaluation"
+    assert ev_12[0].get("status") != "failed"

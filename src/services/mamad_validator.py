@@ -1487,6 +1487,20 @@ class MamadValidator:
             parsed_external_thicknesses_non_opening if parsed_external_thicknesses_non_opening else parsed_external_thicknesses
         )
 
+        def _has_explicit_external_text(text: str) -> bool:
+            t = (text or "").lower()
+            if not t:
+                return False
+            if any(p in t for p in ["external wall", "outer wall", "perimeter wall", "exterior wall"]):
+                return True
+            if "קיר" in t and "חיצונ" in t:
+                return True
+            if "קיר" in t and any(k in t for k in ["מעטפת", "היקפ", "חזית"]):
+                return True
+            return False
+
+        explicit_external_text_present = _has_explicit_external_text(all_text_lower)
+
         # Absolute minimum: any external wall thinner than 25cm is always non-compliant (independent of wall count).
         min_external_thickness = min(external_thicknesses_for_min)
         if min_external_thickness < 25:
@@ -1525,6 +1539,28 @@ class MamadValidator:
                             location="external_wall_minimum",
                         ),
                     ],
+                )
+                return False
+
+            # In top-view MAMAD plans, avoid hard-failing on <25cm unless the drawing explicitly labels an external wall.
+            if floor_plan_like and not explicit_external_text_present:
+                self._add_requirement_evaluation(
+                    "1.2",
+                    "not_checked",
+                    reason_not_checked="ambiguous_thin_wall_candidate",
+                    evidence=evidence
+                    + [
+                        self._evidence_dimension(
+                            value=required_min_for_message,
+                            unit="cm",
+                            element="required_min_wall_thickness_absolute",
+                            location="external_wall_minimum",
+                        )
+                    ],
+                    notes_he=(
+                        f"זוהתה מידה {min_external_thickness:.0f} ס\"מ שעשויה להתפרש כעובי קיר, אך אין סימון טקסטואלי מפורש "
+                        "לקיר חיצוני בתכנית. כדי למנוע כשל שווא, בדיקת 1.2 סומנה כ'לא נבדק' במקרה זה."
+                    ),
                 )
                 return False
 
